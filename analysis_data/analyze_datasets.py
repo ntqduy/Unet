@@ -15,16 +15,55 @@ if str(PROJECT_ROOT) not in sys.path:
 import torch
 from torchvision.io import ImageReadMode, read_image
 
-from dataloaders.dataset import (
-    dataset_uses_binary_masks,
-    find_manifest_path,
-    list_existing_splits,
-    normalize_mask,
-    scan_dataset_records,
-)
+from dataloaders import dataset as dataset_module
 
 DATA_ROOT = PROJECT_ROOT / "data"
 REPORT_ROOT = PROJECT_ROOT / "analysis_data" / "reports"
+FALLBACK_BINARY_MASK_DATASETS = {"cvc", "cvc_clinicdb", "kvasir", "kvasir_seg"}
+
+find_manifest_path = dataset_module.find_manifest_path
+list_existing_splits = dataset_module.list_existing_splits
+scan_dataset_records = dataset_module.scan_dataset_records
+
+
+def dataset_uses_binary_masks(dataset_name: str) -> bool:
+    helper = getattr(dataset_module, "dataset_uses_binary_masks", None)
+    if callable(helper):
+        return helper(dataset_name)
+    return dataset_name.lower() in FALLBACK_BINARY_MASK_DATASETS
+
+
+def normalize_mask(mask: torch.Tensor, force_binary: bool = False) -> torch.Tensor:
+    helper = getattr(dataset_module, "normalize_mask", None)
+    if callable(helper):
+        return helper(mask, force_binary=force_binary)
+
+    legacy_helper = getattr(dataset_module, "_normalize_mask", None)
+    if callable(legacy_helper):
+        if not force_binary:
+            return legacy_helper(mask)
+        try:
+            return legacy_helper(mask, force_binary=True)
+        except TypeError:
+            pass
+
+    mask = mask.squeeze(0).long()
+    unique_values = torch.unique(mask)
+    if unique_values.numel() == 0:
+        return mask
+    if force_binary:
+        if unique_values.max().item() <= 1:
+            return mask
+        return (mask >= 127).long()
+    if unique_values.numel() <= 2 and unique_values.max().item() > 1:
+        return (mask > 0).long()
+    contiguous = torch.arange(unique_values.numel(), device=mask.device, dtype=unique_values.dtype)
+    if unique_values.min().item() == 0 and torch.equal(unique_values, contiguous):
+        return mask
+    remapped = torch.zeros_like(mask)
+    for class_index, value in enumerate(unique_values.tolist()):
+        remapped[mask == value] = class_index
+    return remapped.long()
 
 
 def _read_case_ids(manifest_path: Path) -> List[str]:
