@@ -20,6 +20,9 @@ IMAGE_HINTS = ("image", "images", "original")
 IGNORE_HINTS = ("bbox", "bounding")
 DEFAULT_SPLIT_RATIOS = (0.8, 0.1, 0.1)
 MANIFEST_SEARCH_SUBDIRS = ("splits", "")
+BINARY_MASK_THRESHOLD = 127
+BINARY_MASK_DATASETS = {"cvc", "cvc_clinicdb", "kvasir", "kvasir_seg"}
+BINARY_MASK_PATH_HINTS = ("kvasir", "cvc-clinicdb", "cvc_clinicdb")
 
 
 @dataclass(frozen=True)
@@ -45,11 +48,26 @@ def _resize_sample(image: torch.Tensor, label: torch.Tensor, size: Tuple[int, in
     return image, label
 
 
-def _normalize_mask(mask: torch.Tensor) -> torch.Tensor:
+def dataset_uses_binary_masks(dataset_name: str) -> bool:
+    return dataset_name.lower() in BINARY_MASK_DATASETS
+
+
+def dataset_root_uses_binary_masks(base_dir: Union[str, Path]) -> bool:
+    base_dir = Path(base_dir).expanduser().resolve()
+    lowered_parts = tuple(part.lower() for part in base_dir.parts)
+    return any(any(hint in part for hint in BINARY_MASK_PATH_HINTS) for part in lowered_parts)
+
+
+def normalize_mask(mask: torch.Tensor, force_binary: bool = False) -> torch.Tensor:
     mask = mask.squeeze(0).long()
     unique_values = torch.unique(mask)
     if unique_values.numel() == 0:
         return mask
+    if force_binary:
+        if unique_values.max().item() <= 1:
+            return mask
+        # Recover binary labels from masks saved with JPEG artifacts or anti-aliased edges.
+        return (mask >= BINARY_MASK_THRESHOLD).long()
     if unique_values.numel() <= 2 and unique_values.max().item() > 1:
         return (mask > 0).long()
     contiguous = torch.arange(unique_values.numel(), device=mask.device, dtype=unique_values.dtype)
@@ -59,6 +77,10 @@ def _normalize_mask(mask: torch.Tensor) -> torch.Tensor:
     for class_index, value in enumerate(unique_values.tolist()):
         remapped[mask == value] = class_index
     return remapped.long()
+
+
+def _normalize_mask(mask: torch.Tensor, force_binary: bool = False) -> torch.Tensor:
+    return normalize_mask(mask, force_binary=force_binary)
 
 
 def _path_parts_lower(path: Path) -> Tuple[str, ...]:
@@ -263,12 +285,14 @@ class SegmentationDataset2D(Dataset):
         transform: Optional[Callable[[Dict[str, torch.Tensor]], Dict[str, torch.Tensor]]] = None,
         image_mode: str = "rgb",
         split_ratios: Sequence[float] = DEFAULT_SPLIT_RATIOS,
+        force_binary_masks: bool = False,
     ) -> None:
         self.base_dir = Path(base_dir).expanduser().resolve()
         self.split = split.lower()
         self.transform = transform or ToTensor()
         self.image_mode = image_mode.lower()
         self.split_ratios = tuple(float(value) for value in split_ratios)
+        self.force_binary_masks = force_binary_masks or dataset_root_uses_binary_masks(self.base_dir)
 
         if self.image_mode not in {"rgb", "grayscale"}:
             raise ValueError("image_mode must be either 'rgb' or 'grayscale'.")
@@ -289,7 +313,7 @@ class SegmentationDataset2D(Dataset):
 
     def _load_mask(self, mask_path: Path) -> torch.Tensor:
         mask = read_image(str(mask_path), mode=ImageReadMode.GRAY)
-        return _normalize_mask(mask)
+        return normalize_mask(mask, force_binary=self.force_binary_masks)
 
     def __getitem__(self, index: int) -> Dict[str, torch.Tensor]:
         record = self.records[index]
@@ -304,11 +328,15 @@ class SegmentationDataset2D(Dataset):
 
 
 class CVCClinicDB(SegmentationDataset2D):
-    pass
+    def __init__(self, *args, **kwargs) -> None:
+        kwargs.setdefault("force_binary_masks", True)
+        super().__init__(*args, **kwargs)
 
 
 class KvasirSEG(SegmentationDataset2D):
-    pass
+    def __init__(self, *args, **kwargs) -> None:
+        kwargs.setdefault("force_binary_masks", True)
+        super().__init__(*args, **kwargs)
 
 
 class Cyst2D(SegmentationDataset2D):

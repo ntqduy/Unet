@@ -74,6 +74,32 @@ def save_validation_visualizations(vis_samples, output_dir):
         )
 
 
+def validate_label_batch(label_batch, num_classes, sampled_batch):
+    label_batch = label_batch.long()
+    invalid_mask = (label_batch < 0) | (label_batch >= num_classes)
+    if not invalid_mask.any():
+        return
+
+    unique_values = torch.unique(label_batch.cpu()).tolist()
+    invalid_values = torch.unique(label_batch[invalid_mask].cpu()).tolist()
+    case_names = sampled_batch.get("case", [])
+    label_paths = sampled_batch.get("label_path", [])
+
+    if not isinstance(case_names, (list, tuple)):
+        case_names = [case_names]
+    if not isinstance(label_paths, (list, tuple)):
+        label_paths = [label_paths]
+
+    raise ValueError(
+        f"Found mask values outside [0, {num_classes - 1}] in the current batch. "
+        f"Invalid values: {invalid_values[:20]}. "
+        f"Unique label values: {unique_values[:20]}. "
+        f"Cases: {[str(value) for value in case_names[:4]]}. "
+        f"Label paths: {[str(value) for value in label_paths[:2]]}. "
+        "This usually means binary masks were not normalized to 0/1 before training."
+    )
+
+
 def run_validation(args, model, valloader, device):
     model.eval()
     metric_list = []
@@ -81,6 +107,7 @@ def run_validation(args, model, valloader, device):
 
     with torch.no_grad():
         for sampled_val in valloader:
+            validate_label_batch(sampled_val["label"], args.num_classes, sampled_val)
             need_prediction = bool(args.save_visualizations) and len(vis_samples) < args.vis_num_samples
             metric_output = val_2d.test_single_volume(
                 sampled_val["image"],
@@ -137,6 +164,11 @@ def train(args, snapshot_path):
         split=args.val_split,
         transform=eval_transform,
         image_mode=image_mode,
+    )
+    logging.info(
+        "Binary mask normalization | train: %s | val: %s",
+        getattr(db_train, "force_binary_masks", False),
+        getattr(db_val, "force_binary_masks", False),
     )
 
     model_kwargs = {"mode": "train"}
@@ -221,8 +253,10 @@ def train(args, snapshot_path):
             epoch_losses = []
 
             for sampled_batch in trainloader:
+                label_batch = sampled_batch["label"]
+                validate_label_batch(label_batch, args.num_classes, sampled_batch)
                 image_batch = sampled_batch["image"].to(device)
-                label_batch = sampled_batch["label"].to(device)
+                label_batch = label_batch.to(device)
 
                 logits = extract_logits(model(image_batch))
                 loss_ce = ce_loss(logits, label_batch.long())
@@ -257,8 +291,10 @@ def train(args, snapshot_path):
             epoch_losses = []
 
             for sampled_batch in trainloader:
+                label_batch = sampled_batch["label"]
+                validate_label_batch(label_batch, args.num_classes, sampled_batch)
                 image_batch = sampled_batch["image"].to(device)
-                label_batch = sampled_batch["label"].to(device)
+                label_batch = label_batch.to(device)
 
                 logits = extract_logits(model(image_batch))
                 loss_ce = ce_loss(logits, label_batch.long())
