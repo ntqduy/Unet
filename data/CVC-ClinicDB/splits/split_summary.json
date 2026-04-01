@@ -1,0 +1,11 @@
+﻿{
+    "dataset":  "cvc_clinicdb",
+    "seed":  1337,
+    "total_cases":  612,
+    "train_count":  429,
+    "val_ratio":  0.1,
+    "test_count":  122,
+    "note":  "Stable train/val/test split generated from PNG pairs.",
+    "test_ratio":  0.2,
+    "val_count":  61
+}

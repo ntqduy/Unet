@@ -1,0 +1,10 @@
+﻿{
+    "note":  "Official val.txt promoted to test.txt; new val split sampled from official train.txt.",
+    "generated_train_count":  792,
+    "generated_test_count":  120,
+    "official_val_count":  120,
+    "generated_val_count":  88,
+    "seed":  1337,
+    "official_train_count":  880,
+    "dataset":  "kvasir_seg"
+}

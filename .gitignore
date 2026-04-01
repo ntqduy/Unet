@@ -1,0 +1,57 @@
+# Python cache
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+
+# Packaging / build
+build/
+dist/
+*.egg-info/
+
+# Test / tooling cache
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Virtual environments
+.venv/
+venv/
+env/
+
+# IDE / editor
+.vscode/
+.idea/
+*.code-workspace
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Training and evaluation artifacts
+logs/
+*.pth
+*.pt
+*.ckpt
+
+# Temporary helper files
+*_tmp.py
+*_tmp.md
+
+# Local notes
+data/save_data.txt
+
+# Dataset archives
+data/*.zip
+
+# Ignore raw CVC-ClinicDB data but keep stable split manifests
+data/CVC-ClinicDB/**
+!data/CVC-ClinicDB/
+!data/CVC-ClinicDB/splits/
+!data/CVC-ClinicDB/splits/**
+
+# Ignore raw Kvasir-SEG data but keep stable split manifests
+data/Kvasir-SEG/**
+!data/Kvasir-SEG/
+!data/Kvasir-SEG/splits/
+!data/Kvasir-SEG/splits/**
