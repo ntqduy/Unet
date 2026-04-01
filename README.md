@@ -109,7 +109,8 @@ python train2d.py \
   --train_split train \
   --val_split val \
   --batch_size 8 \
-  --max_iterations 30000
+  --max_epochs 100 \
+  --eval_interval_epochs 1
 ```
 
 Example (CVC + UNet-ResNet152):
@@ -121,7 +122,19 @@ python train2d.py \
   --model unet_resnet152 \
   --train_split train \
   --val_split val \
+  --max_epochs 100 \
   --encoder_pretrained 1
+```
+
+Legacy iteration-based training is still available:
+
+```bash
+python train2d.py \
+  --dataset kvasir \
+  --root_path data/Kvasir-SEG \
+  --model unet \
+  --max_iterations 30000 \
+  --eval_interval 20
 ```
 
 Checkpoints and logs are saved under:
@@ -149,6 +162,10 @@ Test outputs:
 - `--root_path`: dataset root path.
 - `--dataset`: `cvc`, `cvc_clinicdb`, `kvasir`, `kvasir_seg`, `cyst2d`, `generic`.
 - `--model`: one of models listed by `networks/net_factory.py`.
+- `--max_epochs`: number of training epochs. When set, training/validation runs in epoch mode.
+- `--eval_interval_epochs`: validate every N epochs in epoch mode.
+- `--max_iterations`: legacy stopping criterion for iteration-based training.
+- `--eval_interval`: validate every N iterations in iteration mode.
 - `--patch_size H W`: default `256 256`.
 - `--num_classes`: default `2`.
 - `--in_channels`: `1` (grayscale) or `3` (rgb).

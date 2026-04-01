@@ -41,8 +41,10 @@ parser.add_argument("--exp", type=str, default="supervised", help="experiment na
 parser.add_argument("--model", type=str, default="unet", choices=list_models(), help="model name")
 parser.add_argument("--train_split", type=str, default="train", choices=["train", "val", "test"], help="training split")
 parser.add_argument("--val_split", type=str, default="val", choices=["train", "val", "test"], help="evaluation split")
-parser.add_argument("--max_iterations", type=int, default=30000)
-parser.add_argument("--eval_interval", type=int, default=20)
+parser.add_argument("--max_epochs", type=int, default=None, help="number of training epochs; overrides max_iterations when set")
+parser.add_argument("--max_iterations", type=int, default=30000, help="maximum training iterations for legacy iteration-based training")
+parser.add_argument("--eval_interval", type=int, default=20, help="validation interval in iterations for iteration-based training")
+parser.add_argument("--eval_interval_epochs", type=int, default=1, help="validation interval in epochs for epoch-based training")
 parser.add_argument("--batch_size", type=int, default=8)
 parser.add_argument("--base_lr", type=float, default=0.01)
 parser.add_argument("--patch_size", nargs=2, type=int, default=[256, 256])
@@ -70,6 +72,48 @@ def save_validation_visualizations(vis_samples, output_dir):
             output_dir=output_dir,
             case_name=sample["case"],
         )
+
+
+def run_validation(args, model, valloader, device):
+    model.eval()
+    metric_list = []
+    vis_samples = []
+
+    with torch.no_grad():
+        for sampled_val in valloader:
+            need_prediction = bool(args.save_visualizations) and len(vis_samples) < args.vis_num_samples
+            metric_output = val_2d.test_single_volume(
+                sampled_val["image"],
+                sampled_val["label"],
+                model,
+                classes=args.num_classes,
+                patch_size=args.patch_size,
+                device=device,
+                return_prediction=need_prediction,
+            )
+
+            if need_prediction:
+                metric_i, prediction = metric_output
+                case_name = sampled_val["case"][0] if isinstance(sampled_val["case"], (list, tuple)) else str(sampled_val["case"])
+                vis_samples.append(
+                    {
+                        "case": case_name,
+                        "image": sampled_val["image"][0],
+                        "label": sampled_val["label"][0],
+                        "prediction": prediction[0],
+                    }
+                )
+            else:
+                metric_i = metric_output
+
+            metric_list.append(np.array(metric_i))
+
+    if not metric_list:
+        raise ValueError("Validation dataset is empty; cannot compute metrics.")
+
+    metric_array = np.stack(metric_list, axis=0).mean(axis=0)
+    performance = float(np.mean(metric_array[:, 0]))
+    return performance, vis_samples
 
 
 def train(args, snapshot_path):
@@ -125,94 +169,134 @@ def train(args, snapshot_path):
         num_workers=1,
         pin_memory=device.type == "cuda",
     )
+    iterations_per_epoch = len(trainloader)
+    if iterations_per_epoch == 0:
+        raise ValueError("Training dataset is empty; cannot start training.")
 
     optimizer = optim.SGD(model.parameters(), lr=args.base_lr, momentum=0.9, weight_decay=1e-4)
     ce_loss = CrossEntropyLoss()
 
+    if args.max_epochs is not None and args.max_epochs <= 0:
+        raise ValueError("--max_epochs must be a positive integer.")
+    if args.max_epochs is None and args.max_iterations <= 0:
+        raise ValueError("--max_iterations must be a positive integer when --max_epochs is not set.")
+    if args.eval_interval <= 0:
+        raise ValueError("--eval_interval must be a positive integer.")
+    if args.eval_interval_epochs <= 0:
+        raise ValueError("--eval_interval_epochs must be a positive integer.")
+
     logging.info("Start training")
-    logging.info("%d iterations per epoch", len(trainloader))
+    logging.info("%d iterations per epoch", iterations_per_epoch)
     logging.info("Train split: %s | Val split: %s", args.train_split, args.val_split)
 
     model.train()
     iter_num = 0
     best_performance = 0.0
-    max_epoch = args.max_iterations // max(len(trainloader), 1) + 1
 
-    for _ in tqdm(range(max_epoch), ncols=70):
-        for sampled_batch in trainloader:
-            image_batch = sampled_batch["image"].to(device)
-            label_batch = sampled_batch["label"].to(device)
+    def evaluate_and_checkpoint(metric_prefix, log_prefix, vis_subdir):
+        nonlocal best_performance
 
-            logits = extract_logits(model(image_batch))
-            loss_ce = ce_loss(logits, label_batch.long())
-            outputs_soft = torch.softmax(logits, dim=1)
-            loss_dice = dice_loss(outputs_soft, label_batch.unsqueeze(1))
-            loss = 0.5 * (loss_ce + loss_dice)
+        performance, vis_samples = run_validation(args, model, valloader, device)
 
-            optimizer.zero_grad()
-            loss.backward()
-            optimizer.step()
+        if performance > best_performance:
+            best_performance = performance
+            save_mode_path = Path(snapshot_path) / f"{metric_prefix}_dice_{round(best_performance, 4)}.pth"
+            save_best_path = Path(snapshot_path) / f"{args.model}_best_model.pth"
+            torch.save(model.state_dict(), save_mode_path)
+            torch.save(model.state_dict(), save_best_path)
+            logging.info("save best model to %s", save_mode_path)
 
-            iter_num += 1
-            logging.info("iteration %d : loss : %f", iter_num, loss.item())
+            if args.save_visualizations and vis_samples:
+                vis_dir = Path(snapshot_path) / "visualizations" / vis_subdir
+                save_validation_visualizations(vis_samples, vis_dir)
 
-            if iter_num % args.eval_interval == 0:
-                model.eval()
-                metric_list = []
-                vis_samples = []
+        logging.info("%s : mean_dice : %f", log_prefix, performance)
+        model.train()
 
-                with torch.no_grad():
-                    for sampled_val in valloader:
-                        need_prediction = bool(args.save_visualizations) and len(vis_samples) < args.vis_num_samples
-                        metric_output = val_2d.test_single_volume(
-                            sampled_val["image"],
-                            sampled_val["label"],
-                            model,
-                            classes=args.num_classes,
-                            patch_size=args.patch_size,
-                            device=device,
-                            return_prediction=need_prediction,
-                        )
+    if args.max_epochs is not None:
+        logging.info("Training mode: epoch-based")
+        logging.info("Max epochs: %d | Validation every %d epoch(s)", args.max_epochs, args.eval_interval_epochs)
 
-                        if need_prediction:
-                            metric_i, prediction = metric_output
-                            case_name = sampled_val["case"][0] if isinstance(sampled_val["case"], (list, tuple)) else str(sampled_val["case"])
-                            vis_samples.append(
-                                {
-                                    "case": case_name,
-                                    "image": sampled_val["image"][0],
-                                    "label": sampled_val["label"][0],
-                                    "prediction": prediction[0],
-                                }
-                            )
-                        else:
-                            metric_i = metric_output
+        for epoch_num in tqdm(range(1, args.max_epochs + 1), ncols=70):
+            epoch_losses = []
 
-                        metric_list.append(np.array(metric_i))
+            for sampled_batch in trainloader:
+                image_batch = sampled_batch["image"].to(device)
+                label_batch = sampled_batch["label"].to(device)
 
-                metric_array = np.stack(metric_list, axis=0).mean(axis=0)
-                performance = float(np.mean(metric_array[:, 0]))
+                logits = extract_logits(model(image_batch))
+                loss_ce = ce_loss(logits, label_batch.long())
+                outputs_soft = torch.softmax(logits, dim=1)
+                loss_dice = dice_loss(outputs_soft, label_batch.unsqueeze(1))
+                loss = 0.5 * (loss_ce + loss_dice)
 
-                if performance > best_performance:
-                    best_performance = performance
-                    save_mode_path = Path(snapshot_path) / f"iter_{iter_num}_dice_{round(best_performance, 4)}.pth"
-                    save_best_path = Path(snapshot_path) / f"{args.model}_best_model.pth"
-                    torch.save(model.state_dict(), save_mode_path)
-                    torch.save(model.state_dict(), save_best_path)
-                    logging.info("save best model to %s", save_mode_path)
+                optimizer.zero_grad()
+                loss.backward()
+                optimizer.step()
 
-                    if args.save_visualizations and vis_samples:
-                        vis_dir = Path(snapshot_path) / "visualizations" / f"iter_{iter_num}"
-                        save_validation_visualizations(vis_samples, vis_dir)
+                iter_num += 1
+                epoch_losses.append(loss.item())
+                logging.info("epoch %d/%d iteration %d : loss : %f", epoch_num, args.max_epochs, iter_num, loss.item())
 
-                logging.info("iteration %d : mean_dice : %f", iter_num, performance)
-                model.train()
+            epoch_loss = float(np.mean(epoch_losses))
+            logging.info("epoch %d/%d : mean_loss : %f", epoch_num, args.max_epochs, epoch_loss)
+
+            should_eval = (epoch_num % args.eval_interval_epochs == 0) or (epoch_num == args.max_epochs)
+            if should_eval:
+                evaluate_and_checkpoint(
+                    metric_prefix=f"epoch_{epoch_num}_iter_{iter_num}",
+                    log_prefix=f"epoch {epoch_num}/{args.max_epochs} iteration {iter_num}",
+                    vis_subdir=f"epoch_{epoch_num}_iter_{iter_num}",
+                )
+    else:
+        max_epoch = (args.max_iterations + iterations_per_epoch - 1) // iterations_per_epoch
+        logging.info("Training mode: iteration-based")
+        logging.info("Max iterations: %d | Validation every %d iteration(s)", args.max_iterations, args.eval_interval)
+
+        for epoch_num in tqdm(range(1, max_epoch + 1), ncols=70):
+            epoch_losses = []
+
+            for sampled_batch in trainloader:
+                image_batch = sampled_batch["image"].to(device)
+                label_batch = sampled_batch["label"].to(device)
+
+                logits = extract_logits(model(image_batch))
+                loss_ce = ce_loss(logits, label_batch.long())
+                outputs_soft = torch.softmax(logits, dim=1)
+                loss_dice = dice_loss(outputs_soft, label_batch.unsqueeze(1))
+                loss = 0.5 * (loss_ce + loss_dice)
+
+                optimizer.zero_grad()
+                loss.backward()
+                optimizer.step()
+
+                iter_num += 1
+                epoch_losses.append(loss.item())
+                logging.info(
+                    "epoch %d/%d iteration %d/%d : loss : %f",
+                    epoch_num,
+                    max_epoch,
+                    iter_num,
+                    args.max_iterations,
+                    loss.item(),
+                )
+
+                should_eval = (iter_num % args.eval_interval == 0) or (iter_num == args.max_iterations)
+                if should_eval:
+                    evaluate_and_checkpoint(
+                        metric_prefix=f"iter_{iter_num}",
+                        log_prefix=f"epoch {epoch_num}/{max_epoch} iteration {iter_num}/{args.max_iterations}",
+                        vis_subdir=f"iter_{iter_num}",
+                    )
+
+                if iter_num >= args.max_iterations:
+                    break
+
+            epoch_loss = float(np.mean(epoch_losses))
+            logging.info("epoch %d/%d : mean_loss : %f", epoch_num, max_epoch, epoch_loss)
 
             if iter_num >= args.max_iterations:
                 break
-
-        if iter_num >= args.max_iterations:
-            break
 
 
 if __name__ == "__main__":
