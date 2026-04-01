@@ -1,45 +1,34 @@
-# 2D Segmentation Training Workspace
+# 2D Medical Image Segmentation Workspace
 
-This project is organized as a clean 2D medical/polyp segmentation workspace.
-The root pipeline is:
+This repository contains a complete 2D segmentation pipeline for CVC-ClinicDB and Kvasir-SEG.
+It supports data split management, model training, evaluation, and visualization.
 
-- `train2d.py`
-- `test2d.py`
-- `dataloaders/`
-- `networks/`
-- `utils/`
-- `analysis_data/`
+## 1. Main Features
 
-## Project Architecture
+- Unified dataloader that auto-matches image/mask pairs from common folder layouts.
+- Multiple segmentation backbones through one model factory:
+  - `unet`
+  - `unet_resnet152`
+  - `resunet`
+  - `vnet`
+  - `unetr`
+- Training with CrossEntropy + Dice loss.
+- Validation/testing with Dice and HD95.
+- Built-in qualitative outputs (image / ground truth / prediction / panel).
+- Dataset utilities for deterministic split generation and statistics reports.
 
-### Directory Architecture
+## 2. Project Structure
 
 ```text
 Code/
 |-- train2d.py
 |-- test2d.py
-|-- README.md
-|-- data/
-|   |-- CVC-ClinicDB/
-|   |   |-- PNG/
-|   |   |-- TIF/
-|   |   `-- splits/
-|   |       |-- train.txt
-|   |       |-- val.txt
-|   |       `-- test.txt
-|   `-- Kvasir-SEG/
-|       |-- Kvasir-SEG/
-|       |-- train.txt
-|       |-- val.txt
-|       `-- splits/
-|           |-- train.txt
-|           |-- val.txt
-|           `-- test.txt
+|-- requirements.txt
 |-- dataloaders/
 |   `-- dataset.py
 |-- networks/
-|   |-- common.py
 |   |-- net_factory.py
+|   |-- common.py
 |   |-- unet.py
 |   |-- Unet_restnet.py
 |   |-- residual_unet.py
@@ -50,175 +39,123 @@ Code/
 |   |-- val_2d.py
 |   `-- visualization.py
 |-- analysis_data/
-|   |-- README.md
 |   |-- generate_splits.py
 |   |-- analyze_datasets.py
 |   `-- reports/
-`-- logs/
-    `-- model/
-        `-- supervised/
-            `-- <exp>/
+`-- data/
 ```
 
-### Training and Evaluation Flow
+## 3. Environment Setup
 
-```mermaid
-flowchart TD
-    A[Dataset root] --> B[splits/train.txt or val.txt or test.txt]
-    B --> C[dataloaders/dataset.py]
-    C --> D[Normalize + Augment + Resize]
-    D --> E[DataLoader]
-    E --> F[net_factory.py]
-    F --> G[Model: UNet / UNet-ResNet152 / ResUNet / VNet / UNETR]
-    G --> H[Segmentation logits]
-    H --> I[CrossEntropy + Dice]
-    H --> J[val_2d.py metrics]
-    J --> K[Dice / HD95]
-    H --> L[visualization.py]
-    L --> M[image / gt / pred / panel]
+Recommended: Python 3.10+
+
+```bash
+python -m venv .venv
+source .venv/bin/activate  # Linux/Mac
+# .venv\Scripts\activate   # Windows PowerShell
+pip install -r requirements.txt
 ```
 
-### Component Roles
+If you need a specific CUDA build, install `torch` and `torchvision` first from the official PyTorch index, then install the remaining packages.
 
-```mermaid
-flowchart LR
-    A[analysis_data] --> B[Generate stable splits]
-    A --> C[Analyze dataset statistics]
-    D[dataloaders] --> E[Load image-mask pairs]
-    F[networks] --> G[Build segmentation model]
-    H[utils] --> I[Losses, metrics, visualization]
-    J[train2d.py] --> K[Train + validate + save best model]
-    L[test2d.py] --> M[Test + save predictions + export metrics]
-```
+## 4. Dataset Layout
 
-## Models
+Expected roots:
 
-Available models in `net_factory.py`:
+- `data/CVC-ClinicDB`
+- `data/Kvasir-SEG`
 
-- `unet`
-- `unet_resnet152`
-- `resunet`
-- `vnet`
-- `unetr`
+The dataloader can read common image/mask folder names such as:
 
-Supported aliases:
+- images, image, original
+- masks, mask, labels, ground truth
 
-- `unet_restnet`
-- `unet_restnet152`
-- `resnet_unet`
+For reproducible experiments, use split manifests:
 
-## Datasets
+- `splits/train.txt`
+- `splits/val.txt`
+- `splits/test.txt`
 
-### CVC-ClinicDB
-
-- Total image/mask pairs: `612`
-- Stable split files are stored in `data/CVC-ClinicDB/splits/`
-- Current split:
-  - `train`: `429`
-  - `val`: `61`
-  - `test`: `122`
-- Default ratio: `70/10/20`
-
-### Kvasir-SEG
-
-- Total image/mask pairs: `1000`
-- Original files:
-  - `train.txt`: `880`
-  - `val.txt`: `120`
-- Stable split files are stored in `data/Kvasir-SEG/splits/`
-- Current generated split:
-  - `train`: `792`
-  - `val`: `88`
-  - `test`: `120`
-- Policy:
-  - original `val.txt` is treated as fixed `test`
-  - new `val` is sampled from original `train.txt`
-
-## Generate Stable Splits
+## 5. Generate Stable Splits
 
 ```bash
 python analysis_data/generate_splits.py --dataset all --seed 1337
 ```
 
-This generates:
+Useful options:
 
-- `data/CVC-ClinicDB/splits/train.txt`
-- `data/CVC-ClinicDB/splits/val.txt`
-- `data/CVC-ClinicDB/splits/test.txt`
-- `data/Kvasir-SEG/splits/train.txt`
-- `data/Kvasir-SEG/splits/val.txt`
-- `data/Kvasir-SEG/splits/test.txt`
+- `--dataset {all,cvc,kvasir}`
+- `--cvc_val_ratio` (default: 0.1)
+- `--cvc_test_ratio` (default: 0.2)
+- `--kvasir_val_ratio` (default: 0.1)
 
-## Analyze Data
+## 6. Analyze Dataset Statistics
 
 ```bash
 python analysis_data/analyze_datasets.py --dataset all
 ```
 
-Generated reports:
+Outputs are written to `analysis_data/reports/` (JSON + Markdown summaries).
 
-- `analysis_data/reports/cvc_clinicdb_summary.json`
-- `analysis_data/reports/cvc_clinicdb_summary.md`
-- `analysis_data/reports/kvasir_seg_summary.json`
-- `analysis_data/reports/kvasir_seg_summary.md`
-- `analysis_data/reports/dataset_overview.json`
-- `analysis_data/reports/current_dataset_status.md`
+## 7. Training
 
-The analysis includes:
-
-- number of image/mask pairs
-- split counts
-- common image sizes
-- RGB mean/std
-- foreground ratio
-- RGB pixel histogram
-- mask value presence
-- example sample file paths
-
-## Train
-
-Train Kvasir with the stable split:
+Example (Kvasir + UNet):
 
 ```bash
-python train2d.py --dataset kvasir --root_path data/Kvasir-SEG --model unet --train_split train --val_split val
+python train2d.py \
+  --dataset kvasir \
+  --root_path data/Kvasir-SEG \
+  --model unet \
+  --train_split train \
+  --val_split val \
+  --batch_size 8 \
+  --max_iterations 30000
 ```
 
-Train CVC with ResNet152 encoder and separate validation split:
+Example (CVC + UNet-ResNet152):
 
 ```bash
-python train2d.py --dataset cvc --root_path data/CVC-ClinicDB --model unet_resnet152 --train_split train --val_split val
+python train2d.py \
+  --dataset cvc \
+  --root_path data/CVC-ClinicDB \
+  --model unet_resnet152 \
+  --train_split train \
+  --val_split val \
+  --encoder_pretrained 1
 ```
 
-Train CVC and evaluate against test during training:
+Checkpoints and logs are saved under:
+
+- `logs/model/supervised/<exp>/`
+
+## 8. Testing
 
 ```bash
-python train2d.py --dataset cvc --root_path data/CVC-ClinicDB --model unet_resnet152 --train_split train --val_split test
+python test2d.py \
+  --dataset kvasir \
+  --root_path data/Kvasir-SEG \
+  --model unet \
+  --split test
 ```
 
-## Test
+Test outputs:
 
-```bash
-python test2d.py --dataset kvasir --root_path data/Kvasir-SEG --model unet --split test
-```
+- `logs/model/supervised/<exp>/predictions/<split>/case_metrics.csv`
+- `logs/model/supervised/<exp>/predictions/<split>/metrics_summary.json`
+- visualization folders: `image/`, `gt/`, `pred/`, `panel/`
 
-## Visualization Output
+## 9. Important CLI Arguments
 
-Both training and testing can save:
+- `--root_path`: dataset root path.
+- `--dataset`: `cvc`, `cvc_clinicdb`, `kvasir`, `kvasir_seg`, `cyst2d`, `generic`.
+- `--model`: one of models listed by `networks/net_factory.py`.
+- `--patch_size H W`: default `256 256`.
+- `--num_classes`: default `2`.
+- `--in_channels`: `1` (grayscale) or `3` (rgb).
+- `--gpu`: CUDA visible device id string.
 
-- `image/`
-- `gt/`
-- `pred/`
-- `panel/`
+## 10. Reproducibility Notes
 
-`panel` is a combined image:
-
-```text
-input image | ground truth | prediction
-```
-
-Output locations:
-
-- train visualizations:
-  - `logs/model/supervised/<exp>/visualizations/`
-- test predictions and metrics:
-  - `logs/model/supervised/<exp>/predictions/<split>/`
+- Training supports deterministic mode via `--deterministic 1` and `--seed`.
+- Keep split manifests fixed when comparing models.
+- Store experiment names with `--exp` to separate checkpoints/results.

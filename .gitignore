@@ -4,12 +4,12 @@ __pycache__/
 *.pyo
 *.pyd
 
-# Packaging / build
+# Build / packaging
 build/
 dist/
 *.egg-info/
 
-# Test / tooling cache
+# Tool caches
 .pytest_cache/
 .mypy_cache/
 .ruff_cache/
@@ -28,13 +28,13 @@ env/
 .DS_Store
 Thumbs.db
 
-# Training and evaluation artifacts
+# Training artifacts
 logs/
 *.pth
 *.pt
 *.ckpt
 
-# Temporary helper files
+# Temporary helpers
 *_tmp.py
 *_tmp.md
 
@@ -43,14 +43,15 @@ data/save_data.txt
 
 # Dataset archives
 data/*.zip
+data/**/*.zip
 
-# Ignore raw CVC-ClinicDB data but keep stable split manifests
+# Ignore raw CVC data but keep split manifests
 data/CVC-ClinicDB/**
 !data/CVC-ClinicDB/
 !data/CVC-ClinicDB/splits/
 !data/CVC-ClinicDB/splits/**
 
-# Ignore raw Kvasir-SEG data but keep stable split manifests
+# Ignore raw Kvasir data but keep split manifests
 data/Kvasir-SEG/**
 !data/Kvasir-SEG/
 !data/Kvasir-SEG/splits/
