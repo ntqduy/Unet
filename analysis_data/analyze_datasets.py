@@ -2,17 +2,21 @@ from __future__ import annotations
 
 import argparse
 import json
+import sys
 from collections import Counter
 from pathlib import Path
 from typing import Dict, List
+
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+if str(PROJECT_ROOT) not in sys.path:
+    # Allow direct execution via `python analysis_data/analyze_datasets.py`.
+    sys.path.insert(0, str(PROJECT_ROOT))
 
 import torch
 from torchvision.io import ImageReadMode, read_image
 
 from dataloaders.dataset import find_manifest_path, list_existing_splits, scan_dataset_records
 
-
-PROJECT_ROOT = Path(__file__).resolve().parents[1]
 DATA_ROOT = PROJECT_ROOT / "data"
 REPORT_ROOT = PROJECT_ROOT / "analysis_data" / "reports"
 

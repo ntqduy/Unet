@@ -3,13 +3,17 @@ from __future__ import annotations
 import argparse
 import json
 import random
+import sys
 from pathlib import Path
 from typing import Dict, List, Sequence
 
+PROJECT_ROOT = Path(__file__).resolve().parents[1]
+if str(PROJECT_ROOT) not in sys.path:
+    # Allow direct execution via `python analysis_data/generate_splits.py`.
+    sys.path.insert(0, str(PROJECT_ROOT))
+
 from dataloaders.dataset import scan_dataset_records
 
-
-PROJECT_ROOT = Path(__file__).resolve().parents[1]
 DATA_ROOT = PROJECT_ROOT / "data"
 
 
