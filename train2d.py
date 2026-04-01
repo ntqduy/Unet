@@ -1,4 +1,5 @@
 import argparse
+import json
 import logging
 import os
 import random
@@ -18,6 +19,13 @@ from tqdm import tqdm
 from dataloaders.dataset import Normalize, RandomGenerator, ToTensor, build_dataset, list_available_datasets
 from networks.net_factory import list_models, net_factory
 from utils import losses, val_2d
+from utils.evaluation import (
+    build_evaluation_output_dir,
+    checkpoint_label,
+    evaluate_segmentation_dataset,
+    sanitize_tag,
+    save_evaluation_artifacts,
+)
 from utils.visualization import save_triplet_visualization
 
 
@@ -57,6 +65,12 @@ parser.add_argument("--gpu", type=str, default="0")
 parser.add_argument("--num_workers", type=int, default=4)
 parser.add_argument("--save_visualizations", type=int, default=1)
 parser.add_argument("--vis_num_samples", type=int, default=5)
+parser.add_argument(
+    "--final_eval_splits",
+    nargs="*",
+    default=["train", "val", "test"],
+    help="splits to evaluate after training with the best checkpoint",
+)
 
 args = parser.parse_args()
 dice_loss = losses.DiceLoss(n_classes=args.num_classes)
@@ -100,6 +114,102 @@ def validate_label_batch(label_batch, num_classes, sampled_batch):
     )
 
 
+def _write_json(path: Path, payload: dict) -> None:
+    with path.open("w", encoding="utf-8") as file:
+        json.dump(payload, file, indent=2)
+
+
+def _unique_preserve_order(values):
+    ordered = []
+    seen = set()
+    for value in values:
+        if value not in seen:
+            ordered.append(value)
+            seen.add(value)
+    return ordered
+
+
+def _run_prefix() -> str:
+    return f"{sanitize_tag(args.dataset)}_{sanitize_tag(args.model)}"
+
+
+def _best_checkpoint_manifest_path(snapshot_path: Path) -> Path:
+    return snapshot_path / "best_checkpoint.json"
+
+
+def _build_checkpoint_manifest(checkpoint_path: Path, alias_path: Path, legacy_path: Path, metric_prefix: str, metric_value: float) -> dict:
+    return {
+        "experiment": args.exp,
+        "dataset": args.dataset,
+        "dataset_root": str(Path(args.root_path).expanduser().resolve()),
+        "model": args.model,
+        "architecture": args.model,
+        "train_split": args.train_split,
+        "val_split": args.val_split,
+        "metric_name": "val_macro_dice",
+        "metric_value": float(metric_value),
+        "metric_prefix": metric_prefix,
+        "checkpoint_name": checkpoint_path.name,
+        "checkpoint_path": str(checkpoint_path.resolve()),
+        "checkpoint_alias_path": str(alias_path.resolve()),
+        "legacy_checkpoint_path": str(legacy_path.resolve()),
+        "checkpoint_label": checkpoint_label(checkpoint_path),
+    }
+
+
+def _build_evaluation_metadata(split: str, checkpoint_path: Path) -> dict:
+    return {
+        "experiment": args.exp,
+        "dataset": args.dataset,
+        "dataset_root": str(Path(args.root_path).expanduser().resolve()),
+        "split": split,
+        "model": args.model,
+        "architecture": args.model,
+        "num_classes": args.num_classes,
+        "in_channels": args.in_channels,
+        "patch_size": list(args.patch_size),
+        "checkpoint_name": checkpoint_path.name,
+        "checkpoint_label": checkpoint_label(checkpoint_path),
+        "checkpoint_path": str(checkpoint_path.resolve()),
+    }
+
+
+def _write_evaluation_overview(snapshot_path: Path, checkpoint_path: Path, split_summaries: dict) -> None:
+    if not split_summaries:
+        return
+
+    checkpoint_root = build_evaluation_output_dir(snapshot_path, args.dataset, args.model, checkpoint_path, next(iter(split_summaries))).parent
+    overview = {
+        "experiment": args.exp,
+        "dataset": args.dataset,
+        "dataset_root": str(Path(args.root_path).expanduser().resolve()),
+        "model": args.model,
+        "checkpoint_name": checkpoint_path.name,
+        "checkpoint_path": str(checkpoint_path.resolve()),
+        "splits": split_summaries,
+    }
+    _write_json(checkpoint_root / "evaluation_overview.json", overview)
+
+    lines = [
+        f"# Final Evaluation Overview | {args.dataset} | {args.model}",
+        "",
+        f"- Experiment: `{args.exp}`",
+        f"- Dataset root: `{Path(args.root_path).expanduser().resolve()}`",
+        f"- Checkpoint: `{checkpoint_path.name}`",
+        f"- Checkpoint path: `{checkpoint_path.resolve()}`",
+        "",
+        "## Splits",
+        "",
+    ]
+    for split_name, summary in split_summaries.items():
+        macro = summary["metrics"]["macro_mean"]
+        lines.append(
+            f"- `{split_name}` | dice `{macro['dice']:.6f}` | hd95 `{macro['hd95']:.6f}` | cases `{summary['num_cases']}`"
+        )
+    with (checkpoint_root / "evaluation_overview.md").open("w", encoding="utf-8") as file:
+        file.write("\n".join(lines) + "\n")
+
+
 def run_validation(args, model, valloader, device):
     model.eval()
     metric_list = []
@@ -141,6 +251,60 @@ def run_validation(args, model, valloader, device):
     metric_array = np.stack(metric_list, axis=0).mean(axis=0)
     performance = float(np.mean(metric_array[:, 0]))
     return performance, vis_samples
+
+
+def _run_final_evaluations(snapshot_path: Path, checkpoint_path: Path, model, device, image_mode: str) -> None:
+    logging.info("Running final evaluation with best checkpoint: %s", checkpoint_path)
+    model.load_state_dict(torch.load(checkpoint_path, map_location=device))
+    model.eval()
+
+    eval_transform = transforms.Compose([Normalize(), ToTensor()])
+    split_summaries = {}
+    for split in _unique_preserve_order(args.final_eval_splits):
+        try:
+            dataset = build_dataset(
+                dataset_name=args.dataset,
+                base_dir=args.root_path,
+                split=split,
+                transform=eval_transform,
+                image_mode=image_mode,
+            )
+        except Exception as error:
+            logging.warning("Skipping final evaluation for split '%s': %s", split, error)
+            continue
+
+        dataloader = DataLoader(dataset, batch_size=1, shuffle=False, num_workers=1, pin_memory=device.type == "cuda")
+        output_dir = build_evaluation_output_dir(snapshot_path, args.dataset, args.model, checkpoint_path, split)
+        result = evaluate_segmentation_dataset(
+            model,
+            dataloader,
+            device=device,
+            num_classes=args.num_classes,
+            patch_size=args.patch_size,
+            output_dir=output_dir,
+            save_visualizations=bool(args.save_visualizations),
+            vis_limit=args.vis_num_samples,
+            sample_validator=validate_label_batch,
+            progress_desc=f"final-{split}",
+        )
+        summary = save_evaluation_artifacts(
+            output_dir,
+            _build_evaluation_metadata(split, checkpoint_path),
+            result["average_metric"],
+            result["case_metrics"],
+        )
+        split_summaries[split] = summary
+        macro = summary["metrics"]["macro_mean"]
+        logging.info(
+            "Final evaluation | split=%s | checkpoint=%s | macro_dice=%.6f | macro_hd95=%.6f | cases=%d",
+            split,
+            checkpoint_path.name,
+            macro["dice"],
+            macro["hd95"],
+            summary["num_cases"],
+        )
+
+    _write_evaluation_overview(snapshot_path, checkpoint_path, split_summaries)
 
 
 def train(args, snapshot_path):
@@ -223,26 +387,44 @@ def train(args, snapshot_path):
 
     model.train()
     iter_num = 0
-    best_performance = 0.0
+    best_performance = float("-inf")
+    weights_dir = Path(snapshot_path) / "weights"
+    weights_dir.mkdir(parents=True, exist_ok=True)
+    best_checkpoint_path = None
 
-    def evaluate_and_checkpoint(metric_prefix, log_prefix, vis_subdir):
-        nonlocal best_performance
+    def evaluate_and_checkpoint(metric_prefix, log_prefix):
+        nonlocal best_performance, best_checkpoint_path
 
         performance, vis_samples = run_validation(args, model, valloader, device)
 
         if performance > best_performance:
             best_performance = performance
-            save_mode_path = Path(snapshot_path) / f"{metric_prefix}_dice_{round(best_performance, 4)}.pth"
-            save_best_path = Path(snapshot_path) / f"{args.model}_best_model.pth"
-            torch.save(model.state_dict(), save_mode_path)
-            torch.save(model.state_dict(), save_best_path)
-            logging.info("save best model to %s", save_mode_path)
+            metric_prefix_safe = sanitize_tag(metric_prefix)
+            unique_checkpoint_path = weights_dir / f"{_run_prefix()}_{metric_prefix_safe}_valdice_{best_performance:.4f}.pth"
+            alias_checkpoint_path = weights_dir / f"{_run_prefix()}_best.pth"
+            legacy_checkpoint_path = Path(snapshot_path) / f"{args.model}_best_model.pth"
+
+            torch.save(model.state_dict(), unique_checkpoint_path)
+            torch.save(model.state_dict(), alias_checkpoint_path)
+            torch.save(model.state_dict(), legacy_checkpoint_path)
+            best_checkpoint_path = unique_checkpoint_path
+
+            manifest = _build_checkpoint_manifest(
+                unique_checkpoint_path,
+                alias_checkpoint_path,
+                legacy_checkpoint_path,
+                metric_prefix=metric_prefix,
+                metric_value=best_performance,
+            )
+            _write_json(_best_checkpoint_manifest_path(Path(snapshot_path)), manifest)
+            logging.info("Saved best model to %s", unique_checkpoint_path)
+            logging.info("Updated stable best aliases: %s | %s", alias_checkpoint_path, legacy_checkpoint_path)
 
             if args.save_visualizations and vis_samples:
-                vis_dir = Path(snapshot_path) / "visualizations" / vis_subdir
+                vis_dir = build_evaluation_output_dir(snapshot_path, args.dataset, args.model, unique_checkpoint_path, args.val_split)
                 save_validation_visualizations(vis_samples, vis_dir)
 
-        logging.info("%s : mean_dice : %f", log_prefix, performance)
+        logging.info("%s : val_macro_dice : %f", log_prefix, performance)
         model.train()
 
     if args.max_epochs is not None:
@@ -280,7 +462,6 @@ def train(args, snapshot_path):
                 evaluate_and_checkpoint(
                     metric_prefix=f"epoch_{epoch_num}_iter_{iter_num}",
                     log_prefix=f"epoch {epoch_num}/{args.max_epochs} iteration {iter_num}",
-                    vis_subdir=f"epoch_{epoch_num}_iter_{iter_num}",
                 )
     else:
         max_epoch = (args.max_iterations + iterations_per_epoch - 1) // iterations_per_epoch
@@ -322,7 +503,6 @@ def train(args, snapshot_path):
                     evaluate_and_checkpoint(
                         metric_prefix=f"iter_{iter_num}",
                         log_prefix=f"epoch {epoch_num}/{max_epoch} iteration {iter_num}/{args.max_iterations}",
-                        vis_subdir=f"iter_{iter_num}",
                     )
 
                 if iter_num >= args.max_iterations:
@@ -333,6 +513,26 @@ def train(args, snapshot_path):
 
             if iter_num >= args.max_iterations:
                 break
+
+    if best_checkpoint_path is None:
+        fallback_checkpoint_path = weights_dir / f"{_run_prefix()}_last.pth"
+        alias_checkpoint_path = weights_dir / f"{_run_prefix()}_best.pth"
+        legacy_checkpoint_path = Path(snapshot_path) / f"{args.model}_best_model.pth"
+        torch.save(model.state_dict(), fallback_checkpoint_path)
+        torch.save(model.state_dict(), alias_checkpoint_path)
+        torch.save(model.state_dict(), legacy_checkpoint_path)
+        best_checkpoint_path = fallback_checkpoint_path
+        manifest = _build_checkpoint_manifest(
+            fallback_checkpoint_path,
+            alias_checkpoint_path,
+            legacy_checkpoint_path,
+            metric_prefix="last",
+            metric_value=-1.0,
+        )
+        _write_json(_best_checkpoint_manifest_path(Path(snapshot_path)), manifest)
+        logging.warning("No validation checkpoint was selected; using the last model state at %s", fallback_checkpoint_path)
+
+    _run_final_evaluations(Path(snapshot_path), best_checkpoint_path, model, device, image_mode)
 
 
 if __name__ == "__main__":
@@ -349,6 +549,7 @@ if __name__ == "__main__":
     snapshot_path.mkdir(parents=True, exist_ok=True)
 
     shutil.copy(Path(__file__).resolve(), snapshot_path / "train2d.py")
+    _write_json(snapshot_path / "run_config.json", vars(args))
 
     logging.basicConfig(
         filename=str(snapshot_path / "log.txt"),

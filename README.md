@@ -35,6 +35,7 @@ Code/
 |   |-- VNet.py
 |   `-- unetr.py
 |-- utils/
+|   |-- evaluation.py
 |   |-- losses.py
 |   |-- val_2d.py
 |   `-- visualization.py
@@ -137,9 +138,17 @@ python train2d.py \
   --eval_interval 20
 ```
 
-Checkpoints and logs are saved under:
+Checkpoints, configs, and logs are saved under:
 
-- `logs/model/supervised/<exp>/`
+- `logs/model/supervised/<exp>/run_config.json`
+- `logs/model/supervised/<exp>/best_checkpoint.json`
+- `logs/model/supervised/<exp>/weights/`
+- `logs/model/supervised/<exp>/log.txt`
+
+After training, the best checkpoint is also evaluated on the requested final splits (default: `train`, `val`, `test`).
+Those reports are written under:
+
+- `logs/model/supervised/<exp>/evaluations/<dataset>/<model>/<checkpoint>/`
 
 ## 8. Testing
 
@@ -148,14 +157,22 @@ python test2d.py \
   --dataset kvasir \
   --root_path data/Kvasir-SEG \
   --model unet \
-  --split test
+  --split all
 ```
 
-Test outputs:
+Useful options:
 
-- `logs/model/supervised/<exp>/predictions/<split>/case_metrics.csv`
-- `logs/model/supervised/<exp>/predictions/<split>/metrics_summary.json`
-- visualization folders: `image/`, `gt/`, `pred/`, `panel/`
+- `--split {train,val,test,all}`
+- `--checkpoint_path <path-to-weight>.pth`
+
+Evaluation outputs are now grouped by dataset, architecture, checkpoint, and split:
+
+- `logs/model/supervised/<exp>/evaluations/<dataset>/<model>/<checkpoint>/<split>/case_metrics.csv`
+- `logs/model/supervised/<exp>/evaluations/<dataset>/<model>/<checkpoint>/<split>/summary.json`
+- `logs/model/supervised/<exp>/evaluations/<dataset>/<model>/<checkpoint>/<split>/metrics_summary.json`
+- `logs/model/supervised/<exp>/evaluations/<dataset>/<model>/<checkpoint>/<split>/summary.md`
+- visualization folders inside each split result: `image/`, `gt/`, `pred/`, `panel/`
+- cross-split overview: `logs/model/supervised/<exp>/evaluations/<dataset>/<model>/<checkpoint>/evaluation_overview.json`
 
 ## 9. Important CLI Arguments
 
@@ -166,6 +183,8 @@ Test outputs:
 - `--eval_interval_epochs`: validate every N epochs in epoch mode.
 - `--max_iterations`: legacy stopping criterion for iteration-based training.
 - `--eval_interval`: validate every N iterations in iteration mode.
+- `--final_eval_splits`: final splits evaluated after training; default `train val test`.
+- `--checkpoint_path`: optional path to a specific weight file for evaluation.
 - `--patch_size H W`: default `256 256`.
 - `--num_classes`: default `2`.
 - `--in_channels`: `1` (grayscale) or `3` (rgb).

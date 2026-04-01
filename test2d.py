@@ -1,19 +1,21 @@
 import argparse
-import csv
 import json
 import os
 from pathlib import Path
 
-import numpy as np
 import torch
 from torch.utils.data import DataLoader
 from torchvision import transforms
-from tqdm import tqdm
 
 from dataloaders.dataset import Normalize, ToTensor, build_dataset, list_available_datasets
 from networks.net_factory import list_models, net_factory
-from utils.val_2d import test_single_volume
-from utils.visualization import save_triplet_visualization
+from utils.evaluation import (
+    build_evaluation_output_dir,
+    checkpoint_label,
+    evaluate_segmentation_dataset,
+    sanitize_tag,
+    save_evaluation_artifacts,
+)
 
 
 PROJECT_ROOT = Path(__file__).resolve().parent
@@ -25,7 +27,8 @@ parser.add_argument("--root_path", type=str, default=str(DEFAULT_DATA_ROOT), hel
 parser.add_argument("--dataset", type=str, default="kvasir", choices=list_available_datasets(), help="dataset name")
 parser.add_argument("--exp", type=str, default="supervised", help="experiment name")
 parser.add_argument("--model", type=str, default="unet", choices=list_models(), help="model name")
-parser.add_argument("--split", type=str, default="test", choices=["train", "val", "test"], help="evaluation split")
+parser.add_argument("--split", type=str, default="test", choices=["train", "val", "test", "all"], help="evaluation split")
+parser.add_argument("--checkpoint_path", type=str, default="", help="optional checkpoint path; defaults to the best checkpoint under the experiment")
 parser.add_argument("--num_classes", type=int, default=2)
 parser.add_argument("--in_channels", type=int, default=3)
 parser.add_argument("--encoder_pretrained", type=int, default=0, help="only used by unet_resnet152")
@@ -37,98 +40,167 @@ parser.add_argument("--vis_limit", type=int, default=200, help="-1 means save al
 FLAGS = parser.parse_args()
 
 
-def _write_case_metrics(case_metrics, output_dir):
-    output_dir.mkdir(parents=True, exist_ok=True)
-    csv_path = output_dir / "case_metrics.csv"
-    with csv_path.open("w", newline="", encoding="utf-8") as file:
-        writer = csv.writer(file)
-        writer.writerow(["case", "class_index", "dice", "hd95"])
-        for row in case_metrics:
-            writer.writerow(row)
+def _resolve_requested_splits():
+    if FLAGS.split == "all":
+        return ["train", "val", "test"]
+    return [FLAGS.split]
+
+
+def _resolve_checkpoint_path(snapshot_path: Path) -> Path:
+    if FLAGS.checkpoint_path:
+        checkpoint_path = Path(FLAGS.checkpoint_path).expanduser().resolve()
+        if not checkpoint_path.is_file():
+            raise FileNotFoundError(f"Checkpoint '{checkpoint_path}' does not exist.")
+        return checkpoint_path
+
+    manifest_path = snapshot_path / "best_checkpoint.json"
+    if manifest_path.is_file():
+        with manifest_path.open("r", encoding="utf-8") as file:
+            manifest = json.load(file)
+        candidate = Path(manifest.get("checkpoint_path", "")).expanduser()
+        if candidate.is_file():
+            return candidate.resolve()
+
+    weights_dir = snapshot_path / "weights"
+    candidates = [
+        weights_dir / f"{sanitize_tag(FLAGS.dataset)}_{sanitize_tag(FLAGS.model)}_best.pth",
+        snapshot_path / f"{FLAGS.model}_best_model.pth",
+    ]
+    if weights_dir.is_dir():
+        candidates.extend(sorted(weights_dir.glob(f"*{sanitize_tag(FLAGS.model)}*best*.pth")))
+
+    for candidate in candidates:
+        if candidate.is_file():
+            return candidate.resolve()
+
+    raise FileNotFoundError(
+        f"Could not resolve a checkpoint for exp='{FLAGS.exp}', model='{FLAGS.model}'. "
+        "Provide --checkpoint_path explicitly or ensure a best checkpoint exists."
+    )
+
+
+def _build_summary_metadata(split: str, checkpoint_path: Path) -> dict:
+    return {
+        "experiment": FLAGS.exp,
+        "dataset": FLAGS.dataset,
+        "dataset_root": str(Path(FLAGS.root_path).expanduser().resolve()),
+        "split": split,
+        "model": FLAGS.model,
+        "architecture": FLAGS.model,
+        "num_classes": FLAGS.num_classes,
+        "in_channels": FLAGS.in_channels,
+        "patch_size": list(FLAGS.patch_size),
+        "checkpoint_name": checkpoint_path.name,
+        "checkpoint_label": checkpoint_label(checkpoint_path),
+        "checkpoint_path": str(checkpoint_path),
+    }
+
+
+def _write_overview(checkpoint_root: Path, split_summaries: dict) -> None:
+    overview = {
+        "experiment": FLAGS.exp,
+        "dataset": FLAGS.dataset,
+        "dataset_root": str(Path(FLAGS.root_path).expanduser().resolve()),
+        "model": FLAGS.model,
+        "checkpoint_name": next(iter(split_summaries.values()))["checkpoint_name"],
+        "checkpoint_path": next(iter(split_summaries.values()))["checkpoint_path"],
+        "splits": split_summaries,
+    }
+    with (checkpoint_root / "evaluation_overview.json").open("w", encoding="utf-8") as file:
+        json.dump(overview, file, indent=2)
+
+    lines = [
+        f"# Evaluation Overview | {FLAGS.dataset} | {FLAGS.model}",
+        "",
+        f"- Experiment: `{FLAGS.exp}`",
+        f"- Dataset root: `{Path(FLAGS.root_path).expanduser().resolve()}`",
+        f"- Checkpoint: `{overview['checkpoint_name']}`",
+        f"- Checkpoint path: `{overview['checkpoint_path']}`",
+        "",
+        "## Splits",
+        "",
+    ]
+    for split_name, summary in split_summaries.items():
+        macro = summary["metrics"]["macro_mean"]
+        lines.append(
+            f"- `{split_name}` | dice `{macro['dice']:.6f}` | hd95 `{macro['hd95']:.6f}` | cases `{summary['num_cases']}`"
+        )
+    with (checkpoint_root / "evaluation_overview.md").open("w", encoding="utf-8") as file:
+        file.write("\n".join(lines) + "\n")
 
 
 def test_calculate_metric():
     os.environ["CUDA_VISIBLE_DEVICES"] = FLAGS.gpu
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     snapshot_path = PROJECT_ROOT / "logs" / "model" / "supervised" / FLAGS.exp
-    prediction_path = snapshot_path / "predictions" / FLAGS.split
     image_mode = "grayscale" if FLAGS.in_channels == 1 else "rgb"
-
-    dataset = build_dataset(
-        dataset_name=FLAGS.dataset,
-        base_dir=FLAGS.root_path,
-        split=FLAGS.split,
-        transform=transforms.Compose([Normalize(), ToTensor()]),
-        image_mode=image_mode,
-    )
-    dataloader = DataLoader(dataset, batch_size=1, shuffle=False, num_workers=1, pin_memory=device.type == "cuda")
+    checkpoint_path = _resolve_checkpoint_path(snapshot_path)
 
     model_kwargs = {"mode": "test"}
     if FLAGS.model == "unetr":
         model_kwargs["image_size"] = tuple(FLAGS.patch_size)
     if FLAGS.model == "unet_resnet152":
         model_kwargs["encoder_pretrained"] = bool(FLAGS.encoder_pretrained)
+
+    reference_dataset = build_dataset(
+        dataset_name=FLAGS.dataset,
+        base_dir=FLAGS.root_path,
+        split="train",
+        transform=transforms.Compose([Normalize(), ToTensor()]),
+        image_mode=image_mode,
+    )
     model = net_factory(
         net_type=FLAGS.model,
-        in_chns=dataset.in_channels,
+        in_chns=reference_dataset.in_channels,
         class_num=FLAGS.num_classes,
         **model_kwargs,
     ).to(device)
-
-    save_model_path = snapshot_path / f"{FLAGS.model}_best_model.pth"
-    model.load_state_dict(torch.load(save_model_path, map_location=device))
+    model.load_state_dict(torch.load(checkpoint_path, map_location=device))
     model.eval()
 
-    total_metric = []
-    case_metrics = []
-    saved_visualizations = 0
-
-    for sample in tqdm(dataloader):
-        metric_i, prediction = test_single_volume(
-            sample["image"],
-            sample["label"],
-            model,
-            classes=FLAGS.num_classes,
-            patch_size=FLAGS.patch_size,
-            device=device,
-            return_prediction=True,
+    split_summaries = {}
+    requested_splits = _resolve_requested_splits()
+    for split in requested_splits:
+        dataset = build_dataset(
+            dataset_name=FLAGS.dataset,
+            base_dir=FLAGS.root_path,
+            split=split,
+            transform=transforms.Compose([Normalize(), ToTensor()]),
+            image_mode=image_mode,
         )
-        metric_i = np.array(metric_i)
-        total_metric.append(metric_i)
+        dataloader = DataLoader(dataset, batch_size=1, shuffle=False, num_workers=1, pin_memory=device.type == "cuda")
+        output_dir = build_evaluation_output_dir(snapshot_path, FLAGS.dataset, FLAGS.model, checkpoint_path, split)
+        result = evaluate_segmentation_dataset(
+            model,
+            dataloader,
+            device=device,
+            num_classes=FLAGS.num_classes,
+            patch_size=FLAGS.patch_size,
+            output_dir=output_dir,
+            save_visualizations=bool(FLAGS.save_visualizations),
+            vis_limit=FLAGS.vis_limit,
+            progress_desc=f"eval-{split}",
+        )
+        summary = save_evaluation_artifacts(
+            output_dir,
+            _build_summary_metadata(split, checkpoint_path),
+            result["average_metric"],
+            result["case_metrics"],
+        )
+        split_summaries[split] = summary
+        macro_mean = summary["metrics"]["macro_mean"]
+        print(
+            f"[{split}] checkpoint={summary['checkpoint_name']} | dataset={summary['dataset']} | "
+            f"model={summary['model']} | dice={macro_mean['dice']:.6f} | hd95={macro_mean['hd95']:.6f}"
+        )
 
-        case_name = sample["case"][0] if isinstance(sample["case"], (list, tuple)) else str(sample["case"])
-        for class_index, (dice_value, hd95_value) in enumerate(metric_i, start=1):
-            case_metrics.append([case_name, class_index, float(dice_value), float(hd95_value)])
+    if split_summaries:
+        checkpoint_root = build_evaluation_output_dir(snapshot_path, FLAGS.dataset, FLAGS.model, checkpoint_path, requested_splits[0]).parent
+        _write_overview(checkpoint_root, split_summaries)
 
-        should_save = bool(FLAGS.save_visualizations) and (FLAGS.vis_limit < 0 or saved_visualizations < FLAGS.vis_limit)
-        if should_save:
-            save_triplet_visualization(
-                image=sample["image"][0],
-                label=sample["label"][0],
-                prediction=prediction[0],
-                output_dir=prediction_path,
-                case_name=case_name,
-            )
-            saved_visualizations += 1
-
-    avg_metric = np.stack(total_metric, axis=0).mean(axis=0)
-    prediction_path.mkdir(parents=True, exist_ok=True)
-    _write_case_metrics(case_metrics, prediction_path)
-
-    summary = {
-        "dataset": FLAGS.dataset,
-        "split": FLAGS.split,
-        "model": FLAGS.model,
-        "num_cases": len(case_metrics) // max(FLAGS.num_classes - 1, 1),
-        "average_metric": avg_metric.tolist(),
-    }
-    with (prediction_path / "metrics_summary.json").open("w", encoding="utf-8") as file:
-        json.dump(summary, file, indent=2)
-
-    print("Average metric:", avg_metric)
-    return avg_metric
+    return split_summaries
 
 
 if __name__ == "__main__":
-    metric = test_calculate_metric()
-    print(metric)
+    summaries = test_calculate_metric()
+    print(json.dumps({split: summary["metrics"]["macro_mean"] for split, summary in summaries.items()}, indent=2))
