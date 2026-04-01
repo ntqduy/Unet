@@ -15,7 +15,13 @@ if str(PROJECT_ROOT) not in sys.path:
 import torch
 from torchvision.io import ImageReadMode, read_image
 
-from dataloaders.dataset import find_manifest_path, list_existing_splits, scan_dataset_records
+from dataloaders.dataset import (
+    dataset_uses_binary_masks,
+    find_manifest_path,
+    list_existing_splits,
+    normalize_mask,
+    scan_dataset_records,
+)
 
 DATA_ROOT = PROJECT_ROOT / "data"
 REPORT_ROOT = PROJECT_ROOT / "analysis_data" / "reports"
@@ -39,6 +45,7 @@ def _top_counter_items(counter: Counter, limit: int = 10) -> List[Dict]:
 
 def analyze_dataset(dataset_name: str, dataset_root: Path) -> Dict:
     records = scan_dataset_records(dataset_root)
+    force_binary_masks = dataset_uses_binary_masks(dataset_name)
     size_counter = Counter()
     pixel_hist_r = torch.zeros(256, dtype=torch.long)
     pixel_hist_g = torch.zeros(256, dtype=torch.long)
@@ -53,6 +60,7 @@ def analyze_dataset(dataset_name: str, dataset_root: Path) -> Dict:
     for index, record in enumerate(records):
         image = read_image(str(record.image_path), mode=ImageReadMode.RGB)
         mask = read_image(str(record.mask_path), mode=ImageReadMode.GRAY)
+        mask = normalize_mask(mask, force_binary=force_binary_masks)
 
         height, width = int(image.shape[1]), int(image.shape[2])
         size_counter[f"{width}x{height}"] += 1
