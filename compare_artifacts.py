@@ -421,9 +421,9 @@ def _save_table_page(pdf: PdfPages, rows: Sequence[Mapping[str, Any]], title: st
         plt.close(fig)
 
 
-def _save_comparison_report_pdf(report: Mapping[str, Any], pdf_path: Path, *, title: str) -> Path:
+def _save_comparison_report_pdf(report: Mapping[str, Any], pdf_path: Path) -> Path:
     if plt is None or PdfPages is None:
-        raise ModuleNotFoundError("matplotlib is required to export comparison_report.pdf")
+        raise ModuleNotFoundError("matplotlib is required to export the comparison PDF")
     pdf_path.parent.mkdir(parents=True, exist_ok=True)
     overview_rows = list(report.get("overview_rows", []))
     metrics_rows = list(report.get("metrics_rows", []))
@@ -434,22 +434,22 @@ def _save_comparison_report_pdf(report: Mapping[str, Any], pdf_path: Path, *, ti
 
     with PdfPages(pdf_path) as pdf:
         if resolved_inputs:
-            _save_table_page(pdf, resolved_inputs, f"{title} | Resolved Inputs", max_rows=25)
+            _save_table_page(pdf, resolved_inputs, "Resolved Inputs", max_rows=25)
         if overview_rows:
-            _save_table_page(pdf, overview_rows, f"{title} | Stage Overview")
+            _save_table_page(pdf, overview_rows, "Stage Overview")
         if metrics_rows:
-            _save_table_page(pdf, metrics_rows, f"{title} | Performance Comparison")
+            _save_table_page(pdf, metrics_rows, "Performance Comparison")
         if pruning_global_summary:
             _save_table_page(
                 pdf,
                 [{"key": key, "value": value} for key, value in pruning_global_summary.items()],
-                f"{title} | Global Pruning Summary",
+                "Global Pruning Summary",
                 max_rows=25,
             )
         if teacher_vs_student_rows:
-            _save_table_page(pdf, teacher_vs_student_rows, f"{title} | Teacher vs Pruned Student")
+            _save_table_page(pdf, teacher_vs_student_rows, "Teacher vs Pruned Student")
         if student_tuning_rows:
-            _save_table_page(pdf, student_tuning_rows, f"{title} | Student Tuning Comparison")
+            _save_table_page(pdf, student_tuning_rows, "Student Tuning Comparison")
 
         if overview_rows:
             labels = [str(row.get("stage_label", row.get("stage"))) for row in overview_rows]
@@ -610,7 +610,7 @@ def main() -> None:
     parser.add_argument("--student_run_dir", type=str, default="", help="Path to the proposal student run directory.")
     parser.add_argument("--output_dir", type=str, default="", help="Where the aggregated report should be written.")
     parser.add_argument("--comparison_name", type=str, default="artifact_comparison", help="Name used when auto-creating the output directory.")
-    parser.add_argument("--title", type=str, default="Unified Model Comparison Report", help="PDF report title.")
+    parser.add_argument("--title", type=str, default="", help="Deprecated. PDF naming now follows comparison_name / output filename instead of an internal title.")
     args = parser.parse_args()
 
     logging.basicConfig(level=logging.INFO, format="[%(levelname)s] %(message)s")
@@ -630,11 +630,12 @@ def main() -> None:
     teacher_vs_student_csv = _write_csv(output_dir / "teacher_vs_student_channels.csv", report["teacher_vs_student_rows"])
     student_tuning_csv = _write_csv(output_dir / "student_tuning_comparison.csv", report["student_tuning_rows"])
     summary_json = _write_json(output_dir / "comparison_summary.json", report)
+    comparison_pdf_name = f"{sanitize_tag(args.comparison_name)}.pdf"
     report_pdf = None
     if plt is None or PdfPages is None:
-        logging.warning("matplotlib is not installed. Skip comparison_report.pdf and keep CSV/JSON outputs only.")
+        logging.warning("matplotlib is not installed. Skip %s and keep CSV/JSON outputs only.", comparison_pdf_name)
     else:
-        report_pdf = _save_comparison_report_pdf(report, output_dir / "comparison_report.pdf", title=args.title)
+        report_pdf = _save_comparison_report_pdf(report, output_dir / comparison_pdf_name)
 
     logging.info("Comparison report saved to %s", output_dir)
     logging.info("Generated: %s", summary_json)

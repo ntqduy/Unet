@@ -358,7 +358,8 @@ Lưu:
 - `artifacts/gating_analysis/`
 - `artifacts/student_tuning_analysis/`
 - `metrics/student_epoch_diagnostics.csv`
-- `reports/student_channel_gating_report.pdf`
+- `reports/student_channel_gating_report_tables.pdf`
+- `reports/student_channel_gating_report_charts.pdf`
 
 #### `student_final`
 
@@ -428,9 +429,12 @@ Repo hiện hỗ trợ:
 - `loss.pdf`
 - `visualizations.pdf`
 - `performance.pdf`
-- `channel_analysis.pdf`
-- `gating_analysis.pdf`
-- `student_channel_gating_report.pdf`
+- `channel_analysis_tables.pdf`
+- `channel_analysis_charts.pdf`
+- `gating_analysis_tables.pdf`
+- `gating_analysis_charts.pdf`
+- `student_channel_gating_report_tables.pdf`
+- `student_channel_gating_report_charts.pdf`
 
 ### Channel / gating / pruning artifacts
 
@@ -493,7 +497,7 @@ Script sẽ sinh:
 - `teacher_vs_student_channels.csv`
 - `student_tuning_comparison.csv`
 - `comparison_summary.json`
-- `comparison_report.pdf`
+- `<comparison_name>.pdf`
 
 ## 14. Quick start
 

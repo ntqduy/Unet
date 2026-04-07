@@ -270,11 +270,14 @@ def save_channel_analysis_artifacts(
         paths["gate_values_csv"] = write_metrics_rows(gate_value_rows, output_dir / f"{prefix_part}gate_values.csv")
 
     paths["channel_analysis_json"] = _write_json(output_dir / f"{prefix_part}channel_analysis.json", analysis)
-    paths["channel_analysis_pdf"] = save_channel_analysis_pdf(
+    pdf_paths = save_channel_analysis_pdf(
         analysis,
         output_dir / f"{prefix_part}channel_analysis.pdf",
         title=title,
     )
+    paths["channel_analysis_tables_pdf"] = pdf_paths["tables_pdf"]
+    paths["channel_analysis_charts_pdf"] = pdf_paths["charts_pdf"]
+    paths["channel_analysis_pdf"] = pdf_paths["tables_pdf"]
     return paths
 
 
@@ -313,11 +316,14 @@ def save_gating_analysis_artifacts(
     if gate_value_rows:
         paths["gating_values_csv"] = write_metrics_rows(gate_value_rows, output_dir / f"{prefix_part}gating_values.csv")
     paths["gating_analysis_json"] = _write_json(output_dir / f"{prefix_part}gating_analysis.json", gating_report)
-    paths["gating_analysis_pdf"] = save_channel_analysis_pdf(
+    pdf_paths = save_channel_analysis_pdf(
         gating_report,
         output_dir / f"{prefix_part}gating_analysis.pdf",
         title=title,
     )
+    paths["gating_analysis_tables_pdf"] = pdf_paths["tables_pdf"]
+    paths["gating_analysis_charts_pdf"] = pdf_paths["charts_pdf"]
+    paths["gating_analysis_pdf"] = pdf_paths["tables_pdf"]
     return paths
 
 
@@ -345,7 +351,10 @@ def save_comparison_artifacts(
                 continue
             report_payload[key] = value
     paths["comparison_json"] = _write_json(output_dir / f"{prefix}.json", report_payload)
-    paths["comparison_pdf"] = save_channel_analysis_pdf(report_payload, output_dir / f"{prefix}.pdf", title=title)
+    pdf_paths = save_channel_analysis_pdf(report_payload, output_dir / f"{prefix}.pdf", title=title)
+    paths["comparison_tables_pdf"] = pdf_paths["tables_pdf"]
+    paths["comparison_charts_pdf"] = pdf_paths["charts_pdf"]
+    paths["comparison_pdf"] = pdf_paths["tables_pdf"]
     return paths
 
 
@@ -412,5 +421,8 @@ def save_pruning_analysis_artifacts(
         "channel_level_detail": channel_level_detail,
     }
     paths["pruning_analysis_json"] = _write_json(output_dir / "pruning_analysis.json", pruning_payload)
-    paths["pruning_analysis_pdf"] = save_channel_analysis_pdf(pruning_payload, output_dir / "pruning_analysis.pdf", title=title)
+    pdf_paths = save_channel_analysis_pdf(pruning_payload, output_dir / "pruning_analysis.pdf", title=title)
+    paths["pruning_analysis_tables_pdf"] = pdf_paths["tables_pdf"]
+    paths["pruning_analysis_charts_pdf"] = pdf_paths["charts_pdf"]
+    paths["pruning_analysis_pdf"] = pdf_paths["tables_pdf"]
     return paths

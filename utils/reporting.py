@@ -199,9 +199,21 @@ def _save_table_page(pdf: PdfPages, rows: Sequence[Mapping], title: str, *, max_
         table.auto_set_font_size(False)
         table.set_fontsize(7)
         table.scale(1, 1.25)
+        suffix = "" if len(rows) <= max_rows else f" ({start_index + 1}-{start_index + len(chunk)})"
+        ax.set_title(f"{title}{suffix}")
         fig.tight_layout()
         pdf.savefig(fig)
         plt.close(fig)
+
+
+def _save_empty_report_page(pdf: PdfPages, title: str, message: str) -> None:
+    fig, ax = plt.subplots(figsize=(8, 3))
+    ax.axis("off")
+    ax.set_title(title)
+    ax.text(0.5, 0.5, message, ha="center", va="center")
+    fig.tight_layout()
+    pdf.savefig(fig)
+    plt.close(fig)
 
 
 def save_channel_analysis_pdf(
@@ -209,38 +221,59 @@ def save_channel_analysis_pdf(
     pdf_path: Path | str,
     *,
     title: str = "Channel Analysis Report",
-) -> Path:
+) -> Dict[str, Path]:
     pdf_path = Path(pdf_path)
     pdf_path.parent.mkdir(parents=True, exist_ok=True)
+    tables_pdf_path = pdf_path.with_name(f"{pdf_path.stem}_tables.pdf")
+    charts_pdf_path = pdf_path.with_name(f"{pdf_path.stem}_charts.pdf")
 
-    with PdfPages(pdf_path) as pdf:
+    global_summary = dict(report.get("global_summary", {}))
+    layer_summary_rows = report.get("layer_summary_rows", [])
+    gate_summary_rows = report.get("gate_summary_rows", [])
+    comparison_rows = report.get("comparison_rows", [])
+    pruning_summary_rows = report.get("pruning_summary_rows", []) or report.get("teacher_vs_student_rows", [])
+
+    with PdfPages(tables_pdf_path) as pdf:
+        has_table_content = False
         global_summary = dict(report.get("global_summary", {}))
         if global_summary:
             summary_rows = [{"key": key, "value": value} for key, value in global_summary.items()]
             _save_table_page(pdf, summary_rows, f"{title} | Global Summary", max_rows=25)
+            has_table_content = True
 
-        layer_summary_rows = report.get("layer_summary_rows", [])
-        gate_summary_rows = report.get("gate_summary_rows", [])
-        comparison_rows = report.get("comparison_rows", [])
-        pruning_summary_rows = report.get("pruning_summary_rows", []) or report.get("teacher_vs_student_rows", [])
+        if layer_summary_rows:
+            _save_table_page(pdf, layer_summary_rows, f"{title} | Layer Summary")
+            has_table_content = True
+        if gate_summary_rows:
+            _save_table_page(pdf, gate_summary_rows, f"{title} | Gate Summary")
+            has_table_content = True
+        if comparison_rows:
+            _save_table_page(pdf, comparison_rows, f"{title} | Comparison")
+            has_table_content = True
+        if pruning_summary_rows:
+            _save_table_page(pdf, pruning_summary_rows, f"{title} | Pruning Summary")
+            has_table_content = True
 
-        _save_table_page(pdf, layer_summary_rows, f"{title} | Layer Summary")
-        _save_table_page(pdf, gate_summary_rows, f"{title} | Gate Summary")
-        _save_table_page(pdf, comparison_rows, f"{title} | Comparison")
-        _save_table_page(pdf, pruning_summary_rows, f"{title} | Pruning Summary")
+        if not has_table_content:
+            _save_empty_report_page(pdf, title, "No table content available.")
 
+    with PdfPages(charts_pdf_path) as pdf:
+        has_chart_content = False
         if layer_summary_rows:
             fig, axes = plt.subplots(2, 1, figsize=(14, 8))
             labels = [str(row.get("layer_name")) for row in layer_summary_rows]
             axes[0].bar(labels, [row.get("out_channels", 0) or 0 for row in layer_summary_rows])
+            axes[0].set_title(f"{title} | Output Channels Per Layer")
             axes[0].grid(alpha=0.25, axis="y")
             axes[0].tick_params(axis="x", rotation=70)
             axes[1].bar(labels, [row.get("importance_mean", 0) or 0 for row in layer_summary_rows])
+            axes[1].set_title(f"{title} | Mean Channel Importance Per Layer")
             axes[1].grid(alpha=0.25, axis="y")
             axes[1].tick_params(axis="x", rotation=70)
             fig.tight_layout()
             pdf.savefig(fig)
             plt.close(fig)
+            has_chart_content = True
 
         if pruning_summary_rows:
             teacher_key = "teacher_out_channels" if "teacher_out_channels" in pruning_summary_rows[0] else None
@@ -255,13 +288,24 @@ def save_channel_analysis_pdf(
                 axes[0].bar(x + width / 2, [row.get(student_key, 0) or 0 for row in pruning_summary_rows], width=width, label="student")
                 axes[0].set_xticks(x)
                 axes[0].set_xticklabels(labels, rotation=70)
+                axes[0].set_title(f"{title} | Teacher vs Student Channels")
                 axes[0].grid(alpha=0.25, axis="y")
                 axes[0].legend()
                 if ratio_key:
                     axes[1].bar(labels, [row.get(ratio_key, 0) or 0 for row in pruning_summary_rows])
+                    axes[1].set_title(f"{title} | Prune Ratio Per Layer")
                     axes[1].grid(alpha=0.25, axis="y")
                     axes[1].tick_params(axis="x", rotation=70)
+                else:
+                    axes[1].axis("off")
                 fig.tight_layout()
                 pdf.savefig(fig)
                 plt.close(fig)
-    return pdf_path
+                has_chart_content = True
+
+        if not has_chart_content:
+            _save_empty_report_page(pdf, title, "No chart content available.")
+    return {
+        "tables_pdf": tables_pdf_path,
+        "charts_pdf": charts_pdf_path,
+    }
