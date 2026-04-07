@@ -278,6 +278,49 @@ def save_channel_analysis_artifacts(
     return paths
 
 
+def save_gating_analysis_artifacts(
+    output_dir: Path | str,
+    analysis: Mapping[str, Any],
+    *,
+    prefix: Optional[str] = None,
+    title: str = "Gating Analysis",
+) -> Dict[str, Path]:
+    output_dir = Path(output_dir)
+    output_dir.mkdir(parents=True, exist_ok=True)
+    prefix_part = f"{prefix}_" if prefix else ""
+
+    gate_summary_rows = list(analysis.get("gate_summary_rows", []))
+    gate_value_rows = list(analysis.get("gate_value_rows", []))
+    global_summary = dict(analysis.get("global_summary", {}))
+    global_summary["analysis_type"] = "gating"
+    global_summary["total_near_off_channels"] = int(
+        sum(int(row.get("near_off_channels") or 0) for row in gate_summary_rows)
+    )
+    global_summary["mean_gate_value"] = float(
+        np.mean([float(row.get("gate_mean") or 0.0) for row in gate_summary_rows]) if gate_summary_rows else 0.0
+    )
+
+    gating_report = {
+        "model_info": analysis.get("model_info", {}),
+        "global_summary": global_summary,
+        "gate_summary_rows": gate_summary_rows,
+        "gate_value_rows": gate_value_rows,
+    }
+
+    paths: Dict[str, Path] = {}
+    if gate_summary_rows:
+        paths["gating_summary_csv"] = write_metrics_rows(gate_summary_rows, output_dir / f"{prefix_part}gating_summary.csv")
+    if gate_value_rows:
+        paths["gating_values_csv"] = write_metrics_rows(gate_value_rows, output_dir / f"{prefix_part}gating_values.csv")
+    paths["gating_analysis_json"] = _write_json(output_dir / f"{prefix_part}gating_analysis.json", gating_report)
+    paths["gating_analysis_pdf"] = save_channel_analysis_pdf(
+        gating_report,
+        output_dir / f"{prefix_part}gating_analysis.pdf",
+        title=title,
+    )
+    return paths
+
+
 def save_comparison_artifacts(
     output_dir: Path | str,
     comparison_rows: Sequence[Mapping[str, Any]],

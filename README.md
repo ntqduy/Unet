@@ -1,65 +1,19 @@
 # Medical Image Segmentation Codebase
 
-Codebase huấn luyện và đánh giá phân đoạn ảnh y tế 2D bằng PyTorch, được tổ chức theo 2 nhánh chính:
+Codebase PyTorch cho bài toán medical image segmentation 2D, được tổ chức theo 2 nhánh rõ ràng:
 
-- `basic branch`: benchmark các mô hình baseline như `UNet`, `UNet_ResNet`, `VNet`, `UNETR`, ...
-- `proposal branch`: pipeline đầy đủ cho mô hình đề xuất `pdg_unet` gồm `teacher -> pruning -> student -> distillation/gating`
+- `basic branch`: train và benchmark các baseline như `unet`, `unet_resnet152`, `resunet`, `vnet`, `unetr`
+- `proposal branch`: pipeline cho `pdg_unet` gồm `teacher -> pruning -> student`
 
-Mục tiêu của repo là chuẩn hóa interface output, checkpoint, metrics và artifact để có thể so sánh công bằng giữa baseline models và proposal model.
+Mục tiêu của repo là chuẩn hóa:
 
-## 1. Tổng quan kiến trúc
+- interface output của model
+- output directory
+- checkpoint / weight management
+- metrics / reports / artifacts
+- so sánh công bằng giữa baseline và proposal
 
-### Basic branch
-
-- Kiến trúc model nằm trong `networks/Basic_Model`
-- Model router/factory nằm trong `networks/net_factory.py`
-- Script train chính là `train_basic_model.py`
-- Script evaluate riêng là `test2d.py`
-
-Các model hiện có:
-
-- `unet`
-- `unet_resnet152`
-- `resunet`
-- `vnet`
-- `unetr`
-
-### Proposal branch
-
-- Kiến trúc proposal nằm trong `networks/PGD_Unet`
-- Student model là `PDGUNet` trong `networks/PGD_Unet/gated_unet.py`
-- Pruning utilities nằm trong `networks/PGD_Unet/pruning.py`
-- Script train pipeline là `train_pgd.py`
-
-Pipeline proposal gồm 3 phase:
-
-1. Train hoặc load lại `teacher`
-2. Structured pruning để sinh `blueprint`
-3. Build và train `student` với `segmentation loss + distillation loss + sparsity/gating loss`
-
-## 2. Chuẩn hóa output model
-
-Toàn bộ model hiện được chuẩn hóa về một output chung qua `SegmentationModelOutput` trong `utils/model_output.py`.
-
-Output chuẩn gồm:
-
-- `logits`: tensor segmentation trước sigmoid/softmax
-- `probs`: xác suất sau sigmoid/softmax
-- `preds`: mask dự đoán để evaluate/inference
-- `features`: feature maps trung gian
-- `aux`: metadata phụ
-- `model_name`
-- `backbone_name`
-- `student_name`
-- `phase_name`
-
-Điểm quan trọng:
-
-- `train_basic_model.py` và `train_pgd.py` có thể dùng lại phần lớn logic evaluate/export
-- Không cần viết nhiều `if-else` riêng cho từng model output
-- Baseline và proposal được đưa về cùng chuẩn output để so sánh trực tiếp
-
-## 3. Cấu trúc thư mục chính
+## 1. Cấu trúc chính
 
 ```text
 Code_main/
@@ -73,6 +27,8 @@ Code_main/
 │  │  └─ prunning.py
 │  └─ net_factory.py
 ├─ utils/
+│  ├─ channel_analysis.py
+│  ├─ checkpoint_resolver.py
 │  ├─ checkpoints.py
 │  ├─ compression_loss.py
 │  ├─ evaluation.py
@@ -86,33 +42,53 @@ Code_main/
 ├─ train_basic_model.py
 ├─ train_pgd.py
 ├─ test2d.py
+├─ compare_artifacts.py
 └─ outputs/
 ```
 
 Lưu ý:
 
-- `prunning.py` được giữ lại như alias tương thích ngược cho code cũ
-- `net_factory.py` hiện chỉ đóng vai trò router cho `basic branch`
+- `networks/net_factory.py` chỉ route cho `basic branch`
+- `networks/PGD_Unet/prunning.py` được giữ lại để tương thích import cũ
 
-## 4. Yêu cầu môi trường
+## 2. Chuẩn output model
 
-### Python
+Mọi model đều được chuẩn hóa qua `SegmentationModelOutput` trong `utils/model_output.py`.
 
-- Khuyến nghị `Python 3.10+`
+Output chuẩn gồm:
 
-### Cài đặt dependency
+- `logits`
+- `probs`
+- `preds`
+- `features`
+- `aux`
+- `model_name`
+- `backbone_name`
+- `student_name`
+- `phase_name`
+
+Điều này giúp `train_basic_model.py`, `train_pgd.py`, `test2d.py`, phần evaluate và phần export artifact dùng lại được cùng logic.
+
+## 3. Môi trường
+
+Khuyến nghị:
+
+- `Python 3.10+`
+- `PyTorch` theo môi trường GPU bạn đang dùng
+
+Cài dependency:
 
 ```bash
 pip install -r requirements.txt
 ```
 
-Nếu muốn tính FLOPs trong performance report, cài thêm:
+Nếu muốn tính FLOPs:
 
 ```bash
 pip install thop
 ```
 
-## 5. Chuẩn bị dữ liệu
+## 4. Dataset
 
 Repo hiện hỗ trợ các dataset key:
 
@@ -123,14 +99,7 @@ Repo hiện hỗ trợ các dataset key:
 - `cyst2d`
 - `generic`
 
-Dataset loader nằm trong `dataloaders/dataset.py` và hỗ trợ:
-
-- tự quét cặp `image/mask`
-- manifest split `train.txt`, `val.txt`, `test.txt`
-- normalize mask nhị phân về `0/1`
-- transform train/eval riêng
-
-Ví dụ:
+Ví dụ cấu trúc:
 
 ```text
 data/
@@ -142,57 +111,148 @@ data/
    └─ test.txt
 ```
 
-## 6. Huấn luyện basic models
+`dataloaders/dataset.py` hỗ trợ:
 
-### Ví dụ train UNet
+- quét cặp `image/mask`
+- split file `train.txt`, `val.txt`, `test.txt`
+- normalize mask nhị phân về `0/1`
+- transform train / eval riêng
+
+## 5. Basic branch
+
+### Train
+
+Ví dụ:
 
 ```bash
 python train_basic_model.py --dataset kvasir --root_path data/Kvasir-SEG --model unet --exp supervised_unet --max_epochs 100 --batch_size 8 --base_lr 0.01 --patch_size 256 256
 ```
 
-### Ví dụ train UNet-ResNet152
+Ví dụ với `unet_resnet152`:
 
 ```bash
 python train_basic_model.py --dataset cvc --root_path data/CVC-ClinicDB --model unet_resnet152 --encoder_pretrained 1 --exp supervised_resnet152 --max_epochs 100
 ```
 
-### Evaluate checkpoint baseline
+### Evaluate
 
 ```bash
-python test2d.py --dataset kvasir --root_path data/Kvasir-SEG --exp supervised_unet --model unet --split test
+python test2d.py --dataset kvasir --root_path data/Kvasir-SEG --model unet --split test
 ```
 
-## 7. Huấn luyện proposal model PDG-UNet
+### Checkpoint behavior
 
-### Ví dụ chạy pipeline đầy đủ
+`train_basic_model.py` sẽ:
+
+- kiểm tra checkpoint compatible trong `outputs/<model>/<dataset>/checkpoints/`
+- nếu có và không bật `--force_retrain 1` thì load lại, skip train, rồi vẫn export final evaluation / reports / artifacts
+- nếu chưa có checkpoint phù hợp thì mới train
+
+## 6. Proposal branch: PDG-UNet
+
+### Train full pipeline
 
 ```bash
 python train_pgd.py --dataset kvasir --root_path data/Kvasir-SEG --teacher_model unet_resnet152 --exp pdg_kvasir --max_epochs_teacher 50 --max_epochs_student 100 --prune_ratio 0.5 --lambda_distill 0.3 --lambda_sparsity 0.3 --batch_size 8 --patch_size 256 256
 ```
 
-### Hành vi mặc định của pipeline
+### Teacher reuse
 
-- Nếu `teacher checkpoint` đã tồn tại trong phase `teacher` thì sẽ load lại
-- Nếu `blueprint.json` đã tồn tại trong phase `pruning` thì sẽ load lại
-- Nếu `student checkpoint` đã tồn tại trong phase `student` thì sẽ load lại
-- Sau khi train xong, phase `teacher` và `student` sẽ tự evaluate `train / val / test`
-- Sau khi train xong, phase `teacher` và `student` sẽ tự evaluate đủ `train / val / test` để xuất trọn bộ metrics cuối
+Khi cần teacher checkpoint, `train_pgd.py` sẽ check theo thứ tự:
 
-### Các flag hữu ích
+1. `outputs/pdg_unet/<dataset>/<teacher>_teacher/1_teacher/checkpoints/`
+2. explicit `--teacher_checkpoint` nếu có
+3. `outputs/<teacher_model>/<dataset>/checkpoints/`
 
-- `--teacher_checkpoint`: chỉ định checkpoint teacher có sẵn
-- `--force_retrain_teacher 1`: train lại teacher từ đầu
-- `--force_reprune 1`: prune lại dù đã có blueprint
-- `--force_retrain_student 1`: train lại student từ đầu
+Nếu reuse từ `basic branch`, checkpoint sẽ được register lại vào `1_teacher/checkpoints/` để output proposal luôn đầy đủ và dễ đọc.
 
-## 8. Checkpoint và khả năng tái sử dụng
+### Pipeline phases
+
+Pipeline proposal gồm:
+
+1. `1_teacher`
+2. `2_pruning`
+3. `3_student`
+4. `student_final`
+5. `pipeline`
+
+## 7. Step 3: Student training / compression training
+
+Step 3 hiện bám theo logic implementation sau:
+
+1. load blueprint và pruned student checkpoint từ `2_pruning`
+2. build `PDGUNet` từ đúng `channel_config` của blueprint
+3. load teacher đã freeze từ `1_teacher`
+4. train student với:
+   `Ltotal = Lseg + lambda_distill * Ldistill + lambda_sparsity * Lsparsity`
+
+Nếu `student_variant` bật distillation, teacher sẽ supervise student xuyên suốt toàn bộ step 3. `warmup_pruning_epochs` hiện được dùng như cửa sổ epoch cuối để kích hoạt `late hard pruning`, chứ không còn là khoảng epoch đầu nữa.
+
+### Distillation
+
+Hiện tại distillation target là `logits`, chưa phải feature adapter riêng.
+
+### Gating và soft pruning
+
+Step 3 hỗ trợ `learnable channel gating` trên student.
+
+Soft pruning được định nghĩa là:
+
+- gate học được theo channel
+- cộng thêm sparsity regularization
+- channel nào có gate thấp dần sẽ được xem là bị suy yếu / gần tắt
+
+Hard pruning trong step 3 hiện được thực hiện ở cửa sổ epoch cuối:
+
+- gate được dùng để quyết định channel nào bị giữ / bị cắt
+- student được rebuild với `channel_config` nhỏ hơn
+- sau đó compact student tiếp tục được distill trong các epoch còn lại
+
+### Late hard pruning policy
+
+Step 3 hiện dùng `warmup_pruning_epochs` như số epoch cuối dành cho `late hard pruning`.
+
+Flag chính:
+
+- `--warmup_pruning_epochs`
+- `--student_variant`
+- `--lambda_distill`
+- `--lambda_sparsity`
+- `--student_gate_near_off_threshold`
+- `--student_hard_gate_threshold`
+
+Ý nghĩa:
+
+- trong các epoch trước cửa sổ cuối:
+  - gating + sparsity active
+  - soft pruning behavior được theo dõi
+  - nếu variant có distillation thì teacher distillation cũng chạy xuyên suốt
+- ở đầu cửa sổ `warmup_pruning_epochs` cuối:
+  - hệ thống dùng `student_hard_gate_threshold` hoặc fallback sang `student_gate_near_off_threshold`
+  - channel có gate thấp bị cắt cứng thật
+  - nếu threshold vẫn giữ toàn bộ channel ở một stage, repo sẽ cắt channel yếu nhất của stage đó để bảo đảm có structural pruning thật
+  - student được rebuild với số channel mới
+- trong các epoch cuối sau khi cắt:
+  - compact student tiếp tục distill từ frozen teacher
+  - gate không còn tiếp tục đẩy sparsity như giai đoạn trước
+
+### Student variants
+
+Step 3 hỗ trợ 4 variant:
+
+- `pruned_no_gate`
+- `pruned_distill`
+- `pruned_gate_sparsity`
+- `full`
+
+## 8. Checkpoint và metadata
 
 Checkpoint được quản lý qua `utils/checkpoints.py`.
 
-Mỗi checkpoint hiện lưu:
+Mỗi checkpoint có thể lưu:
 
 - `model_state_dict`
-- `optimizer_state_dict` nếu có
+- `optimizer_state_dict`
 - `epoch`
 - `global_step`
 - `best_metric`
@@ -202,314 +262,228 @@ Mỗi checkpoint hiện lưu:
 - `phase`
 - `extra_state`
 
-Điều này cho phép:
+Mặc định chỉ lưu:
 
-- resume training
-- load lại backbone/teacher/student đúng kiến trúc
-- tái sử dụng teacher checkpoint để prune lại
-- tái sử dụng student checkpoint để fine-tune hoặc evaluate tiếp
-- tái sử dụng blueprint để build lại student mà không cần prune lại
+- `best.pth`
+- `last.pth`
 
-## 9. Artifact output
-
-Repo hiện chuẩn hóa artifact theo các nhóm sau.
-
-### 9.1 Checkpoints
-
-Mỗi run có thư mục:
-
-```text
-checkpoints/
-├─ best.pth
-├─ last.pth
-└─ metadata/
-   ├─ best.json
-   └─ last.json
-```
-
-Mặc định repo chỉ lưu:
-
-- `best.pth`: checkpoint tốt nhất theo metric chọn
-- `last.pth`: checkpoint mới nhất của run
-
-Nếu muốn giữ lịch sử checkpoint theo epoch/iteration, bật:
+Nếu muốn giữ thêm checkpoint history:
 
 ```bash
 --save_history_checkpoints 1
 ```
 
-Khi đó mới có thêm các file kiểu `epoch_xxx.pth` trong `checkpoints/`.
+## 9. Output structure
 
-Trong `configs/` hiện có:
+### 9.1 Basic branch
 
-- `run_config.json`
-- `hyperparameters.json`
-- `model_config.json`
+```text
+outputs/<model_name>/<dataset>/
+├─ artifacts/
+│  ├─ channel_analysis/
+│  └─ visualizations/
+├─ checkpoints/
+│  ├─ best.pth
+│  ├─ last.pth
+│  └─ metadata/
+├─ configs/
+│  ├─ run_config.json
+│  ├─ hyperparameters.json
+│  └─ model_config.json
+├─ evaluations/
+│  ├─ train/
+│  ├─ val/
+│  └─ test/
+├─ metrics/
+│  └─ basic_metrics.csv
+├─ reports/
+│  ├─ basic_loss.pdf
+│  ├─ basic_performance.pdf
+│  ├─ basic_train_visualizations.pdf
+│  ├─ basic_val_visualizations.pdf
+│  └─ basic_test_visualizations.pdf
+└─ run.log
+```
 
-### 9.2 Evaluation summaries
+### 9.2 Proposal branch
 
-Mỗi split evaluate có:
+```text
+outputs/pdg_unet/<dataset>/<teacher_model>_teacher/
+├─ 1_teacher/
+├─ 2_pruning/
+├─ 3_student/
+├─ student_final/
+└─ pipeline/
+```
 
+#### `1_teacher`
+
+Lưu:
+
+- checkpoint teacher
+- configs
+- metrics
+- reports
+- evaluations
+- channel analysis
+- visualizations
+
+#### `2_pruning`
+
+Lưu:
+
+- `blueprint.json`
+- pruning summary
+- teacher vs student channel comparison
+- pruning analysis
+- pruned-student baseline checkpoint
+- pruned-student evaluation `train/val/test`
+
+Quan trọng:
+
+- `2_pruning` bây giờ không chỉ là stage kiến trúc
+- nó còn evaluate một `pruned student before tuning` để bạn nhìn được hiệu quả ngay sau pruning
+
+#### `3_student`
+
+Lưu:
+
+- checkpoint student
+- configs
+- metrics
+- reports
+- evaluations
+- `artifacts/channel_analysis/`
+- `artifacts/visualizations/`
+- `artifacts/gating_analysis/`
+- `artifacts/student_tuning_analysis/`
+- `metrics/student_epoch_diagnostics.csv`
+- `reports/student_channel_gating_report.pdf`
+
+#### `student_final`
+
+Shortcut export cho weight cuối:
+
+```text
+student_final/
+├─ best_student.pth
+├─ last_student.pth
+├─ best_student.json
+└─ last_student.json
+```
+
+#### `pipeline`
+
+Lưu report tổng hợp toàn pipeline:
+
+- `metrics/pipeline_stage_overview.csv`
+- `metrics/pipeline_metrics.csv`
+- `metrics/pipeline_compression_summary.csv`
+- `reports/pipeline_performance.pdf`
+- `reports/pipeline_<phase>_<split>_visualizations.pdf`
+- `evaluations/pipeline_summary.json`
+- `evaluations/pipeline_summary.md`
+
+Pipeline tổng hợp cả:
+
+- teacher metrics
+- pruning baseline metrics
+- final student metrics
+- compression summary
+
+## 10. Evaluation và metrics
+
+Metric chính:
+
+- Dice
+- IoU
+- HD95
+
+Thông tin efficiency:
+
+- Params
+- FLOPs
+- FPS
+- inference time
+
+Mỗi phase có thể export:
+
+- `case_metrics.csv`
 - `summary.json`
 - `summary.md`
 - `metrics_summary.json`
-- `case_metrics.csv`
-- ảnh visualization PNG theo thư mục con
 
-### 9.3 CSV metrics
+Các split cuối mặc định:
 
-Các CSV tổng hợp được ghi bởi `utils/reporting.py` và có thể chứa:
+- `train`
+- `val`
+- `test`
 
-- `experiment`
-- `dataset`
-- `split`
-- `phase`
-- `model_name`
-- `backbone_name`
-- `student_name`
-- `dice`
-- `iou`
-- `hd95`
-- `params`
-- `trainable_params`
-- `flops`
-- `fps`
-- `inference_time_seconds`
-- `evaluation_time_seconds`
-- `checkpoint_path`
+## 11. Reports và artifacts
 
-### 9.4 PDF reports
+### PDF reports
 
 Repo hiện hỗ trợ:
 
 - `loss.pdf`
 - `visualizations.pdf`
 - `performance.pdf`
+- `channel_analysis.pdf`
+- `gating_analysis.pdf`
+- `student_channel_gating_report.pdf`
 
-Trong đó:
+### Channel / gating / pruning artifacts
 
-- `loss.pdf` dùng để theo dõi loss theo epoch
-- `visualizations.pdf` gồm `image / ground truth / prediction`
-- `performance.pdf` gồm bảng tổng hợp và biểu đồ các metric chính
+Các nhóm artifact chính:
 
-### 9.5 Channel and pruning artifacts
+- `artifacts/channel_analysis/`
+- `artifacts/visualizations/`
+- `artifacts/gating_analysis/`
+- `artifacts/student_tuning_analysis/`
+- `artifacts/pruning_analysis/`
 
-Ngoài các artifact chuẩn phía trên, repo hiện xuất thêm một nhóm artifact riêng để theo dõi channel structure và pruning decision.
+### Student step-3 diagnostics
 
-#### Basic branch
+Step 3 export thêm:
 
-Final checkpoint của basic model sẽ có thêm:
+- student input channel profile
+- student final channel profile
+- gate summary
+- gate values per channel
+- so sánh `student_input -> student_final`
+- per-epoch diagnostics để chứng minh soft pruning behavior
 
-- `artifacts/channel_analysis/channel_summary.csv`
-- `artifacts/channel_analysis/channel_importance.csv`
-- `artifacts/channel_analysis/channel_analysis.json`
-- `artifacts/channel_analysis/channel_analysis.pdf`
+## 12. Một số lưu ý thực tế
 
-Nhóm file này dùng để lưu:
+- `net_factory.py` không route `pdg_unet`; đây là chủ đích để tách `basic` và `proposal`
+- `thop` có thể gắn `total_ops/total_params` vào model; repo đã strip các key này khi save/load checkpoint
+- path trong metadata ưu tiên dạng tương đối như `outputs/...` hoặc `evaluations/...`, không lưu absolute path
+- `test2d.py` ưu tiên output mới trong `outputs/...`, nhưng vẫn fallback được cho run legacy nếu cần
+- distillation của step 3 hiện là `logits distillation`
+- late hard pruning của step 3 hiện rebuild lại student thật dựa trên gate threshold ở cửa sổ epoch cuối
 
-- số `in_channels / out_channels` của từng layer
-- `kernel_size` và `weight_shape`
-- channel importance theo tiêu chí `filter_l1`
-- global summary của kiến trúc cuối cùng
+## 13. compare_artifacts.py
 
-#### Proposal branch - teacher phase
-
-Teacher phase cũng xuất một channel profile tương tự tại:
-
-- `artifacts/channel_analysis/channel_summary.csv`
-- `artifacts/channel_analysis/channel_importance.csv`
-- `artifacts/channel_analysis/channel_analysis.json`
-- `artifacts/channel_analysis/channel_analysis.pdf`
-
-Mục tiêu là có một mốc trước pruning để so với student sau pruning và sau tuning.
-
-#### Proposal branch - pruning phase
-
-Pruning phase xuất chi tiết quyết định prune tại:
-
-- `artifacts/pruning_analysis/teacher_channel_summary.csv`
-- `artifacts/pruning_analysis/teacher_channel_importance.csv`
-- `artifacts/pruning_analysis/channel_level_detail.csv`
-- `artifacts/pruning_analysis/pruning_summary.csv`
-- `artifacts/pruning_analysis/teacher_vs_student_channels.csv`
-- `artifacts/pruning_analysis/global_pruning_summary.csv`
-- `artifacts/pruning_analysis/pruning_analysis.json`
-- `artifacts/pruning_analysis/pruning_analysis.pdf`
-
-Các file này trả lời trực tiếp các câu hỏi:
-
-- layer nào bị prune
-- teacher có bao nhiêu channel
-- student sau pruning còn bao nhiêu channel
-- channel nào được giữ
-- channel nào bị cắt
-- prune ratio thực tế của từng layer và toàn cục
-
-#### Proposal branch - student phase
-
-Student phase lưu cả trước và sau tuning:
-
-- `artifacts/channel_analysis/student_input_channel_summary.csv`
-- `artifacts/channel_analysis/student_input_channel_importance.csv`
-- `artifacts/channel_analysis/student_input_gate_summary.csv`
-- `artifacts/channel_analysis/student_input_gate_values.csv`
-- `artifacts/channel_analysis/student_final_channel_summary.csv`
-- `artifacts/channel_analysis/student_final_channel_importance.csv`
-- `artifacts/channel_analysis/student_final_gate_summary.csv`
-- `artifacts/channel_analysis/student_final_gate_values.csv`
-- `artifacts/channel_analysis/student_tuning_comparison.csv`
-- `artifacts/channel_analysis/student_tuning_comparison.json`
-- `artifacts/channel_analysis/student_tuning_comparison.pdf`
-
-Lưu ý về tiêu chí:
-
-- basic/teacher/final student channel analysis dùng `filter_l1`
-- pruning decision thật dùng `bn_weight_or_l1`
-- student phase lưu thêm `gate_value` để thấy channel nào gần như bị tắt
-
-## 10. Vị trí output hiện tại
-
-### Basic branch
-
-Basic branch hiện lưu tại:
-
-```text
-outputs/<model_name>/<dataset>/
-```
-
-Trong đó sẽ có thêm:
-
-- `checkpoints/`
-- `metrics/`
-- `reports/`
-- `configs/`
-- `evaluations/`
-- `artifacts/`
-
-Run root chỉ nên còn:
-
-- các thư mục output chuẩn
-- `run.log`
-
-Repo không còn copy `train_basic_model.py` vào thư mục run nữa.
-
-### Proposal branch
-
-Proposal branch hiện lưu theo phase tại:
-
-```text
-outputs/pdg_unet/
-├─ <dataset>/<teacher_model>_teacher/
-│  ├─ 1_teacher/
-│  ├─ 2_pruning/
-│  ├─ 3_student/
-│  ├─ student_final/
-│  └─ pipeline/
-```
-
-## 11. Metric đang dùng
-
-Evaluation hiện đã được chuẩn hóa về:
-
-- Dice
-- IoU
-- HD95
-
-Metric logic nằm trong:
-
-- `utils/val_2d.py`
-- `utils/evaluation.py`
-
-## 12. Loss đang dùng
-
-### Basic branch
-
-`train_basic_model.py` hiện dùng:
-
-- `CrossEntropyLoss`
-- `DiceLoss`
-- tổng hợp thành `0.5 * (CE + Dice)`
-
-### Proposal branch
-
-`train_pgd.py` hiện dùng `CompressionLoss` gồm:
-
-- `segmentation_loss`
-- `distillation_loss`
-- `sparsity_loss`
-- `total_loss`
-
-## 13. Vai trò của các file chính
-
-- `train_basic_model.py`: train và evaluate các baseline models
-- `train_pgd.py`: pipeline teacher -> pruning -> student cho proposal model
-- `test2d.py`: evaluate checkpoint baseline độc lập
-- `networks/net_factory.py`: router/factory cho basic models
-- `utils/model_output.py`: output contract chuẩn cho mọi model
-- `utils/checkpoints.py`: save/load checkpoint có metadata
-- `utils/reporting.py`: export CSV/PDF dùng chung
-- `utils/profiling.py`: params, FLOPs, FPS, inference time
-
-## 14. Một số lưu ý thực tế
-
-- `net_factory.py` hiện chưa route `pdg_unet`; đây là chủ đích để tách rõ basic branch và proposal branch
-- FLOPs chỉ được ghi nếu bạn cài thêm `thop`
-- `thop` có thể gắn `total_ops/total_params` vào model; repo hiện đã tự động lọc các key này khi save/load checkpoint để tránh lỗi `load_state_dict`
-- `test2d.py` mặc định đọc từ `outputs/...`, nhưng vẫn fallback sang `logs/...` cũ nếu bạn đang evaluate run legacy
-- metadata và evaluation summary hiện ưu tiên lưu path tương đối như `outputs/...` hoặc `evaluations/...` thay vì full absolute path
-
-## 15. Hướng phát triển tiếp theo
-
-Một số bước nên làm tiếp nếu muốn codebase sạch hơn nữa:
-
-- tách trainer/evaluator/exporter thành module riêng thay vì để nhiều logic trong script train
-- bổ sung một `index` hoặc `registry` tổng hợp các run trong `outputs/` để duyệt thí nghiệm nhanh hơn
-- thêm config YAML hoặc JSON tập trung thay vì phụ thuộc hoàn toàn vào CLI
-- thêm `resume` chính thức cho từng phase
-- thêm benchmark script tổng hợp nhiều model vào cùng một bảng so sánh
-
-## 16. Tóm tắt nhanh
-
-Nếu bạn chỉ muốn bắt đầu nhanh:
-
-1. Cài dependency
-2. Chuẩn bị dataset và split
-3. Train baseline bằng `train_basic_model.py` rồi repo sẽ tự evaluate `train/val/test`
-4. Train proposal bằng `train_pgd.py` rồi phase `teacher` và `student` sẽ tự evaluate `train/val/test`
-5. So sánh CSV/PDF/checkpoint artifact giữa hai nhánh
-
-Repo hiện đã được tổ chức theo hướng:
-
-- output model thống nhất
-- checkpoint rõ ràng
-- artifact xuất đồng nhất
-- support tái sử dụng teacher/student/blueprint
-- dễ so sánh công bằng giữa baseline và proposal
-
-## 17. Unified comparison report from saved outputs
-
-Repo hiện có thêm script `compare_artifacts.py` để gom kết quả của:
+Repo có thêm `compare_artifacts.py` để gom kết quả:
 
 - `basic baseline`
 - `teacher`
-- `pruned student blueprint`
+- `pruned student`
 - `tuned student`
 
-thành một report duy nhất mà không cần train lại.
+thành một report thống nhất.
 
-### Cách chạy nhanh với pipeline summary
+### Ví dụ dùng pipeline summary
 
 ```bash
 python compare_artifacts.py --basic_run_dir outputs/<basic_model>/<dataset> --pipeline_dir outputs/pdg_unet/<dataset>/<teacher_model>_teacher/pipeline --comparison_name <report_name>
 ```
 
-### Cách chạy khi muốn chỉ định từng phase riêng
+### Ví dụ chỉ định từng phase
 
 ```bash
 python compare_artifacts.py --basic_run_dir outputs/<basic_model>/<dataset> --teacher_run_dir outputs/pdg_unet/<dataset>/<teacher_model>_teacher/1_teacher --pruning_run_dir outputs/pdg_unet/<dataset>/<teacher_model>_teacher/2_pruning --student_run_dir outputs/pdg_unet/<dataset>/<teacher_model>_teacher/3_student --output_dir outputs/comparisons/<report_name>
 ```
-
-### Output của script tổng hợp
 
 Script sẽ sinh:
 
@@ -521,16 +495,11 @@ Script sẽ sinh:
 - `comparison_summary.json`
 - `comparison_report.pdf`
 
-Ý nghĩa:
+## 14. Quick start
 
-- `stage_overview.csv`: so sánh mức stage giữa basic, teacher, pruned student, tuned student
-- `performance_comparison.csv`: gom Dice/IoU/HD95 và thông tin profiling cho các stage có evaluate
-- `pruning_global_summary.csv`: tổng hợp pruning ratio toàn cục
-- `teacher_vs_student_channels.csv`: so sánh channel teacher và pruned student theo layer
-- `student_tuning_comparison.csv`: so sánh student trước tuning và sau tuning
-- `comparison_report.pdf`: bản PDF duy nhất để đọc nhanh toàn bộ pipeline
-
-Lưu ý:
-
-- `pruned student blueprint` là stage kiến trúc, nên thường không có Dice/IoU riêng nếu chưa evaluate nó như một model độc lập
-- so sánh layer-wise trực tiếp giữa `basic` và `proposal` không phải lúc nào cũng 1-1 vì topology khác nhau; script vì vậy ưu tiên `stage-level summary` cho cross-architecture comparison và giữ `teacher -> pruned student` ở mức layer-wise vì đó là mapping hợp lệ
+1. Cài dependency
+2. Chuẩn bị dataset và split
+3. Train baseline bằng `train_basic_model.py`
+4. Train proposal bằng `train_pgd.py`
+5. Đọc output trong `outputs/`
+6. So sánh kết quả bằng `compare_artifacts.py`

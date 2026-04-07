@@ -19,6 +19,7 @@ COMPATIBILITY_KEYS = (
     "encoder_pretrained",
     "teacher_model",
     "channel_config",
+    "student_variant",
 )
 
 
@@ -57,6 +58,11 @@ def extract_checkpoint_signature(payload: Dict[str, Any]) -> Dict[str, Any]:
         architecture_config.get("channel_config")
         or extra_state.get("blueprint", {}).get("channel_config")
     )
+    student_variant_info = model_info.get("student_variant")
+    if isinstance(student_variant_info, dict):
+        student_variant = student_variant_info.get("variant_name")
+    else:
+        student_variant = student_variant_info or config.get("student_variant")
 
     return {
         "dataset": config.get("dataset"),
@@ -67,6 +73,7 @@ def extract_checkpoint_signature(payload: Dict[str, Any]) -> Dict[str, Any]:
         "encoder_pretrained": config.get("encoder_pretrained"),
         "teacher_model": teacher_model,
         "channel_config": _normalize_sequence(channel_config),
+        "student_variant": student_variant,
         "phase": payload.get("phase"),
         "branch": model_info.get("branch"),
     }
@@ -82,6 +89,7 @@ def build_expected_signature(
     encoder_pretrained: Optional[int | bool] = None,
     teacher_model: Optional[str] = None,
     channel_config: Optional[Sequence[int]] = None,
+    student_variant: Optional[str] = None,
 ) -> Dict[str, Any]:
     return {
         "dataset": dataset,
@@ -92,6 +100,7 @@ def build_expected_signature(
         "encoder_pretrained": encoder_pretrained,
         "teacher_model": teacher_model,
         "channel_config": tuple(channel_config) if channel_config is not None else None,
+        "student_variant": student_variant,
     }
 
 

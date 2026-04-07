@@ -22,6 +22,15 @@ class LearnableGate(nn.Module):
     def values(self) -> torch.Tensor:
         return torch.sigmoid(self.alpha)
 
+    def set_trainable(self, trainable: bool) -> None:
+        self.alpha.requires_grad_(trainable)
+
+    def force_probability(self, value: float) -> None:
+        clamped = min(max(float(value), 1e-4), 1.0 - 1e-4)
+        logit = torch.logit(torch.tensor(clamped, dtype=self.alpha.dtype, device=self.alpha.device))
+        with torch.no_grad():
+            self.alpha.fill_(float(logit.item()))
+
 
 class GatedDoubleConv2d(nn.Module):
     def __init__(self, in_channels: int, out_channels: int, normalization: str = "batchnorm") -> None:
@@ -133,6 +142,21 @@ class PDGUNet(BaseSegmentationModel):
             if isinstance(module, GatedDoubleConv2d):
                 gate_values.append(module.gate_values())
         return gate_values
+
+    def get_gate_modules(self) -> List[LearnableGate]:
+        gate_modules: List[LearnableGate] = []
+        for module in self.modules():
+            if isinstance(module, GatedDoubleConv2d):
+                gate_modules.append(module.gate)
+        return gate_modules
+
+    def set_gate_trainable(self, trainable: bool) -> None:
+        for gate in self.get_gate_modules():
+            gate.set_trainable(trainable)
+
+    def force_gates_open(self, open_probability: float = 0.999) -> None:
+        for gate in self.get_gate_modules():
+            gate.force_probability(open_probability)
 
     def get_gate_statistics(self) -> Dict[str, List[float]]:
         return {

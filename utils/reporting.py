@@ -88,7 +88,7 @@ def save_visualization_pdf(samples: Sequence[Mapping], pdf_path: Path | str, *, 
             return pdf_path
 
         num_rows = len(samples)
-        fig_height = max(4, 3.2 * num_rows)
+        fig_height = max(4.8, 3.8 * num_rows)
         fig, axes = plt.subplots(num_rows, 3, figsize=(12, fig_height))
         if num_rows == 1:
             axes = np.expand_dims(axes, axis=0)
@@ -97,17 +97,21 @@ def save_visualization_pdf(samples: Sequence[Mapping], pdf_path: Path | str, *, 
             row_axes = axes[row_index]
             case_name = sample.get("case", f"sample_{row_index}")
             row_axes[0].imshow(_normalize_image_for_plot(sample["image"]))
-            row_axes[0].set_title(f"Image (case{case_name})")
+            row_axes[0].set_title(f"Image | {case_name}", fontsize=10, pad=8)
             row_axes[1].imshow(colorize_mask(sample["label"]).permute(1, 2, 0).numpy())
-            row_axes[1].set_title("Ground Truth")
+            row_axes[1].set_title("Ground Truth", fontsize=10, pad=8)
             row_axes[2].imshow(colorize_mask(sample["prediction"]).permute(1, 2, 0).numpy())
             dice_value = sample.get("dice")
-            row_axes[2].set_title("Predict" if dice_value is None else f"Predict | Dice {dice_value:.4f}")
+            predict_title = "Prediction" if dice_value is None else f"Prediction | Dice {dice_value:.4f}"
+            row_axes[2].set_title(predict_title, fontsize=10, pad=8)
             for axis in row_axes:
                 axis.axis("off")
 
-        fig.suptitle(title, fontsize=12)
-        fig.tight_layout()
+        if title:
+            fig.suptitle(title, fontsize=12, y=0.995)
+            fig.tight_layout(rect=(0.0, 0.0, 1.0, 0.95), h_pad=2.0, w_pad=1.5)
+        else:
+            fig.tight_layout(h_pad=2.0, w_pad=1.5)
         pdf.savefig(fig)
         plt.close(fig)
     return pdf_path

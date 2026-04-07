@@ -28,6 +28,7 @@ from utils.channel_analysis import (
     extract_channel_analysis,
     save_channel_analysis_artifacts,
     save_comparison_artifacts,
+    save_gating_analysis_artifacts,
     save_pruning_analysis_artifacts,
 )
 from utils.checkpoints import build_checkpoint_metadata, load_checkpoint, load_checkpoint_into_model, resolve_phase_checkpoint, save_checkpoint
@@ -52,7 +53,14 @@ from utils.experiment import (
 from utils.losses import DiceLoss
 from utils.model_output import extract_logits, extract_model_info
 from utils.profiling import benchmark_inference, count_parameters, maybe_compute_flops
-from utils.reporting import save_loss_pdf, save_performance_pdf, save_visualization_overview_image, save_visualization_pdf, write_metrics_rows
+from utils.reporting import (
+    save_channel_analysis_pdf,
+    save_loss_pdf,
+    save_performance_pdf,
+    save_visualization_overview_image,
+    save_visualization_pdf,
+    write_metrics_rows,
+)
 
 
 PROJECT_ROOT = Path(__file__).resolve().parent
@@ -79,6 +87,27 @@ parser.add_argument("--encoder_pretrained", type=int, default=0)
 parser.add_argument("--prune_ratio", type=float, default=0.5)
 parser.add_argument("--lambda_distill", type=float, default=0.3)
 parser.add_argument("--lambda_sparsity", type=float, default=0.3)
+parser.add_argument(
+    "--student_variant",
+    type=str,
+    default="full",
+    choices=["pruned_no_gate", "pruned_distill", "pruned_gate_sparsity", "full"],
+    help="student compression variant for step 3",
+)
+parser.add_argument(
+    "--warmup_pruning_epochs",
+    type=int,
+    default=4,
+    help="number of final step-3 epochs reserved for late hard pruning and compact-student distillation",
+)
+parser.add_argument("--student_gate_near_off_threshold", type=float, default=0.10, help="gate value threshold used to flag channels as nearly switched off")
+parser.add_argument("--student_gate_open_value", type=float, default=0.999, help="gate probability used when student_variant disables gating")
+parser.add_argument(
+    "--student_hard_gate_threshold",
+    type=float,
+    default=-1.0,
+    help="optional threshold for late structural hard pruning; <=0 falls back to student_gate_near_off_threshold",
+)
 parser.add_argument("--seed", type=int, default=1337)
 parser.add_argument("--deterministic", type=int, default=1)
 parser.add_argument("--gpu", type=str, default="0")
@@ -152,6 +181,7 @@ def _student_signature(channel_config, in_channels: int) -> dict:
         patch_size=args.patch_size,
         teacher_model=args.teacher_model,
         channel_config=channel_config,
+        student_variant=args.student_variant,
     )
 
 
@@ -160,6 +190,223 @@ def _restore_loss_pdf_if_possible(history: dict | None, pdf_path: Path, title: s
         return
     if any(values for values in history.values() if isinstance(values, list)):
         save_loss_pdf(history, pdf_path, title=title)
+
+
+def _student_variant_policy() -> dict:
+    policies = {
+        "pruned_no_gate": {
+            "variant_name": "pruned_no_gate",
+            "use_distill": False,
+            "use_gating": False,
+            "use_sparsity": False,
+            "description": "Pruned student baseline without distillation or learnable gating.",
+        },
+        "pruned_distill": {
+            "variant_name": "pruned_distill",
+            "use_distill": True,
+            "use_gating": False,
+            "use_sparsity": False,
+            "description": "Pruned student with teacher distillation but fixed-open gates.",
+        },
+        "pruned_gate_sparsity": {
+            "variant_name": "pruned_gate_sparsity",
+            "use_distill": False,
+            "use_gating": True,
+            "use_sparsity": True,
+            "description": "Pruned student with learnable gating and sparsity, without teacher distillation.",
+        },
+        "full": {
+            "variant_name": "full",
+            "use_distill": True,
+            "use_gating": True,
+            "use_sparsity": True,
+            "description": "Full proposal step 3: blueprint initialization + teacher distillation + gating + sparsity.",
+        },
+    }
+    return dict(policies[args.student_variant])
+
+
+def _build_pruning_warmup_schedule(total_epochs: int, requested_warmup_epochs: int, variant_policy: dict) -> dict:
+    requested = max(0, int(requested_warmup_epochs))
+    total_epochs = max(1, int(total_epochs))
+    hard_pruning_threshold = (
+        float(args.student_hard_gate_threshold)
+        if float(args.student_hard_gate_threshold) > 0
+        else float(args.student_gate_near_off_threshold)
+    )
+
+    if not variant_policy["use_gating"] or not variant_policy["use_sparsity"]:
+        return {
+            "requested_warmup_pruning_epochs": requested,
+            "effective_warmup_pruning_epochs": 0,
+            "active_soft_pruning_epochs": 0,
+            "late_hard_pruning_epochs": 0,
+            "hard_pruning_start_epoch": None,
+            "hard_pruning_threshold": None,
+            "hard_pruning_enabled": False,
+            "policy_note": (
+                "Soft pruning is disabled because gating or sparsity is disabled for the selected student variant. "
+                "If the variant enables distillation, teacher distillation still stays active for the whole step-3 run, "
+                "but no late structural hard pruning is applied."
+            ),
+        }
+
+    effective_late_pruning_epochs = min(requested, total_epochs)
+    if effective_late_pruning_epochs <= 0:
+        return {
+            "requested_warmup_pruning_epochs": requested,
+            "effective_warmup_pruning_epochs": 0,
+            "active_soft_pruning_epochs": total_epochs,
+            "late_hard_pruning_epochs": 0,
+            "hard_pruning_start_epoch": None,
+            "hard_pruning_threshold": None,
+            "hard_pruning_enabled": False,
+            "policy_note": (
+                "Late hard pruning is disabled for this run. The student keeps learnable gating and sparsity pressure for the whole step-3 run, "
+                "and distillation stays active whenever the selected variant enables it."
+            ),
+        }
+
+    hard_pruning_start_epoch = max(1, total_epochs - effective_late_pruning_epochs + 1)
+    active_soft_pruning_epochs = max(0, hard_pruning_start_epoch - 1)
+
+    return {
+        "requested_warmup_pruning_epochs": requested,
+        "effective_warmup_pruning_epochs": effective_late_pruning_epochs,
+        "active_soft_pruning_epochs": active_soft_pruning_epochs,
+        "late_hard_pruning_epochs": effective_late_pruning_epochs,
+        "hard_pruning_start_epoch": hard_pruning_start_epoch,
+        "hard_pruning_threshold": hard_pruning_threshold,
+        "hard_pruning_enabled": True,
+        "policy_note": (
+            "Learnable gating + sparsity stay active during the early search epochs. "
+            "At the beginning of the final pruning window, the student is structurally hard-pruned using gate values, "
+            "then the compact student continues training with frozen gates and ongoing distillation."
+        ),
+    }
+
+
+def _student_epoch_policy(epoch: int, schedule: dict, variant_policy: dict) -> dict:
+    if not variant_policy["use_gating"]:
+        return {
+            "phase_name": "distillation_only" if variant_policy["use_distill"] else "plain_student_training",
+            "gate_trainable": False,
+            "lambda_distill": args.lambda_distill if variant_policy["use_distill"] else 0.0,
+            "lambda_sparsity": 0.0,
+            "soft_pruning_active": False,
+            "hard_pruning_active": False,
+        }
+
+    active_soft_pruning_epochs = int(schedule.get("active_soft_pruning_epochs", 0))
+    hard_pruning_start_epoch = schedule.get("hard_pruning_start_epoch")
+    in_soft_pruning = variant_policy["use_sparsity"] and epoch <= active_soft_pruning_epochs
+    hard_pruning_active = bool(schedule.get("hard_pruning_enabled")) and hard_pruning_start_epoch is not None and epoch == int(hard_pruning_start_epoch)
+
+    if hard_pruning_active:
+        phase_name = "late_hard_pruning_distillation" if variant_policy["use_distill"] else "late_hard_pruning"
+    elif hard_pruning_start_epoch is not None and epoch > int(hard_pruning_start_epoch):
+        phase_name = "post_hard_pruning_distillation" if variant_policy["use_distill"] else "post_hard_pruning_stabilization"
+    elif in_soft_pruning:
+        phase_name = "pre_hard_pruning_gate_search_distillation" if variant_policy["use_distill"] else "pre_hard_pruning_gate_search"
+    elif variant_policy["use_distill"]:
+        phase_name = "distillation_with_frozen_gates"
+    else:
+        phase_name = "gate_stabilization"
+
+    return {
+        "phase_name": phase_name,
+        "gate_trainable": bool(in_soft_pruning),
+        "lambda_distill": args.lambda_distill if variant_policy["use_distill"] else 0.0,
+        "lambda_sparsity": args.lambda_sparsity if in_soft_pruning else 0.0,
+        "soft_pruning_active": bool(in_soft_pruning),
+        "hard_pruning_active": hard_pruning_active,
+    }
+
+
+def _freeze_teacher_model(teacher_model) -> None:
+    teacher_model.eval()
+    for parameter in teacher_model.parameters():
+        parameter.requires_grad = False
+
+
+def _build_student_from_blueprint(db_train, pruning_artifact: dict) -> PDGUNet:
+    return PDGUNet(
+        in_channels=db_train.in_channels,
+        num_classes=args.num_classes,
+        channel_config=tuple(pruning_artifact["blueprint"]["channel_config"]),
+    )
+
+
+def _configure_student_variant(student: PDGUNet, variant_policy: dict) -> None:
+    if not variant_policy["use_gating"]:
+        student.force_gates_open(args.student_gate_open_value)
+        student.set_gate_trainable(False)
+
+
+def _summarize_student_gates(student: PDGUNet, threshold: float) -> dict:
+    layer_rows = []
+    all_values = []
+    for module_name, module in student.named_modules():
+        if hasattr(module, "gate_values") and callable(module.gate_values):
+            gate_tensor = module.gate_values().detach().cpu().float()
+            values = gate_tensor.tolist()
+            if not values:
+                continue
+            layer_rows.append(
+                {
+                    "layer_name": module_name,
+                    "gate_mean": float(gate_tensor.mean().item()),
+                    "gate_min": float(gate_tensor.min().item()),
+                    "gate_max": float(gate_tensor.max().item()),
+                    "gate_std": float(gate_tensor.std(unbiased=False).item()) if gate_tensor.numel() > 1 else 0.0,
+                    "near_off_channels": int((gate_tensor < threshold).sum().item()),
+                    "total_channels": int(gate_tensor.numel()),
+                    "near_off_ratio": float((gate_tensor < threshold).float().mean().item()),
+                }
+            )
+            all_values.extend(float(value) for value in values)
+
+    if not all_values:
+        return {
+            "global": {
+                "gate_mean": 0.0,
+                "gate_min": 0.0,
+                "gate_max": 0.0,
+                "gate_std": 0.0,
+                "near_off_channels": 0,
+                "total_gate_channels": 0,
+                "near_off_ratio": 0.0,
+            },
+            "layer_rows": [],
+        }
+
+    gate_tensor = torch.tensor(all_values, dtype=torch.float32)
+    return {
+        "global": {
+            "gate_mean": float(gate_tensor.mean().item()),
+            "gate_min": float(gate_tensor.min().item()),
+            "gate_max": float(gate_tensor.max().item()),
+            "gate_std": float(gate_tensor.std(unbiased=False).item()) if gate_tensor.numel() > 1 else 0.0,
+            "near_off_channels": int((gate_tensor < threshold).sum().item()),
+            "total_gate_channels": int(gate_tensor.numel()),
+            "near_off_ratio": float((gate_tensor < threshold).float().mean().item()),
+        },
+        "layer_rows": layer_rows,
+    }
+
+
+def _resolve_student_from_pruning_checkpoint(student: PDGUNet, pruning_artifact: dict, device: torch.device) -> dict:
+    pruning_checkpoint_path = Path(pruning_artifact["checkpoint_path"])
+    payload = load_checkpoint_into_model(pruning_checkpoint_path, student, device=device)
+    return {
+        "checkpoint_path": pruning_checkpoint_path,
+        "payload": payload,
+    }
+
+
+def _save_student_epoch_diagnostics(run_dir: Path, diagnostics_rows: list[dict]) -> None:
+    if diagnostics_rows:
+        write_metrics_rows(diagnostics_rows, run_dir / "metrics" / "student_epoch_diagnostics.csv")
 
 
 def _copy_exact_matching_weights(source_model, target_model) -> dict:
@@ -186,6 +433,156 @@ def _copy_exact_matching_weights(source_model, target_model) -> dict:
         "copied_key_examples": copied_keys[:20],
         "skipped_key_examples": skipped_keys[:20],
     }
+
+
+def _copy_norm_state(source_norm, target_norm, out_indices: list[int]) -> None:
+    if not out_indices:
+        return
+    index = torch.as_tensor(out_indices, dtype=torch.long, device=next(source_norm.parameters(), torch.tensor([], device="cpu")).device if any(True for _ in source_norm.parameters()) else torch.device("cpu"))
+    if hasattr(source_norm, "weight") and getattr(source_norm, "weight", None) is not None and hasattr(target_norm, "weight") and getattr(target_norm, "weight", None) is not None:
+        target_norm.weight.data.copy_(source_norm.weight.data.index_select(0, index).to(target_norm.weight.device))
+    if hasattr(source_norm, "bias") and getattr(source_norm, "bias", None) is not None and hasattr(target_norm, "bias") and getattr(target_norm, "bias", None) is not None:
+        target_norm.bias.data.copy_(source_norm.bias.data.index_select(0, index).to(target_norm.bias.device))
+    if hasattr(source_norm, "running_mean") and getattr(source_norm, "running_mean", None) is not None and hasattr(target_norm, "running_mean") and getattr(target_norm, "running_mean", None) is not None:
+        target_norm.running_mean.data.copy_(source_norm.running_mean.data.index_select(0, index).to(target_norm.running_mean.device))
+    if hasattr(source_norm, "running_var") and getattr(source_norm, "running_var", None) is not None and hasattr(target_norm, "running_var") and getattr(target_norm, "running_var", None) is not None:
+        target_norm.running_var.data.copy_(source_norm.running_var.data.index_select(0, index).to(target_norm.running_var.device))
+
+
+def _copy_conv2d_state(source_conv, target_conv, out_indices: list[int], in_indices: list[int]) -> None:
+    out_index = torch.as_tensor(out_indices, dtype=torch.long, device=source_conv.weight.device)
+    in_index = torch.as_tensor(in_indices, dtype=torch.long, device=source_conv.weight.device)
+    weight = source_conv.weight.data.index_select(0, out_index).index_select(1, in_index)
+    target_conv.weight.data.copy_(weight.to(target_conv.weight.device))
+    if source_conv.bias is not None and target_conv.bias is not None:
+        target_conv.bias.data.copy_(source_conv.bias.data.index_select(0, out_index).to(target_conv.bias.device))
+
+
+def _copy_convtranspose2d_state(source_conv, target_conv, in_indices: list[int], out_indices: list[int]) -> None:
+    in_index = torch.as_tensor(in_indices, dtype=torch.long, device=source_conv.weight.device)
+    out_index = torch.as_tensor(out_indices, dtype=torch.long, device=source_conv.weight.device)
+    weight = source_conv.weight.data.index_select(0, in_index).index_select(1, out_index)
+    target_conv.weight.data.copy_(weight.to(target_conv.weight.device))
+    if source_conv.bias is not None and target_conv.bias is not None:
+        target_conv.bias.data.copy_(source_conv.bias.data.index_select(0, out_index).to(target_conv.bias.device))
+
+
+def _copy_conv_norm_act_state(source_block, target_block, out_indices: list[int], in_indices: list[int]) -> None:
+    _copy_conv2d_state(source_block.block[0], target_block.block[0], out_indices, in_indices)
+    _copy_norm_state(source_block.block[1], target_block.block[1], out_indices)
+
+
+def _copy_double_conv_state(source_block, target_block, out_indices: list[int], in_indices: list[int]) -> None:
+    _copy_conv_norm_act_state(source_block.block[0], target_block.block[0], out_indices, in_indices)
+    _copy_conv_norm_act_state(source_block.block[1], target_block.block[1], out_indices, out_indices)
+
+
+def _copy_gated_double_conv_state(source_block, target_block, out_indices: list[int], in_indices: list[int]) -> None:
+    _copy_double_conv_state(source_block.conv, target_block.conv, out_indices, in_indices)
+    out_index = torch.as_tensor(out_indices, dtype=torch.long, device=source_block.gate.alpha.device)
+    target_block.gate.alpha.data.copy_(source_block.gate.alpha.data.index_select(0, out_index).to(target_block.gate.alpha.device))
+
+
+def _concat_skip_and_up_indices(stage_indices: list[int], stage_channels: int) -> list[int]:
+    return list(stage_indices) + [int(stage_channels) + int(index) for index in stage_indices]
+
+
+def _build_late_hard_pruning_plan(student: PDGUNet, threshold: float) -> dict:
+    stage_modules = (
+        ("stem", student.stem),
+        ("down1", student.down1.conv),
+        ("down2", student.down2.conv),
+        ("down3", student.down3.conv),
+        ("down4", student.down4.conv),
+    )
+    stage_indices = {}
+    rows = []
+    total_before = 0
+    total_after = 0
+    total_pruned = 0
+    for stage_name, module in stage_modules:
+        gate_values = module.gate_values().detach().cpu().float()
+        original_channels = int(gate_values.numel())
+        kept_indices = [int(index) for index, value in enumerate(gate_values.tolist()) if float(value) >= float(threshold)]
+        selection_policy = "threshold_keep"
+        if len(kept_indices) == original_channels and original_channels > 1:
+            weakest_index = int(torch.argmin(gate_values).item())
+            kept_indices = [index for index in range(original_channels) if index != weakest_index]
+            selection_policy = "force_prune_weakest_when_threshold_keeps_all"
+        if not kept_indices:
+            kept_indices = sorted(int(index) for index in torch.argsort(gate_values, descending=True)[:1].tolist())
+            selection_policy = "fallback_keep_top1"
+        pruned_indices = sorted(index for index in range(original_channels) if index not in set(kept_indices))
+        stage_indices[stage_name] = kept_indices
+        total_before += original_channels
+        total_after += len(kept_indices)
+        total_pruned += len(pruned_indices)
+        rows.append(
+            {
+                "layer_name": stage_name,
+                "original_out_channels": original_channels,
+                "pruned_out_channels": int(len(kept_indices)),
+                "channels_pruned": int(len(pruned_indices)),
+                "hard_pruning_threshold": float(threshold),
+                "selection_policy": selection_policy,
+                "kept_channel_indices": kept_indices,
+                "pruned_channel_indices": pruned_indices,
+            }
+        )
+    return {
+        "threshold": float(threshold),
+        "channel_config": tuple(int(len(stage_indices[stage_name])) for stage_name, _ in stage_modules),
+        "stage_indices": stage_indices,
+        "rows": rows,
+        "hard_pruning_applied": any(int(row["channels_pruned"]) > 0 for row in rows),
+        "global_summary": {
+            "total_channels_before": int(total_before),
+            "total_channels_after": int(total_after),
+            "total_channels_pruned": int(total_pruned),
+            "global_prune_ratio": float(total_pruned / max(1, total_before)),
+            "hard_pruning_threshold": float(threshold),
+        },
+    }
+
+
+def _build_hard_pruned_student_from_plan(source_student: PDGUNet, db_train, hard_pruning_plan: dict) -> PDGUNet:
+    stage_indices = dict(hard_pruning_plan["stage_indices"])
+    stage0 = list(stage_indices["stem"])
+    stage1 = list(stage_indices["down1"])
+    stage2 = list(stage_indices["down2"])
+    stage3 = list(stage_indices["down3"])
+    stage4 = list(stage_indices["down4"])
+    source_channels = tuple(int(channel) for channel in source_student.channel_config)
+    input_indices = list(range(int(db_train.in_channels)))
+
+    target_student = PDGUNet(
+        in_channels=db_train.in_channels,
+        num_classes=args.num_classes,
+        channel_config=tuple(hard_pruning_plan["channel_config"]),
+    ).to(next(source_student.parameters()).device)
+
+    _copy_gated_double_conv_state(source_student.stem, target_student.stem, stage0, input_indices)
+    _copy_gated_double_conv_state(source_student.down1.conv, target_student.down1.conv, stage1, stage0)
+    _copy_gated_double_conv_state(source_student.down2.conv, target_student.down2.conv, stage2, stage1)
+    _copy_gated_double_conv_state(source_student.down3.conv, target_student.down3.conv, stage3, stage2)
+    _copy_gated_double_conv_state(source_student.down4.conv, target_student.down4.conv, stage4, stage3)
+
+    _copy_convtranspose2d_state(source_student.up1.up, target_student.up1.up, stage4, stage3)
+    _copy_gated_double_conv_state(source_student.up1.conv, target_student.up1.conv, stage3, _concat_skip_and_up_indices(stage3, source_channels[3]))
+    _copy_convtranspose2d_state(source_student.up2.up, target_student.up2.up, stage3, stage2)
+    _copy_gated_double_conv_state(source_student.up2.conv, target_student.up2.conv, stage2, _concat_skip_and_up_indices(stage2, source_channels[2]))
+    _copy_convtranspose2d_state(source_student.up3.up, target_student.up3.up, stage2, stage1)
+    _copy_gated_double_conv_state(source_student.up3.conv, target_student.up3.conv, stage1, _concat_skip_and_up_indices(stage1, source_channels[1]))
+    _copy_convtranspose2d_state(source_student.up4.up, target_student.up4.up, stage1, stage0)
+    _copy_gated_double_conv_state(source_student.up4.conv, target_student.up4.conv, stage0, _concat_skip_and_up_indices(stage0, source_channels[0]))
+
+    _copy_conv2d_state(
+        source_student.head,
+        target_student.head,
+        list(range(int(source_student.head.out_channels))),
+        stage0,
+    )
+    return target_student
 
 
 def _aggregate_phase_metrics(*phase_exports: dict) -> list[dict]:
@@ -223,10 +620,49 @@ def _build_pipeline_overview_rows(*phase_artifacts: dict) -> list[dict]:
     return rows
 
 
+def _build_pipeline_compression_rows(*phase_artifacts: dict) -> list[dict]:
+    rows = []
+    reference_teacher = next((artifact for artifact in phase_artifacts if artifact.get("phase") == "teacher"), None)
+    teacher_metrics = reference_teacher.get("evaluation_bundle", {}).get("metrics_rows", []) if reference_teacher else []
+    teacher_row = next((row for row in teacher_metrics if row.get("split") == "test"), teacher_metrics[0] if teacher_metrics else {})
+    teacher_params = teacher_row.get("params")
+    teacher_flops = teacher_row.get("flops")
+    teacher_dice = teacher_row.get("dice")
+
+    for artifact in phase_artifacts:
+        phase = artifact.get("phase")
+        metrics_rows = artifact.get("evaluation_bundle", {}).get("metrics_rows", [])
+        test_row = next((row for row in metrics_rows if row.get("split") == "test"), metrics_rows[0] if metrics_rows else {})
+        params = test_row.get("params")
+        flops = test_row.get("flops")
+        dice = test_row.get("dice")
+        row = {
+            "phase": phase,
+            "model_name": artifact.get("metadata", {}).get("model_name"),
+            "student_name": artifact.get("metadata", {}).get("student_name"),
+            "params": params,
+            "flops": flops,
+            "fps": test_row.get("fps"),
+            "test_dice": dice,
+            "vs_teacher_param_ratio": (float(params) / float(teacher_params)) if teacher_params not in (None, "", 0) and params is not None else None,
+            "vs_teacher_flops_ratio": (float(flops) / float(teacher_flops)) if teacher_flops not in (None, "", 0) and flops is not None else None,
+            "vs_teacher_test_dice_delta": (float(dice) - float(teacher_dice)) if teacher_dice is not None and dice is not None else None,
+        }
+        if phase == "pruning":
+            row["global_prune_ratio"] = artifact.get("blueprint", {}).get("global_pruning_summary", {}).get("global_prune_ratio")
+        if phase == "student":
+            row["student_variant"] = artifact.get("student_variant", {}).get("variant_name")
+            row["active_soft_pruning_epochs"] = artifact.get("pruning_schedule", {}).get("active_soft_pruning_epochs")
+            row["effective_warmup_pruning_epochs"] = artifact.get("pruning_schedule", {}).get("effective_warmup_pruning_epochs")
+        rows.append(row)
+    return rows
+
+
 def _save_pipeline_outputs(pipeline_dir: Path, *phase_artifacts: dict) -> dict:
     layout = ensure_run_layout(pipeline_dir)
     pipeline_metrics_rows = _aggregate_phase_metrics(*phase_artifacts)
     pipeline_overview_rows = _build_pipeline_overview_rows(*phase_artifacts)
+    pipeline_compression_rows = _build_pipeline_compression_rows(*phase_artifacts)
 
     if pipeline_overview_rows:
         write_metrics_rows(pipeline_overview_rows, layout["metrics_dir"] / "pipeline_stage_overview.csv")
@@ -242,6 +678,8 @@ def _save_pipeline_outputs(pipeline_dir: Path, *phase_artifacts: dict) -> dict:
             layout["reports_dir"] / "pipeline_performance.pdf",
             title="Pipeline stage performance",
         )
+    if pipeline_compression_rows:
+        write_metrics_rows(pipeline_compression_rows, layout["metrics_dir"] / "pipeline_compression_summary.csv")
 
     pipeline_visual_index = {}
     for artifact in phase_artifacts:
@@ -286,6 +724,7 @@ def _save_pipeline_outputs(pipeline_dir: Path, *phase_artifacts: dict) -> dict:
         },
         "pipeline_stage_overview_csv": project_relative_path(layout["metrics_dir"] / "pipeline_stage_overview.csv", PROJECT_ROOT) if pipeline_overview_rows else "",
         "pipeline_metrics_csv": project_relative_path(layout["metrics_dir"] / "pipeline_metrics.csv", PROJECT_ROOT) if pipeline_metrics_rows else "",
+        "pipeline_compression_summary_csv": project_relative_path(layout["metrics_dir"] / "pipeline_compression_summary.csv", PROJECT_ROOT) if pipeline_compression_rows else "",
         "pipeline_performance_pdf": project_relative_path(layout["reports_dir"] / "pipeline_performance.pdf", PROJECT_ROOT) if pipeline_metrics_rows else "",
         "pipeline_visualizations": pipeline_visual_index,
     }
@@ -308,6 +747,7 @@ def _save_pipeline_outputs(pipeline_dir: Path, *phase_artifacts: dict) -> dict:
     return {
         "overview_rows": pipeline_overview_rows,
         "metrics_rows": pipeline_metrics_rows,
+        "compression_rows": pipeline_compression_rows,
         "summary": summary,
     }
 
@@ -851,7 +1291,7 @@ def _run_pruning(device: torch.device, image_mode: str, db_train, teacher_artifa
     }
 
 
-def _compute_student_val_losses(student, teacher, valloader, device, criterion):
+def _compute_student_val_losses(student, teacher, valloader, device, criterion, *, epoch_policy: dict):
     student.eval()
     teacher.eval()
     tracked = {key: [] for key in ("total_loss", "segmentation_loss", "distillation_loss", "sparsity_loss")}
@@ -860,7 +1300,15 @@ def _compute_student_val_losses(student, teacher, valloader, device, criterion):
             _validate_label_batch(batch["label"], args.num_classes, batch)
             image = F.interpolate(batch["image"].to(device), size=args.patch_size, mode="bilinear", align_corners=False)
             label = F.interpolate(batch["label"].unsqueeze(1).float().to(device), size=args.patch_size, mode="nearest").squeeze(1).long()
-            loss_dict = criterion(student(image), teacher(image), student.get_gate_tensors(), label)
+            teacher_output = teacher(image) if epoch_policy.get("lambda_distill", 0.0) > 0 else None
+            loss_dict = criterion(
+                student(image),
+                teacher_output,
+                student.get_gate_tensors(),
+                label,
+                lambda_distill=epoch_policy.get("lambda_distill", 0.0),
+                lambda_sparsity=epoch_policy.get("lambda_sparsity", 0.0),
+            )
             for key in tracked:
                 tracked[key].append(float(loss_dict[key].item()))
     student.train()
@@ -872,19 +1320,45 @@ def _run_student(device: torch.device, image_mode: str, db_train, trainloader, v
     layout = ensure_run_layout(run_dir)
     write_run_config(run_dir, vars(args))
     teacher = teacher_artifact["model"]
-    teacher.eval()
-    for parameter in teacher.parameters():
-        parameter.requires_grad = False
-    student = PDGUNet(in_channels=db_train.in_channels, num_classes=args.num_classes, channel_config=tuple(pruning_artifact["blueprint"]["channel_config"])).to(device)
+    _freeze_teacher_model(teacher)
+
+    variant_policy = _student_variant_policy()
+    pruning_schedule = _build_pruning_warmup_schedule(
+        args.max_epochs_student,
+        args.warmup_pruning_epochs,
+        variant_policy,
+    )
+
+    student = _build_student_from_blueprint(db_train, pruning_artifact).to(device)
+    _configure_student_variant(student, variant_policy)
+    pruning_initialization = _resolve_student_from_pruning_checkpoint(student, pruning_artifact, device)
+    _configure_student_variant(student, variant_policy)
+
     student_model_info = extract_model_info(student)
     student_model_info.update(
         {
             "branch": "proposal",
             "teacher_model": args.teacher_model,
             "teacher_backbone_name": teacher_artifact["metadata"].get("backbone_name"),
-            "student_name": "gated_student",
+            "student_name": f"gated_student_{variant_policy['variant_name']}",
             "blueprint_path": project_relative_path(pruning_artifact["blueprint_path"], PROJECT_ROOT),
             "blueprint": pruning_artifact["blueprint"],
+            "student_variant": variant_policy,
+            "distillation_target": "logits",
+            "soft_pruning_definition": "Soft pruning is implemented through learnable channel gates plus sparsity regularization during the active pruning epochs.",
+            "hard_pruning_definition": (
+                "Late hard pruning is applied at the beginning of the final pruning window. The student is rebuilt with fewer channels based on gate values, "
+                "then the compact student continues distillation for the remaining epochs."
+            ),
+            "step3_distillation_definition": (
+                "When the selected student variant enables distillation, the frozen teacher supervises the student across the whole step-3 run. "
+                "The final pruning window controls when structural hard pruning happens."
+            ),
+            "pruning_schedule": pruning_schedule,
+            "student_initialization": {
+                "source_phase": "2_pruning",
+                "source_checkpoint_path": project_relative_path(pruning_initialization["checkpoint_path"], PROJECT_ROOT),
+            },
             "build_kwargs": {
                 "in_channels": db_train.in_channels,
                 "num_classes": args.num_classes,
@@ -893,6 +1367,16 @@ def _run_student(device: torch.device, image_mode: str, db_train, trainloader, v
         }
     )
     write_model_config(run_dir, student_model_info)
+    logging.info(
+        "Student step-3 setup | variant=%s | use_distill=%s | use_gating=%s | use_sparsity=%s | gate_search_epochs=%s | hard_pruning_start_epoch=%s | hard_pruning_threshold=%s",
+        variant_policy["variant_name"],
+        int(variant_policy["use_distill"]),
+        int(variant_policy["use_gating"]),
+        int(variant_policy["use_sparsity"]),
+        pruning_schedule["active_soft_pruning_epochs"],
+        pruning_schedule.get("hard_pruning_start_epoch"),
+        pruning_schedule.get("hard_pruning_threshold"),
+    )
     student_input_analysis = _export_model_channel_analysis(
         run_dir,
         student,
@@ -901,17 +1385,49 @@ def _run_student(device: torch.device, image_mode: str, db_train, trainloader, v
         prefix="student_input",
         title="Student Input Architecture Before Tuning",
     )
+    input_gating_paths = save_gating_analysis_artifacts(
+        run_dir / "artifacts" / "gating_analysis",
+        student_input_analysis,
+        prefix="student_input",
+        title="Student Input Gating Analysis",
+    )
     history = {}
     reusable_match = None
+    diagnostics_rows = []
+    hard_pruning_plan = None
+    hard_pruning_applied = False
     if not bool(args.force_retrain_student):
+        reusable_signature = build_expected_signature(
+            dataset=args.dataset,
+            model_name="pdg_unet",
+            num_classes=args.num_classes,
+            in_channels=db_train.in_channels,
+            patch_size=args.patch_size,
+            teacher_model=args.teacher_model,
+            student_variant=args.student_variant,
+        )
         reusable_match = resolve_run_checkpoint(
             run_dir,
-            expected_signature=_student_signature(pruning_artifact["blueprint"]["channel_config"], db_train.in_channels),
+            expected_signature=reusable_signature,
         )
     if reusable_match is not None:
+        reusable_signature = reusable_match.get("compatibility", {}).get("actual_signature", {})
+        reusable_channel_config = reusable_signature.get("channel_config")
+        if reusable_channel_config:
+            reusable_channel_config = tuple(int(channel) for channel in reusable_channel_config)
+            if reusable_channel_config != tuple(student.channel_config):
+                student = PDGUNet(
+                    in_channels=db_train.in_channels,
+                    num_classes=args.num_classes,
+                    channel_config=reusable_channel_config,
+                ).to(device)
         best_path = Path(reusable_match["checkpoint_path"])
         payload = load_checkpoint_into_model(best_path, student, device=device)
+        _configure_student_variant(student, variant_policy)
         history = payload.get("extra_state", {}).get("history", {})
+        diagnostics_rows = list(payload.get("extra_state", {}).get("epoch_diagnostics", []))
+        hard_pruning_plan = payload.get("extra_state", {}).get("hard_pruning_plan")
+        hard_pruning_applied = bool(payload.get("extra_state", {}).get("hard_pruning_applied", False))
         student_model_info.update(payload.get("model_info", {}))
         logging.info("Loaded student checkpoint: %s", project_relative_path(best_path, PROJECT_ROOT))
         _restore_loss_pdf_if_possible(history, layout["reports_dir"] / "student_loss.pdf", "Student loss")
@@ -928,19 +1444,95 @@ def _run_student(device: torch.device, image_mode: str, db_train, trainloader, v
             "val_distillation_loss": [],
             "val_sparsity_loss": [],
             "val_macro_dice": [],
+            "epoch_gate_mean": [],
+            "epoch_gate_near_off_ratio": [],
+            "epoch_lambda_distill": [],
+            "epoch_lambda_sparsity": [],
         }
         best_metric = float("-inf")
         best_path = None
         for epoch in tqdm(range(1, args.max_epochs_student + 1), desc="student", ncols=90):
+            epoch_policy = _student_epoch_policy(epoch, pruning_schedule, variant_policy)
+            if epoch_policy["hard_pruning_active"] and not hard_pruning_applied:
+                hard_pruning_plan = _build_late_hard_pruning_plan(student, float(pruning_schedule["hard_pruning_threshold"]))
+                if hard_pruning_plan["hard_pruning_applied"]:
+                    student = _build_hard_pruned_student_from_plan(student, db_train, hard_pruning_plan)
+                    _configure_student_variant(student, variant_policy)
+                    optimizer = optim.AdamW(student.parameters(), lr=args.student_lr, weight_decay=1e-4)
+                    hard_pruning_applied = True
+                    best_metric = float("-inf")
+                    best_path = None
+                    student_model_info = extract_model_info(student)
+                    student_model_info.update(
+                        {
+                            "branch": "proposal",
+                            "teacher_model": args.teacher_model,
+                            "teacher_backbone_name": teacher_artifact["metadata"].get("backbone_name"),
+                            "student_name": f"gated_student_{variant_policy['variant_name']}",
+                            "blueprint_path": project_relative_path(pruning_artifact["blueprint_path"], PROJECT_ROOT),
+                            "blueprint": pruning_artifact["blueprint"],
+                            "student_variant": variant_policy,
+                            "distillation_target": "logits",
+                            "soft_pruning_definition": "Soft pruning is implemented through learnable channel gates plus sparsity regularization during the active gate-search epochs.",
+                            "hard_pruning_definition": (
+                                "Late hard pruning was applied in step 3 by rebuilding the student with channels kept above the configured gate threshold, "
+                                "then continuing distillation on the compact student."
+                            ),
+                            "step3_distillation_definition": (
+                                "When the selected student variant enables distillation, the frozen teacher supervises the student across the whole step-3 run, "
+                                "including the post-hard-pruning epochs."
+                            ),
+                            "pruning_schedule": pruning_schedule,
+                            "student_initialization": {
+                                "source_phase": "2_pruning",
+                                "source_checkpoint_path": project_relative_path(pruning_initialization["checkpoint_path"], PROJECT_ROOT),
+                            },
+                            "hard_pruning_applied": True,
+                            "hard_pruning_plan": hard_pruning_plan,
+                            "build_kwargs": {
+                                "in_channels": db_train.in_channels,
+                                "num_classes": args.num_classes,
+                                "channel_config": list(hard_pruning_plan["channel_config"]),
+                            },
+                        }
+                    )
+                    write_model_config(run_dir, student_model_info)
+                    logging.info(
+                        "Applied late hard pruning at epoch %d | threshold=%.4f | channel_config=%s | global_prune_ratio=%.4f",
+                        epoch,
+                        hard_pruning_plan["threshold"],
+                        list(hard_pruning_plan["channel_config"]),
+                        hard_pruning_plan["global_summary"]["global_prune_ratio"],
+                    )
+                else:
+                    logging.info(
+                        "Late hard pruning checkpoint reached at epoch %d, but no channel satisfied the structural prune condition. Training continues without rebuild.",
+                        epoch,
+                    )
+            if variant_policy["use_gating"]:
+                student.set_gate_trainable(epoch_policy["gate_trainable"])
+            else:
+                student.force_gates_open(args.student_gate_open_value)
+                student.set_gate_trainable(False)
+
             student.train()
             tracked = {key: [] for key in ("total_loss", "segmentation_loss", "distillation_loss", "sparsity_loss")}
             for batch in trainloader:
                 _validate_label_batch(batch["label"], args.num_classes, batch)
                 image = batch["image"].to(device)
                 label = batch["label"].to(device)
-                with torch.no_grad():
-                    teacher_output = teacher(image)
-                loss_dict = criterion(student(image), teacher_output, student.get_gate_tensors(), label)
+                teacher_output = None
+                if epoch_policy["lambda_distill"] > 0:
+                    with torch.no_grad():
+                        teacher_output = teacher(image)
+                loss_dict = criterion(
+                    student(image),
+                    teacher_output,
+                    student.get_gate_tensors(),
+                    label,
+                    lambda_distill=epoch_policy["lambda_distill"],
+                    lambda_sparsity=epoch_policy["lambda_sparsity"],
+                )
                 optimizer.zero_grad()
                 loss_dict["total_loss"].backward()
                 optimizer.step()
@@ -957,8 +1549,9 @@ def _run_student(device: torch.device, image_mode: str, db_train, trainloader, v
                 vis_limit=0,
                 sample_validator=_validate_label_batch,
             )
-            val_losses = _compute_student_val_losses(student, teacher, valloader, device, criterion)
+            val_losses = _compute_student_val_losses(student, teacher, valloader, device, criterion, epoch_policy=epoch_policy)
             val_dice = float(np.mean(val_metrics["average_metric"][:, 0]))
+            gate_stats = _summarize_student_gates(student, args.student_gate_near_off_threshold)
             history["train_total_loss"].append(float(np.mean(tracked["total_loss"])) if tracked["total_loss"] else 0.0)
             history["train_segmentation_loss"].append(float(np.mean(tracked["segmentation_loss"])) if tracked["segmentation_loss"] else 0.0)
             history["train_distillation_loss"].append(float(np.mean(tracked["distillation_loss"])) if tracked["distillation_loss"] else 0.0)
@@ -968,6 +1561,36 @@ def _run_student(device: torch.device, image_mode: str, db_train, trainloader, v
             history["val_distillation_loss"].append(val_losses["distillation_loss"])
             history["val_sparsity_loss"].append(val_losses["sparsity_loss"])
             history["val_macro_dice"].append(val_dice)
+            history["epoch_gate_mean"].append(gate_stats["global"]["gate_mean"])
+            history["epoch_gate_near_off_ratio"].append(gate_stats["global"]["near_off_ratio"])
+            history["epoch_lambda_distill"].append(epoch_policy["lambda_distill"])
+            history["epoch_lambda_sparsity"].append(epoch_policy["lambda_sparsity"])
+            diagnostics_rows.append(
+                {
+                    "epoch": epoch,
+                    "phase_name": epoch_policy["phase_name"],
+                    "soft_pruning_active": int(epoch_policy["soft_pruning_active"]),
+                    "hard_pruning_active": int(epoch_policy["hard_pruning_active"]),
+                    "distillation_active": int(epoch_policy["lambda_distill"] > 0),
+                    "gate_trainable": int(epoch_policy["gate_trainable"]),
+                    "lambda_distill": epoch_policy["lambda_distill"],
+                    "lambda_sparsity": epoch_policy["lambda_sparsity"],
+                    "train_total_loss": history["train_total_loss"][-1],
+                    "train_segmentation_loss": history["train_segmentation_loss"][-1],
+                    "train_distillation_loss": history["train_distillation_loss"][-1],
+                    "train_sparsity_loss": history["train_sparsity_loss"][-1],
+                    "val_total_loss": val_losses["total_loss"],
+                    "val_segmentation_loss": val_losses["segmentation_loss"],
+                    "val_distillation_loss": val_losses["distillation_loss"],
+                    "val_sparsity_loss": val_losses["sparsity_loss"],
+                    "val_macro_dice": val_dice,
+                    "gate_mean": gate_stats["global"]["gate_mean"],
+                    "gate_std": gate_stats["global"]["gate_std"],
+                    "near_off_channels": gate_stats["global"]["near_off_channels"],
+                    "total_gate_channels": gate_stats["global"]["total_gate_channels"],
+                    "near_off_ratio": gate_stats["global"]["near_off_ratio"],
+                }
+            )
             is_best = val_dice > best_metric
             if is_best:
                 best_metric = val_dice
@@ -982,7 +1605,15 @@ def _run_student(device: torch.device, image_mode: str, db_train, trainloader, v
                 config=vars(args),
                 model_info=student_model_info,
                 phase="student",
-                extra_state={"history": history, "blueprint": pruning_artifact["blueprint"]},
+                extra_state={
+                    "history": history,
+                    "blueprint": pruning_artifact["blueprint"],
+                    "epoch_diagnostics": diagnostics_rows,
+                    "student_variant": variant_policy,
+                    "pruning_schedule": pruning_schedule,
+                    "hard_pruning_plan": hard_pruning_plan,
+                    "hard_pruning_applied": hard_pruning_applied,
+                },
                 is_best=is_best,
                 save_tagged_checkpoint=bool(args.save_history_checkpoints),
                 project_root=PROJECT_ROOT,
@@ -990,16 +1621,22 @@ def _run_student(device: torch.device, image_mode: str, db_train, trainloader, v
             if is_best:
                 best_path = checkpoint_path
             logging.info(
-                "Student epoch %d/%d | train_total=%.6f | val_total=%.6f | val_dice=%.6f",
+                "Student epoch %d/%d | phase=%s | train_total=%.6f | val_total=%.6f | val_dice=%.6f | gate_mean=%.4f | near_off_ratio=%.4f | lambda_distill=%.4f | lambda_sparsity=%.4f",
                 epoch,
                 args.max_epochs_student,
+                epoch_policy["phase_name"],
                 history["train_total_loss"][-1],
                 val_losses["total_loss"],
                 val_dice,
+                gate_stats["global"]["gate_mean"],
+                gate_stats["global"]["near_off_ratio"],
+                epoch_policy["lambda_distill"],
+                epoch_policy["lambda_sparsity"],
             )
         if best_path is None:
             best_path = resolve_phase_checkpoint(run_dir, "last")
         save_loss_pdf(history, layout["reports_dir"] / "student_loss.pdf", title="Student loss")
+    _save_student_epoch_diagnostics(run_dir, diagnostics_rows)
     write_model_config(run_dir, student_model_info)
     profile = _compute_profile(student, device)
     evaluation_bundle = _export_phase_outputs(
@@ -1008,7 +1645,13 @@ def _run_student(device: torch.device, image_mode: str, db_train, trainloader, v
         best_path,
         "student",
         profile,
-        {"model_name": "pdg_unet", "backbone_name": teacher_artifact["metadata"].get("backbone_name"), "student_name": "gated_student", "prune_ratio": args.prune_ratio, "teacher_model": args.teacher_model},
+        {
+            "model_name": "pdg_unet",
+            "backbone_name": teacher_artifact["metadata"].get("backbone_name"),
+            "student_name": student_model_info.get("student_name"),
+            "prune_ratio": args.prune_ratio,
+            "teacher_model": args.teacher_model,
+        },
         device,
         image_mode,
     )
@@ -1020,6 +1663,12 @@ def _run_student(device: torch.device, image_mode: str, db_train, trainloader, v
         prefix="student_final",
         title="Student Final Architecture After Tuning",
     )
+    final_gating_paths = save_gating_analysis_artifacts(
+        run_dir / "artifacts" / "gating_analysis",
+        student_final_analysis,
+        prefix="student_final",
+        title="Student Final Gating Analysis",
+    )
     student_comparison_rows = build_analysis_comparison(
         student_input_analysis,
         student_final_analysis,
@@ -1027,7 +1676,7 @@ def _run_student(device: torch.device, image_mode: str, db_train, trainloader, v
         after_label="final",
     )
     save_comparison_artifacts(
-        run_dir / "artifacts" / "channel_analysis",
+        run_dir / "artifacts" / "student_tuning_analysis",
         student_comparison_rows,
         prefix="student_tuning_comparison",
         title="Student Tuning Comparison",
@@ -1039,8 +1688,45 @@ def _run_student(device: torch.device, image_mode: str, db_train, trainloader, v
                 "final_total_channels": student_final_analysis["global_summary"]["total_output_channels"],
                 "input_gate_layers": student_input_analysis["global_summary"]["num_gate_layers"],
                 "final_gate_layers": student_final_analysis["global_summary"]["num_gate_layers"],
+                "soft_pruning_threshold": args.student_gate_near_off_threshold,
+                "hard_pruning_threshold": pruning_schedule.get("hard_pruning_threshold"),
+                "requested_warmup_pruning_epochs": pruning_schedule["requested_warmup_pruning_epochs"],
+                "effective_warmup_pruning_epochs": pruning_schedule["effective_warmup_pruning_epochs"],
+                "hard_pruning_applied": int(hard_pruning_applied),
+                "hard_pruning_start_epoch": pruning_schedule.get("hard_pruning_start_epoch"),
             }
         },
+    )
+    if hard_pruning_plan is not None:
+        _write_json(run_dir / "artifacts" / "student_tuning_analysis" / "late_hard_pruning_plan.json", hard_pruning_plan)
+        if hard_pruning_plan.get("rows"):
+            write_metrics_rows(
+                hard_pruning_plan["rows"],
+                run_dir / "artifacts" / "student_tuning_analysis" / "late_hard_pruning_plan.csv",
+            )
+    gating_report_payload = {
+        "global_summary": {
+            "student_variant": variant_policy["variant_name"],
+            "student_variant_description": variant_policy["description"],
+            "soft_pruning_threshold": args.student_gate_near_off_threshold,
+            "hard_pruning_threshold": pruning_schedule.get("hard_pruning_threshold"),
+            "hard_pruning_applied": bool(hard_pruning_applied),
+            "hard_pruning_stage": "late_structural_pruning" if hard_pruning_applied else "not_triggered",
+            "requested_warmup_pruning_epochs": pruning_schedule["requested_warmup_pruning_epochs"],
+            "effective_warmup_pruning_epochs": pruning_schedule["effective_warmup_pruning_epochs"],
+            "active_soft_pruning_epochs": pruning_schedule["active_soft_pruning_epochs"],
+            "late_hard_pruning_epochs": pruning_schedule.get("late_hard_pruning_epochs"),
+            "hard_pruning_start_epoch": pruning_schedule.get("hard_pruning_start_epoch"),
+            "policy_note": pruning_schedule["policy_note"],
+        },
+        "gate_summary_rows": list(student_final_analysis.get("gate_summary_rows", [])),
+        "comparison_rows": list(student_comparison_rows),
+        "pruning_summary_rows": list(hard_pruning_plan.get("rows", [])) if hard_pruning_plan else [],
+    }
+    save_channel_analysis_pdf(
+        gating_report_payload,
+        layout["reports_dir"] / "student_channel_gating_report.pdf",
+        title="Student Channel Gating Report",
     )
     student_final_exports = _export_student_final_shortcuts(run_dir, _proposal_root_dir())
     return {
@@ -1053,6 +1739,16 @@ def _run_student(device: torch.device, image_mode: str, db_train, trainloader, v
         "student_final_exports": student_final_exports,
         "evaluation_bundle": evaluation_bundle,
         "phase": "student",
+        "input_gating_paths": input_gating_paths,
+        "final_gating_paths": final_gating_paths,
+        "pruning_schedule": pruning_schedule,
+        "student_variant": variant_policy,
+        "hard_pruning_plan": hard_pruning_plan,
+        "hard_pruning_applied": hard_pruning_applied,
+        "student_initialization": {
+            "source_checkpoint_path": project_relative_path(pruning_initialization["checkpoint_path"], PROJECT_ROOT),
+            "source_phase": "2_pruning",
+        },
     }
 
 
