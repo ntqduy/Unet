@@ -17,7 +17,7 @@ from utils.evaluation import (
     sanitize_tag,
     save_evaluation_artifacts,
 )
-from utils.experiment import build_run_dir, normalize_path_string, project_relative_path
+from utils.experiment import build_basic_run_dir, normalize_path_string, project_relative_path
 
 
 PROJECT_ROOT = Path(__file__).resolve().parent
@@ -148,16 +148,17 @@ def _write_overview(checkpoint_root: Path, split_summaries: dict) -> None:
 def test_calculate_metric():
     os.environ["CUDA_VISIBLE_DEVICES"] = FLAGS.gpu
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    snapshot_path = build_run_dir(
+    snapshot_path = build_basic_run_dir(
         project_root=PROJECT_ROOT,
-        experiment=FLAGS.exp,
         dataset=FLAGS.dataset,
         model_name=FLAGS.model,
-        phase="basic",
         output_root=FLAGS.output_root or None,
     )
+    legacy_basic_snapshot = PROJECT_ROOT / "outputs" / sanitize_tag(FLAGS.model) / sanitize_tag(FLAGS.dataset) / "basic"
     legacy_snapshot_path = PROJECT_ROOT / "logs" / "model" / "supervised" / FLAGS.exp
-    if not snapshot_path.exists() and legacy_snapshot_path.exists():
+    if not snapshot_path.exists() and legacy_basic_snapshot.exists():
+        snapshot_path = legacy_basic_snapshot
+    elif not snapshot_path.exists() and legacy_snapshot_path.exists():
         snapshot_path = legacy_snapshot_path
     image_mode = "grayscale" if FLAGS.in_channels == 1 else "rgb"
     checkpoint_path = _resolve_checkpoint_path(snapshot_path)

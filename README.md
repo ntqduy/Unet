@@ -374,7 +374,7 @@ Lưu ý về tiêu chí:
 Basic branch hiện lưu tại:
 
 ```text
-outputs/<model_name>/<dataset>/basic/
+outputs/<model_name>/<dataset>/
 ```
 
 Trong đó sẽ có thêm:
@@ -399,10 +399,12 @@ Proposal branch hiện lưu theo phase tại:
 
 ```text
 outputs/pdg_unet/
-├─ _pipeline/<teacher_model>/<dataset>/
-├─ _teacher/<teacher_model>/<dataset>/
-├─ _pruning/<teacher_model>_ratio_<ratio>/<dataset>/
-└─ _student/<teacher_model>_ratio_<ratio>/<dataset>/
+├─ <dataset>/<teacher_model>_teacher/
+│  ├─ 1_teacher/
+│  ├─ 2_pruning/
+│  ├─ 3_student/
+│  ├─ student_final/
+│  └─ pipeline/
 ```
 
 ## 11. Metric đang dùng
@@ -498,13 +500,13 @@ thành một report duy nhất mà không cần train lại.
 ### Cách chạy nhanh với pipeline summary
 
 ```bash
-python compare_artifacts.py --basic_run_dir outputs/<basic_model>/<dataset>/basic --pipeline_dir outputs/pdg_unet/_pipeline/<teacher_model>/<dataset> --comparison_name <report_name>
+python compare_artifacts.py --basic_run_dir outputs/<basic_model>/<dataset> --pipeline_dir outputs/pdg_unet/<dataset>/<teacher_model>_teacher/pipeline --comparison_name <report_name>
 ```
 
 ### Cách chạy khi muốn chỉ định từng phase riêng
 
 ```bash
-python compare_artifacts.py --basic_run_dir outputs/<basic_model>/<dataset>/basic --teacher_run_dir outputs/pdg_unet/_teacher/<teacher_model>/<dataset> --pruning_run_dir outputs/pdg_unet/_pruning/<teacher_model>_ratio_<ratio>/<dataset> --student_run_dir outputs/pdg_unet/_student/<teacher_model>_ratio_<ratio>/<dataset> --output_dir outputs/comparisons/<report_name>
+python compare_artifacts.py --basic_run_dir outputs/<basic_model>/<dataset> --teacher_run_dir outputs/pdg_unet/<dataset>/<teacher_model>_teacher/1_teacher --pruning_run_dir outputs/pdg_unet/<dataset>/<teacher_model>_teacher/2_pruning --student_run_dir outputs/pdg_unet/<dataset>/<teacher_model>_teacher/3_student --output_dir outputs/comparisons/<report_name>
 ```
 
 ### Output của script tổng hợp

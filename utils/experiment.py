@@ -9,6 +9,13 @@ from utils.model_output import extract_model_info
 
 
 DEFAULT_OUTPUT_ROOT_NAME = "outputs"
+PDG_PHASE_DIRS = {
+    "teacher": "1_teacher",
+    "pruning": "2_pruning",
+    "student": "3_student",
+    "pipeline": "pipeline",
+    "student_final": "student_final",
+}
 
 
 def sanitize_tag(value: object) -> str:
@@ -68,6 +75,53 @@ def build_run_dir(
         if variant_tag:
             run_dir = run_dir / variant_tag
     return run_dir
+
+
+def build_basic_run_dir(
+    *,
+    project_root: Path | str,
+    dataset: str,
+    model_name: str,
+    output_root: Path | str | None = None,
+) -> Path:
+    output_root_path = resolve_output_root(project_root, output_root)
+    return output_root_path / sanitize_tag(model_name) / sanitize_tag(dataset)
+
+
+def build_pdg_teacher_tag(teacher_name: str) -> str:
+    return f"{sanitize_tag(teacher_name)}_teacher"
+
+
+def build_pdg_root_dir(
+    *,
+    project_root: Path | str,
+    dataset: str,
+    teacher_name: str,
+    output_root: Path | str | None = None,
+) -> Path:
+    output_root_path = resolve_output_root(project_root, output_root)
+    return output_root_path / "pdg_unet" / sanitize_tag(dataset) / build_pdg_teacher_tag(teacher_name)
+
+
+def build_pdg_phase_dir(
+    *,
+    project_root: Path | str,
+    dataset: str,
+    teacher_name: str,
+    phase: str,
+    output_root: Path | str | None = None,
+) -> Path:
+    phase_key = sanitize_tag(phase)
+    phase_dir_name = PDG_PHASE_DIRS.get(phase_key)
+    if phase_dir_name is None:
+        available = ", ".join(sorted(PDG_PHASE_DIRS))
+        raise KeyError(f"Unknown PDG phase '{phase}'. Available phases: {available}.")
+    return build_pdg_root_dir(
+        project_root=project_root,
+        dataset=dataset,
+        teacher_name=teacher_name,
+        output_root=output_root,
+    ) / phase_dir_name
 
 
 def ensure_run_layout(run_dir: Path | str) -> Dict[str, Path]:

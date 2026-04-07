@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import shutil
 from pathlib import Path
 from typing import Any, Dict, Optional
 
@@ -86,12 +87,15 @@ def build_checkpoint_payload(
     return payload
 
 
-def _write_metadata(metadata_path: Path, payload: Dict[str, Any], checkpoint_path: Path, project_root: Path | str | None = None) -> Dict[str, Any]:
-    checkpoint_path_value = (
-        project_relative_path(checkpoint_path, project_root)
-        if project_root is not None
-        else str(checkpoint_path)
-    )
+def build_checkpoint_metadata(
+    payload: Dict[str, Any],
+    checkpoint_path: Path | str,
+    *,
+    project_root: Path | str | None = None,
+    extra_fields: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    checkpoint_path = Path(checkpoint_path)
+    checkpoint_path_value = project_relative_path(checkpoint_path, project_root) if project_root is not None else str(checkpoint_path)
     metadata = {
         "checkpoint_path": checkpoint_path_value,
         "checkpoint_name": checkpoint_path.name,
@@ -104,9 +108,33 @@ def _write_metadata(metadata_path: Path, payload: Dict[str, Any], checkpoint_pat
         "phase": payload.get("phase"),
         "extra_state": payload.get("extra_state", {}),
     }
+    if extra_fields:
+        metadata.update(extra_fields)
+    return metadata
+
+
+def write_checkpoint_metadata(
+    metadata_path: Path | str,
+    payload: Dict[str, Any],
+    checkpoint_path: Path | str,
+    *,
+    project_root: Path | str | None = None,
+    extra_fields: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    metadata_path = Path(metadata_path)
+    metadata = build_checkpoint_metadata(
+        payload,
+        checkpoint_path,
+        project_root=project_root,
+        extra_fields=extra_fields,
+    )
     with metadata_path.open("w", encoding="utf-8") as file:
         json.dump(metadata, file, indent=2)
     return metadata
+
+
+def _write_metadata(metadata_path: Path, payload: Dict[str, Any], checkpoint_path: Path, project_root: Path | str | None = None) -> Dict[str, Any]:
+    return write_checkpoint_metadata(metadata_path, payload, checkpoint_path, project_root=project_root)
 
 
 def save_checkpoint(
@@ -183,3 +211,40 @@ def resolve_phase_checkpoint(run_dir: Path | str, preferred: str = "best") -> Op
     if checkpoint_path.is_file():
         return checkpoint_path
     return None
+
+
+def clone_checkpoint_file(
+    source_checkpoint_path: Path | str,
+    target_checkpoint_path: Path | str,
+    *,
+    project_root: Path | str | None = None,
+    payload_overrides: Optional[Dict[str, Any]] = None,
+    metadata_extra_fields: Optional[Dict[str, Any]] = None,
+) -> Dict[str, Any]:
+    source_checkpoint_path = Path(source_checkpoint_path)
+    target_checkpoint_path = Path(target_checkpoint_path)
+    target_checkpoint_path.parent.mkdir(parents=True, exist_ok=True)
+
+    payload = load_checkpoint(source_checkpoint_path)
+    if isinstance(payload, dict):
+        payload = dict(payload)
+        payload["model_state_dict"] = _strip_profiling_state_keys(dict(payload.get("model_state_dict", {})))
+        if payload_overrides:
+            for key, value in payload_overrides.items():
+                payload[key] = value
+        torch.save(payload, target_checkpoint_path)
+    else:
+        shutil.copy2(source_checkpoint_path, target_checkpoint_path)
+        payload = {"model_state_dict": {}}
+
+    metadata_dir = target_checkpoint_path.parent / "metadata"
+    metadata_dir.mkdir(parents=True, exist_ok=True)
+    metadata_path = metadata_dir / f"{target_checkpoint_path.stem}.json"
+    metadata = write_checkpoint_metadata(
+        metadata_path,
+        payload,
+        target_checkpoint_path,
+        project_root=project_root,
+        extra_fields=metadata_extra_fields,
+    )
+    return metadata

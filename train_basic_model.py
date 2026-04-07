@@ -20,6 +20,7 @@ from tqdm import tqdm
 from dataloaders.dataset import Normalize, RandomGenerator, ToTensor, build_dataset, list_available_datasets
 from networks.net_factory import get_model_metadata, list_models, net_factory
 from utils.checkpoints import load_checkpoint_into_model, save_checkpoint
+from utils.checkpoint_resolver import build_expected_signature, register_reused_checkpoint, resolve_basic_checkpoint
 from utils import losses, val_2d
 from utils.channel_analysis import extract_channel_analysis, save_channel_analysis_artifacts
 from utils.evaluation import (
@@ -27,7 +28,7 @@ from utils.evaluation import (
     evaluate_segmentation_dataset,
     save_evaluation_artifacts,
 )
-from utils.experiment import build_run_dir, ensure_run_layout, normalize_path_string, project_relative_path, sanitize_tag, write_model_config, write_run_config
+from utils.experiment import build_basic_run_dir, ensure_run_layout, normalize_path_string, project_relative_path, sanitize_tag, write_model_config, write_run_config
 from utils.model_output import extract_logits, extract_model_info
 from utils.profiling import benchmark_inference, count_parameters, maybe_compute_flops
 from utils.reporting import save_loss_pdf, save_performance_pdf, save_visualization_overview_image, save_visualization_pdf, write_metrics_rows
@@ -64,6 +65,7 @@ parser.add_argument("--save_visualizations", type=int, default=1)
 parser.add_argument("--vis_num_samples", type=int, default=5)
 parser.add_argument("--output_root", type=str, default="", help="root directory for all exported outputs; defaults to PROJECT_ROOT/outputs")
 parser.add_argument("--save_history_checkpoints", type=int, default=0, help="set to 1 to keep epoch/iteration checkpoint history in addition to best/last")
+parser.add_argument("--force_retrain", type=int, default=0, help="set to 1 to ignore existing compatible checkpoints and train again")
 parser.add_argument(
     "--final_eval_splits",
     nargs="*",
@@ -116,6 +118,24 @@ def validate_label_batch(label_batch, num_classes, sampled_batch):
 def _write_json(path: Path, payload: dict) -> None:
     with path.open("w", encoding="utf-8") as file:
         json.dump(payload, file, indent=2)
+
+
+def _expected_basic_checkpoint_signature(in_channels: int) -> dict:
+    return build_expected_signature(
+        dataset=args.dataset,
+        model_name=args.model,
+        num_classes=args.num_classes,
+        in_channels=in_channels,
+        patch_size=args.patch_size,
+        encoder_pretrained=bool(args.encoder_pretrained) if args.model == "unet_resnet152" else None,
+    )
+
+
+def _restore_loss_report_from_history(snapshot_path: Path, history: dict | None) -> None:
+    if not history:
+        return
+    if any(values for values in history.values() if isinstance(values, list)):
+        save_loss_pdf(history, snapshot_path / "reports" / "basic_loss.pdf", title="Basic model loss")
 
 
 def _compute_model_profile(model, device) -> dict:
@@ -361,6 +381,7 @@ def _export_basic_channel_analysis(snapshot_path: Path, checkpoint_path: Path, m
 
 
 def train(args, snapshot_path):
+    snapshot_path = Path(snapshot_path)
     os.environ["CUDA_VISIBLE_DEVICES"] = args.gpu
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     image_mode = "grayscale" if args.in_channels == 1 else "rgb"
@@ -409,6 +430,40 @@ def train(args, snapshot_path):
         **{key: value for key, value in model_kwargs.items() if key != "mode"},
     }
     write_model_config(snapshot_path, model_info)
+
+    if not bool(args.force_retrain):
+        reusable_match = resolve_basic_checkpoint(
+            project_root=PROJECT_ROOT,
+            output_root=args.output_root or None,
+            model_name=args.model,
+            dataset=args.dataset,
+            expected_signature=_expected_basic_checkpoint_signature(db_train.in_channels),
+        )
+        if reusable_match is not None:
+            reusable_checkpoint_path = Path(reusable_match["checkpoint_path"])
+            registered_checkpoint_path = reusable_checkpoint_path
+            try:
+                reusable_checkpoint_path.resolve().relative_to((snapshot_path / "checkpoints").resolve())
+            except ValueError:
+                copied = register_reused_checkpoint(
+                    source_checkpoint_path=reusable_checkpoint_path,
+                    target_run_dir=snapshot_path,
+                    project_root=PROJECT_ROOT,
+                    source_branch="basic",
+                    source_run_dir=reusable_match.get("run_dir"),
+                    payload_updates={"phase": "basic"},
+                )
+                registered_checkpoint_path = Path(copied["best"]["checkpoint_path"])
+            payload = load_checkpoint_into_model(registered_checkpoint_path, model, device=device)
+            history = payload.get("extra_state", {}).get("history", {})
+            logging.info(
+                "Found compatible checkpoint for basic branch. Skip training and reuse: %s",
+                project_relative_path(registered_checkpoint_path, PROJECT_ROOT),
+            )
+            _restore_loss_report_from_history(snapshot_path, history)
+            _run_final_evaluations(snapshot_path, registered_checkpoint_path, model, device, image_mode, _compute_model_profile(model, device), model_info)
+            _export_basic_channel_analysis(snapshot_path, registered_checkpoint_path, model, device)
+            return
 
     def worker_init_fn(worker_id):
         random.seed(args.seed + worker_id)
@@ -617,12 +672,10 @@ if __name__ == "__main__":
         if torch.cuda.is_available():
             torch.cuda.manual_seed_all(args.seed)
 
-    snapshot_path = build_run_dir(
+    snapshot_path = build_basic_run_dir(
         project_root=PROJECT_ROOT,
-        experiment=args.exp,
         dataset=args.dataset,
         model_name=args.model,
-        phase="basic",
         output_root=args.output_root or None,
     )
     snapshot_path.mkdir(parents=True, exist_ok=True)

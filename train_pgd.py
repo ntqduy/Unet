@@ -30,10 +30,25 @@ from utils.channel_analysis import (
     save_comparison_artifacts,
     save_pruning_analysis_artifacts,
 )
-from utils.checkpoints import load_checkpoint_into_model, resolve_phase_checkpoint, save_checkpoint
+from utils.checkpoints import build_checkpoint_metadata, load_checkpoint, load_checkpoint_into_model, resolve_phase_checkpoint, save_checkpoint
+from utils.checkpoint_resolver import (
+    build_expected_signature,
+    find_compatible_checkpoint,
+    register_reused_checkpoint,
+    resolve_basic_checkpoint,
+    resolve_run_checkpoint,
+)
 from utils.compression_loss import CompressionLoss
 from utils.evaluation import build_evaluation_output_dir, evaluate_segmentation_dataset, save_evaluation_artifacts
-from utils.experiment import build_run_dir, normalize_path_string, project_relative_path, ensure_run_layout, write_model_config, write_run_config
+from utils.experiment import (
+    build_pdg_phase_dir,
+    build_pdg_root_dir,
+    ensure_run_layout,
+    normalize_path_string,
+    project_relative_path,
+    write_model_config,
+    write_run_config,
+)
 from utils.losses import DiceLoss
 from utils.model_output import extract_logits, extract_model_info
 from utils.profiling import benchmark_inference, count_parameters, maybe_compute_flops
@@ -85,14 +100,21 @@ def _write_json(path: Path, payload: dict) -> None:
         json.dump(payload, file, indent=2)
 
 
-def _phase_dir(phase: str, variant: str) -> Path:
-    return build_run_dir(
+def _proposal_root_dir() -> Path:
+    return build_pdg_root_dir(
         project_root=PROJECT_ROOT,
-        experiment=args.exp,
         dataset=args.dataset,
-        model_name="pdg_unet",
-        phase=f"_{phase}",
-        variant=variant,
+        teacher_name=args.teacher_model,
+        output_root=args.output_root or None,
+    )
+
+
+def _phase_dir(phase: str) -> Path:
+    return build_pdg_phase_dir(
+        project_root=PROJECT_ROOT,
+        dataset=args.dataset,
+        teacher_name=args.teacher_model,
+        phase=phase,
         output_root=args.output_root or None,
     )
 
@@ -108,6 +130,68 @@ def _configure_logging(log_path: Path) -> None:
     stream_handler.setFormatter(formatter)
     logger.addHandler(file_handler)
     logger.addHandler(stream_handler)
+
+
+def _teacher_signature(in_channels: int) -> dict:
+    return build_expected_signature(
+        dataset=args.dataset,
+        model_name=args.teacher_model,
+        num_classes=args.num_classes,
+        in_channels=in_channels,
+        patch_size=args.patch_size,
+        encoder_pretrained=bool(args.encoder_pretrained) if args.teacher_model == "unet_resnet152" else None,
+    )
+
+
+def _student_signature(channel_config, in_channels: int) -> dict:
+    return build_expected_signature(
+        dataset=args.dataset,
+        model_name="pdg_unet",
+        num_classes=args.num_classes,
+        in_channels=in_channels,
+        patch_size=args.patch_size,
+        teacher_model=args.teacher_model,
+        channel_config=channel_config,
+    )
+
+
+def _restore_loss_pdf_if_possible(history: dict | None, pdf_path: Path, title: str) -> None:
+    if not history:
+        return
+    if any(values for values in history.values() if isinstance(values, list)):
+        save_loss_pdf(history, pdf_path, title=title)
+
+
+def _export_student_final_shortcuts(student_run_dir: Path, proposal_root_dir: Path) -> dict:
+    student_final_dir = proposal_root_dir / "student_final"
+    student_final_dir.mkdir(parents=True, exist_ok=True)
+    source_dir = student_run_dir / "checkpoints"
+    mapping = {
+        "best.pth": "best_student.pth",
+        "last.pth": "last_student.pth",
+    }
+    exported = {}
+    for source_name, target_name in mapping.items():
+        source_path = source_dir / source_name
+        if not source_path.is_file():
+            continue
+        target_path = student_final_dir / target_name
+        payload = load_checkpoint(source_path)
+        torch.save(payload, target_path)
+        metadata = build_checkpoint_metadata(
+            payload,
+            target_path,
+            project_root=PROJECT_ROOT,
+            extra_fields={
+                "shortcut_role": target_name.replace(".pth", ""),
+                "source_checkpoint_path": project_relative_path(source_path, PROJECT_ROOT),
+                "source_run_dir": project_relative_path(student_run_dir, PROJECT_ROOT),
+            },
+        )
+        metadata_name = target_name.replace(".pth", ".json")
+        _write_json(student_final_dir / metadata_name, metadata)
+        exported[target_name] = project_relative_path(target_path, PROJECT_ROOT)
+    return exported
 
 
 def _validate_label_batch(label_batch, num_classes, sampled_batch):
@@ -294,7 +378,7 @@ def _build_teacher(in_channels: int):
 
 
 def _run_teacher(device: torch.device, image_mode: str, db_train, trainloader, valloader):
-    run_dir = _phase_dir("teacher", args.teacher_model)
+    run_dir = _phase_dir("teacher")
     layout = ensure_run_layout(run_dir)
     write_run_config(run_dir, vars(args))
     metadata = get_model_metadata(args.teacher_model)
@@ -309,13 +393,72 @@ def _run_teacher(device: torch.device, image_mode: str, db_train, trainloader, v
         "encoder_pretrained": bool(args.encoder_pretrained) if args.teacher_model == "unet_resnet152" else None,
     }
     write_model_config(run_dir, model_info)
-    reusable = Path(args.teacher_checkpoint).expanduser().resolve() if args.teacher_checkpoint else resolve_phase_checkpoint(run_dir, "best")
-    if reusable and reusable.is_file() and not bool(args.force_retrain_teacher):
-        payload = load_checkpoint_into_model(reusable, model, device=device)
-        history = payload.get("extra_state", {}).get("history", {})
-        logging.info("Loaded teacher checkpoint: %s", project_relative_path(reusable, PROJECT_ROOT))
-        best_path = Path(reusable)
-    else:
+    teacher_signature = _teacher_signature(db_train.in_channels)
+    history = {}
+    best_path = None
+    reused_from = None
+
+    if not bool(args.force_retrain_teacher):
+        explicit_match = None
+        if args.teacher_checkpoint:
+            explicit_match = find_compatible_checkpoint(
+                [Path(args.teacher_checkpoint).expanduser().resolve()],
+                expected_signature=teacher_signature,
+            )
+            if explicit_match is None:
+                logging.warning("Ignore explicit teacher checkpoint because it is not compatible: %s", args.teacher_checkpoint)
+
+        proposal_match = explicit_match or resolve_run_checkpoint(run_dir, expected_signature=teacher_signature)
+        if proposal_match is not None:
+            proposal_checkpoint_path = Path(proposal_match["checkpoint_path"])
+            try:
+                proposal_checkpoint_path.resolve().relative_to(run_dir.resolve())
+                best_path = proposal_checkpoint_path
+            except ValueError:
+                copied = register_reused_checkpoint(
+                    source_checkpoint_path=proposal_checkpoint_path,
+                    target_run_dir=run_dir,
+                    project_root=PROJECT_ROOT,
+                    source_branch="external",
+                    source_run_dir=proposal_checkpoint_path.parent.parent if proposal_checkpoint_path.parent.name == "checkpoints" else proposal_checkpoint_path.parent,
+                    payload_updates={"phase": "teacher"},
+                )
+                best_path = Path(copied["best"]["checkpoint_path"])
+                reused_from = "external"
+            payload = load_checkpoint_into_model(best_path, model, device=device)
+            history = payload.get("extra_state", {}).get("history", {})
+            model_info.update(payload.get("model_info", {}))
+            reused_from = reused_from or "proposal"
+            logging.info("Loaded teacher checkpoint from %s: %s", reused_from, project_relative_path(best_path, PROJECT_ROOT))
+        else:
+            basic_match = resolve_basic_checkpoint(
+                project_root=PROJECT_ROOT,
+                output_root=args.output_root or None,
+                model_name=args.teacher_model,
+                dataset=args.dataset,
+                expected_signature=teacher_signature,
+            )
+            if basic_match is not None:
+                source_checkpoint_path = Path(basic_match["checkpoint_path"])
+                copied = register_reused_checkpoint(
+                    source_checkpoint_path=source_checkpoint_path,
+                    target_run_dir=run_dir,
+                    project_root=PROJECT_ROOT,
+                    source_branch="basic",
+                    source_run_dir=basic_match.get("run_dir"),
+                    payload_updates={"phase": "teacher"},
+                )
+                best_path = Path(copied["best"]["checkpoint_path"])
+                payload = load_checkpoint_into_model(best_path, model, device=device)
+                history = payload.get("extra_state", {}).get("history", {})
+                model_info.update(payload.get("model_info", {}))
+                reused_from = "basic"
+                logging.info(
+                    "Reused teacher checkpoint from basic branch and registered it under proposal outputs: %s",
+                    project_relative_path(source_checkpoint_path, PROJECT_ROOT),
+                )
+
+    if best_path is None:
         ce_loss = CrossEntropyLoss()
         dice_loss = DiceLoss(n_classes=args.num_classes)
         optimizer = optim.SGD(model.parameters(), lr=args.teacher_lr, momentum=0.9, weight_decay=1e-4)
@@ -382,6 +525,10 @@ def _run_teacher(device: torch.device, image_mode: str, db_train, trainloader, v
         if best_path is None:
             best_path = resolve_phase_checkpoint(run_dir, "last")
         save_loss_pdf(history, layout["reports_dir"] / "teacher_loss.pdf", title="Teacher loss")
+    else:
+        _restore_loss_pdf_if_possible(history, layout["reports_dir"] / "teacher_loss.pdf", "Teacher loss")
+
+    write_model_config(run_dir, model_info)
     profile = _compute_profile(model, device)
     _export_phase_outputs(
         run_dir,
@@ -401,16 +548,31 @@ def _run_teacher(device: torch.device, image_mode: str, db_train, trainloader, v
         prefix=None,
         title=f"Teacher Channel Analysis | {args.teacher_model}",
     )
-    return {"model": model, "run_dir": run_dir, "checkpoint_path": best_path, "metadata": model_info}
+    return {
+        "model": model,
+        "run_dir": run_dir,
+        "checkpoint_path": best_path,
+        "metadata": model_info,
+        "history": history,
+        "reused_from": reused_from,
+    }
 
 
 def _run_pruning(teacher_artifact: dict):
-    run_dir = _phase_dir("pruning", f"{args.teacher_model}_ratio_{args.prune_ratio:.2f}")
+    run_dir = _phase_dir("pruning")
     layout = ensure_run_layout(run_dir)
     write_run_config(run_dir, vars(args))
     blueprint_path = layout["artifacts_dir"] / "blueprint.json"
+    reusable_blueprint = None
     if blueprint_path.is_file() and not bool(args.force_reprune):
-        blueprint = load_blueprint_artifact(blueprint_path)
+        candidate_blueprint = load_blueprint_artifact(blueprint_path)
+        if (
+            candidate_blueprint.get("teacher_model") == args.teacher_model
+            and float(candidate_blueprint.get("prune_ratio", -1.0)) == float(args.prune_ratio)
+        ):
+            reusable_blueprint = candidate_blueprint
+    if reusable_blueprint is not None:
+        blueprint = reusable_blueprint
         logging.info("Loaded blueprint: %s", project_relative_path(blueprint_path, PROJECT_ROOT))
     else:
         blueprint = extract_pruned_blueprint(teacher_artifact["model"], prune_ratio=args.prune_ratio)
@@ -465,7 +627,7 @@ def _compute_student_val_losses(student, teacher, valloader, device, criterion):
 
 
 def _run_student(device: torch.device, image_mode: str, db_train, trainloader, valloader, teacher_artifact: dict, pruning_artifact: dict):
-    run_dir = _phase_dir("student", f"{args.teacher_model}_ratio_{args.prune_ratio:.2f}")
+    run_dir = _phase_dir("student")
     layout = ensure_run_layout(run_dir)
     write_run_config(run_dir, vars(args))
     teacher = teacher_artifact["model"]
@@ -498,12 +660,20 @@ def _run_student(device: torch.device, image_mode: str, db_train, trainloader, v
         prefix="student_input",
         title="Student Input Architecture Before Tuning",
     )
-    reusable = resolve_phase_checkpoint(run_dir, "best")
-    if reusable and reusable.is_file() and not bool(args.force_retrain_student):
-        payload = load_checkpoint_into_model(reusable, student, device=device)
+    history = {}
+    reusable_match = None
+    if not bool(args.force_retrain_student):
+        reusable_match = resolve_run_checkpoint(
+            run_dir,
+            expected_signature=_student_signature(pruning_artifact["blueprint"]["channel_config"], db_train.in_channels),
+        )
+    if reusable_match is not None:
+        best_path = Path(reusable_match["checkpoint_path"])
+        payload = load_checkpoint_into_model(best_path, student, device=device)
         history = payload.get("extra_state", {}).get("history", {})
-        logging.info("Loaded student checkpoint: %s", project_relative_path(reusable, PROJECT_ROOT))
-        best_path = Path(reusable)
+        student_model_info.update(payload.get("model_info", {}))
+        logging.info("Loaded student checkpoint: %s", project_relative_path(best_path, PROJECT_ROOT))
+        _restore_loss_pdf_if_possible(history, layout["reports_dir"] / "student_loss.pdf", "Student loss")
     else:
         criterion = CompressionLoss(args.num_classes, args.lambda_distill, args.lambda_sparsity)
         optimizer = optim.AdamW(student.parameters(), lr=args.student_lr, weight_decay=1e-4)
@@ -589,6 +759,7 @@ def _run_student(device: torch.device, image_mode: str, db_train, trainloader, v
         if best_path is None:
             best_path = resolve_phase_checkpoint(run_dir, "last")
         save_loss_pdf(history, layout["reports_dir"] / "student_loss.pdf", title="Student loss")
+    write_model_config(run_dir, student_model_info)
     profile = _compute_profile(student, device)
     _export_phase_outputs(
         run_dir,
@@ -630,6 +801,7 @@ def _run_student(device: torch.device, image_mode: str, db_train, trainloader, v
             }
         },
     )
+    student_final_exports = _export_student_final_shortcuts(run_dir, _proposal_root_dir())
     return {
         "model": student,
         "run_dir": run_dir,
@@ -637,6 +809,7 @@ def _run_student(device: torch.device, image_mode: str, db_train, trainloader, v
         "metadata": student_model_info,
         "student_input_analysis": student_input_analysis,
         "student_final_analysis": student_final_analysis,
+        "student_final_exports": student_final_exports,
     }
 
 
@@ -654,7 +827,9 @@ if __name__ == "__main__":
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     image_mode = "grayscale" if args.in_channels == 1 else "rgb"
 
-    pipeline_dir = _phase_dir("pipeline", args.teacher_model)
+    proposal_root_dir = _proposal_root_dir()
+    proposal_root_dir.mkdir(parents=True, exist_ok=True)
+    pipeline_dir = _phase_dir("pipeline")
     ensure_run_layout(pipeline_dir)
     write_run_config(pipeline_dir, vars(args))
     _configure_logging(pipeline_dir / "run.log")
@@ -670,6 +845,7 @@ if __name__ == "__main__":
     _write_json(
         pipeline_dir / "pipeline_summary.json",
         {
+            "proposal_root_dir": project_relative_path(proposal_root_dir, PROJECT_ROOT),
             "teacher_checkpoint": project_relative_path(teacher_artifact["checkpoint_path"], PROJECT_ROOT),
             "teacher_model_info": teacher_artifact["metadata"],
             "pruning_blueprint_path": project_relative_path(pruning_artifact["blueprint_path"], PROJECT_ROOT),
@@ -679,6 +855,8 @@ if __name__ == "__main__":
             "teacher_run_dir": project_relative_path(teacher_artifact["run_dir"], PROJECT_ROOT),
             "pruning_run_dir": project_relative_path(pruning_artifact["run_dir"], PROJECT_ROOT),
             "student_run_dir": project_relative_path(student_artifact["run_dir"], PROJECT_ROOT),
+            "student_final_exports": student_artifact.get("student_final_exports", {}),
+            "teacher_reused_from": teacher_artifact.get("reused_from"),
         },
     )
     logging.info("PDG pipeline completed.")

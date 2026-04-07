@@ -34,14 +34,7 @@ def build_evaluation_output_dir(
     checkpoint_path: Path | str,
     split: str,
 ) -> Path:
-    return (
-        Path(snapshot_path)
-        / "evaluations"
-        / sanitize_tag(dataset_name)
-        / sanitize_tag(model_name)
-        / checkpoint_label(checkpoint_path)
-        / sanitize_tag(split)
-    )
+    return Path(snapshot_path) / "evaluations" / sanitize_tag(split)
 
 
 def _normalize_case_name(sample: Dict) -> str:
