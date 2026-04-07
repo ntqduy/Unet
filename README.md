@@ -196,6 +196,30 @@ Luồng hiện tại là:
 - student ở bước này đã reuse lại phần weight sống sót từ teacher whenever compatible
 - metric ở `2_pruning` vì vậy phản ánh `pruned student after structural pruning + teacher weight subset reuse`, chứ không phải một model mới hoàn toàn từ đầu
 
+### Step 2 weight-transfer logging
+
+Khi chạy `2_pruning`, repo sẽ log rõ cho từng stage:
+
+- thành phần nào `copy trực tiếp`
+- thành phần nào `resize kernel rồi copy`
+- thành phần nào `không map được`
+
+Ví dụ log:
+
+```text
+Step-2 stage reuse | student_stage=stem | teacher_module=stem | status=channel_subset_reused | direct=first_norm,second_conv,second_norm | resized=first_conv | unmapped=none
+Step-2 stage reuse | student_stage=down1 | teacher_module=layer1 | status=channel_subset_reused | direct=first_conv,first_norm | resized=none | unmapped=second_conv,second_norm
+Step-2 head reuse | status=copied | mode=direct | reason=
+```
+
+Metadata này cũng được lưu trong `weight_transfer` của phase pruning để có thể xem lại sau khi train:
+
+- `stage_transfer_rows[*].direct_components`
+- `stage_transfer_rows[*].resized_components`
+- `stage_transfer_rows[*].unmapped_components`
+- `head_transfer`
+- `exact_match_copy_ratio`
+
 ## 7. Step 3: Student training / compression training
 
 Step 3 hiện bám theo logic implementation sau:
@@ -365,6 +389,7 @@ Quan trọng:
 - `2_pruning` bây giờ không chỉ là stage kiến trúc
 - nó còn evaluate một `pruned student before tuning` để bạn nhìn được hiệu quả ngay sau pruning
 - pruned student này được khởi tạo bằng các weight của teacher tương ứng với những channel không bị prune, thay vì để toàn bộ trọng số ở trạng thái khởi tạo mới
+- `weight_transfer` hiện cũng ghi rõ stage nào `direct copy`, stage nào `resized kernel`, stage nào `unmapped`, và `head` có reuse được hay không
 
 #### `3_student`
 
