@@ -2,11 +2,11 @@ from __future__ import annotations
 
 from typing import Dict, List, Type
 
-from networks.Unet_restnet import UNetResNet152
-from networks.VNet import VNet2D
-from networks.residual_unet import ResidualUNet2D
-from networks.unet import UNet2D
-from networks.unetr import UNETR2D
+from networks.Basic_Model.Unet_restnet import UNetResNet152
+from networks.Basic_Model.VNet import VNet2D
+from networks.Basic_Model.residual_unet import ResidualUNet2D
+from networks.Basic_Model.unet import UNet2D
+from networks.Basic_Model.unetr import UNETR2D
 
 
 MODEL_REGISTRY: Dict[str, Type] = {
@@ -15,6 +15,14 @@ MODEL_REGISTRY: Dict[str, Type] = {
     "resunet": ResidualUNet2D,
     "vnet": VNet2D,
     "unetr": UNETR2D,
+}
+
+MODEL_METADATA: Dict[str, Dict[str, str]] = {
+    "unet": {"branch": "basic", "model_name": "unet", "backbone_name": "unet_encoder"},
+    "unet_resnet152": {"branch": "basic", "model_name": "unet_resnet152", "backbone_name": "resnet152"},
+    "resunet": {"branch": "basic", "model_name": "resunet", "backbone_name": "residual_encoder"},
+    "vnet": {"branch": "basic", "model_name": "vnet", "backbone_name": "vnet_encoder"},
+    "unetr": {"branch": "basic", "model_name": "unetr", "backbone_name": "vit_encoder"},
 }
 
 MODEL_ALIASES = {
@@ -52,7 +60,12 @@ def list_models() -> List[str]:
     return sorted(MODEL_REGISTRY)
 
 
-def net_factory(net_type: str = "unet", in_chns: int = 3, class_num: int = 2, mode: str = "train", **kwargs):
+def get_model_metadata(model_name: str) -> Dict[str, str]:
+    normalized_name = _normalize_model_name(model_name)
+    return dict(MODEL_METADATA[normalized_name])
+
+
+def build_basic_model(net_type: str = "unet", in_chns: int = 3, class_num: int = 2, mode: str = "train", **kwargs):
     model_name = _normalize_model_name(net_type)
     kwargs.pop("tsne", None)
 
@@ -71,3 +84,7 @@ def net_factory(net_type: str = "unet", in_chns: int = 3, class_num: int = 2, mo
 
     model_kwargs.update(kwargs)
     return MODEL_REGISTRY[model_name](**model_kwargs)
+
+
+def net_factory(net_type: str = "unet", in_chns: int = 3, class_num: int = 2, mode: str = "train", **kwargs):
+    return build_basic_model(net_type=net_type, in_chns=in_chns, class_num=class_num, mode=mode, **kwargs)

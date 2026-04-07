@@ -5,6 +5,7 @@ from typing import Sequence, Tuple, Union
 import torch
 import torch.nn.functional as F
 from torch import nn
+from utils.model_output import BaseSegmentationModel
 
 
 class SingleDeconv2dBlock(nn.Module):
@@ -146,7 +147,7 @@ class TransformerEncoder(nn.Module):
         return tuple(extracted), grid_size
 
 
-class UNETR2D(nn.Module):
+class UNETR2D(BaseSegmentationModel):
     def __init__(
         self,
         in_channels: int = 3,
@@ -165,6 +166,8 @@ class UNETR2D(nn.Module):
         if embed_dim % num_heads != 0:
             raise ValueError("embed_dim must be divisible by num_heads.")
 
+        self.model_name = "unetr"
+        self.backbone_name = "vit_encoder"
         self.embed_dim = embed_dim
         self.patch_size = patch_size
         self.transformer = TransformerEncoder(
@@ -238,11 +241,12 @@ class UNETR2D(nn.Module):
         logits = self.header(torch.cat([z0, z3], dim=1))
         return logits, z0
 
-    def forward(self, x: torch.Tensor, return_features: bool = False) -> Union[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]]:
+    def forward(self, x: torch.Tensor, return_features: bool = False):
         logits, features = self.forward_features(x)
+        output = self.build_output(logits, features={"decoder": features})
         if return_features:
-            return logits, features
-        return logits
+            return output
+        return output
 
 
 UNETR = UNETR2D

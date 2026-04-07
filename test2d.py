@@ -9,6 +9,7 @@ from torchvision import transforms
 
 from dataloaders.dataset import Normalize, ToTensor, build_dataset, list_available_datasets
 from networks.net_factory import list_models, net_factory
+from utils.checkpoints import load_checkpoint_into_model
 from utils.evaluation import (
     build_evaluation_output_dir,
     checkpoint_label,
@@ -63,6 +64,7 @@ def _resolve_checkpoint_path(snapshot_path: Path) -> Path:
 
     weights_dir = snapshot_path / "weights"
     candidates = [
+        snapshot_path / "checkpoints" / "best.pth",
         weights_dir / f"{sanitize_tag(FLAGS.dataset)}_{sanitize_tag(FLAGS.model)}_best.pth",
         snapshot_path / f"{FLAGS.model}_best_model.pth",
     ]
@@ -155,7 +157,7 @@ def test_calculate_metric():
         class_num=FLAGS.num_classes,
         **model_kwargs,
     ).to(device)
-    model.load_state_dict(torch.load(checkpoint_path, map_location=device))
+    load_checkpoint_into_model(checkpoint_path, model, device=device)
     model.eval()
 
     split_summaries = {}

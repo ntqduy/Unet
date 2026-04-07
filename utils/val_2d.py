@@ -3,6 +3,8 @@ import torch
 import torch.nn.functional as F
 from medpy import metric
 
+from utils.model_output import extract_logits, extract_preds
+
 
 def calculate_metric_percase(pred, gt):
     pred = pred.astype(np.uint8)
@@ -11,22 +13,14 @@ def calculate_metric_percase(pred, gt):
     gt[gt > 0] = 1
 
     if pred.sum() == 0 and gt.sum() == 0:
-        return 1, 0
+        return 1, 1, 0
     if pred.sum() == 0 or gt.sum() == 0:
-        return 0, 0
+        return 0, 0, 0
 
     dice = metric.binary.dc(pred, gt)
+    iou = metric.binary.jc(pred, gt)
     hd95 = metric.binary.hd95(pred, gt)
-    return dice, hd95
-
-
-def _extract_logits(model_output):
-    if isinstance(model_output, (list, tuple)):
-        tensor_candidates = [item for item in model_output if torch.is_tensor(item) and item.ndim >= 4]
-        if not tensor_candidates:
-            raise ValueError("Model output does not contain segmentation logits.")
-        return tensor_candidates[0]
-    return model_output
+    return dice, iou, hd95
 
 
 def predict_single_image(image, model, patch_size=(256, 256), device=None, classes=2):
@@ -43,11 +37,16 @@ def predict_single_image(image, model, patch_size=(256, 256), device=None, class
 
     model.eval()
     with torch.no_grad():
-        logits = _extract_logits(model(resized_image.to(device)))
-        if logits.shape[1] == 1 or classes == 1:
-            prediction = (torch.sigmoid(logits) > 0.5).long()
+        model_output = model(resized_image.to(device))
+        prediction = extract_preds(model_output)
+        if prediction is None:
+            logits = extract_logits(model_output)
+            if logits.shape[1] == 1 or classes == 1:
+                prediction = (torch.sigmoid(logits) > 0.5).long()
+            else:
+                prediction = torch.argmax(torch.softmax(logits, dim=1), dim=1, keepdim=True)
         else:
-            prediction = torch.argmax(torch.softmax(logits, dim=1), dim=1, keepdim=True)
+            prediction = prediction.long()
 
     prediction = F.interpolate(prediction.float(), size=original_size, mode="nearest").squeeze(1).long().cpu()
     return prediction

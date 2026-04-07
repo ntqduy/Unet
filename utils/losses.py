@@ -4,15 +4,8 @@ import torch.nn as nn
 import contextlib
 import pdb
 import numpy as np
+from utils.model_output import extract_logits
 
-
-def _extract_logits(model_output):
-    if isinstance(model_output, (list, tuple)):
-        tensor_candidates = [item for item in model_output if torch.is_tensor(item) and item.ndim >= 4]
-        if not tensor_candidates:
-            raise ValueError("Model output does not contain segmentation logits.")
-        return tensor_candidates[0]
-    return model_output
 
 def softmax_mse_loss(input_logits, target_logits, sigmoid=False):
     """Takes softmax on both sides and returns MSE loss
@@ -363,7 +356,7 @@ class VAT2d(nn.Module):
 
     def forward(self, model, x):
         with torch.no_grad():
-            pred = F.softmax(_extract_logits(model(x)), dim=1)
+            pred = F.softmax(extract_logits(model(x)), dim=1)
 
         d = torch.rand(x.shape).sub(0.5).to(x.device)
         d = _l2_normalize(d) 
@@ -371,7 +364,7 @@ class VAT2d(nn.Module):
             # calc adversarial direction
             for _ in range(self.ip):
                 d.requires_grad_(True)
-                pred_hat = _extract_logits(model(x + self.xi * d))
+                pred_hat = extract_logits(model(x + self.xi * d))
                 logp_hat = F.softmax(pred_hat, dim=1)
                 adv_distance = self.loss(logp_hat, pred)
                 adv_distance.backward()
@@ -379,7 +372,7 @@ class VAT2d(nn.Module):
                 model.zero_grad()
 
             r_adv = d * self.epi
-            pred_hat = _extract_logits(model(x + r_adv))
+            pred_hat = extract_logits(model(x + r_adv))
             logp_hat = F.softmax(pred_hat, dim=1)
             lds = self.loss(logp_hat, pred)
         return lds

@@ -5,11 +5,13 @@ import os
 import random
 import shutil
 import sys
+import time
 from pathlib import Path
 
 import numpy as np
 import torch
 import torch.backends.cudnn as cudnn
+import torch.nn.functional as F
 import torch.optim as optim
 from torch.nn.modules.loss import CrossEntropyLoss
 from torch.utils.data import DataLoader
@@ -17,7 +19,8 @@ from torchvision import transforms
 from tqdm import tqdm
 
 from dataloaders.dataset import Normalize, RandomGenerator, ToTensor, build_dataset, list_available_datasets
-from networks.net_factory import list_models, net_factory
+from networks.net_factory import get_model_metadata, list_models, net_factory
+from utils.checkpoints import load_checkpoint_into_model, save_checkpoint
 from utils import losses, val_2d
 from utils.evaluation import (
     build_evaluation_output_dir,
@@ -26,20 +29,15 @@ from utils.evaluation import (
     sanitize_tag,
     save_evaluation_artifacts,
 )
+from utils.model_output import extract_logits
+from utils.profiling import benchmark_inference, count_parameters, maybe_compute_flops
+from utils.reporting import save_loss_pdf, save_performance_pdf, save_visualization_pdf, write_metrics_rows
 from utils.visualization import save_triplet_visualization
 
 
 PROJECT_ROOT = Path(__file__).resolve().parent
 DEFAULT_DATA_ROOT = PROJECT_ROOT / "data" / "Kvasir-SEG"
 
-
-def extract_logits(model_output):
-    if isinstance(model_output, (list, tuple)):
-        tensor_candidates = [item for item in model_output if torch.is_tensor(item) and item.ndim >= 4]
-        if not tensor_candidates:
-            raise ValueError("Model output does not contain segmentation logits.")
-        return tensor_candidates[0]
-    return model_output
 
 
 parser = argparse.ArgumentParser()
@@ -119,6 +117,17 @@ def _write_json(path: Path, payload: dict) -> None:
         json.dump(payload, file, indent=2)
 
 
+def _compute_model_profile(model, device) -> dict:
+    input_shape = (1, args.in_channels, args.patch_size[0], args.patch_size[1])
+    profile = {
+        "params": int(count_parameters(model)),
+        "trainable_params": int(count_parameters(model, trainable_only=True)),
+    }
+    profile.update(benchmark_inference(model, input_shape=input_shape, device=device))
+    profile["flops"] = maybe_compute_flops(model, input_shape=input_shape, device=device)
+    return profile
+
+
 def _unique_preserve_order(values):
     ordered = []
     seen = set()
@@ -165,6 +174,7 @@ def _build_evaluation_metadata(split: str, checkpoint_path: Path) -> dict:
         "split": split,
         "model": args.model,
         "architecture": args.model,
+        "backbone_name": get_model_metadata(args.model)["backbone_name"],
         "num_classes": args.num_classes,
         "in_channels": args.in_channels,
         "patch_size": list(args.patch_size),
@@ -204,20 +214,33 @@ def _write_evaluation_overview(snapshot_path: Path, checkpoint_path: Path, split
     for split_name, summary in split_summaries.items():
         macro = summary["metrics"]["macro_mean"]
         lines.append(
-            f"- `{split_name}` | dice `{macro['dice']:.6f}` | hd95 `{macro['hd95']:.6f}` | cases `{summary['num_cases']}`"
+            f"- `{split_name}` | dice `{macro['dice']:.6f}` | iou `{macro['iou']:.6f}` | hd95 `{macro['hd95']:.6f}` | cases `{summary['num_cases']}`"
         )
     with (checkpoint_root / "evaluation_overview.md").open("w", encoding="utf-8") as file:
         file.write("\n".join(lines) + "\n")
 
 
-def run_validation(args, model, valloader, device):
+def run_validation(args, model, valloader, device, ce_loss):
     model.eval()
     metric_list = []
     vis_samples = []
+    val_losses = []
 
     with torch.no_grad():
         for sampled_val in valloader:
             validate_label_batch(sampled_val["label"], args.num_classes, sampled_val)
+            resized_image = F.interpolate(sampled_val["image"].to(device), size=args.patch_size, mode="bilinear", align_corners=False)
+            resized_label = F.interpolate(
+                sampled_val["label"].unsqueeze(1).float().to(device),
+                size=args.patch_size,
+                mode="nearest",
+            ).squeeze(1).long()
+            logits = extract_logits(model(resized_image))
+            loss_ce = ce_loss(logits, resized_label.long())
+            outputs_soft = torch.softmax(logits, dim=1)
+            loss_dice = dice_loss(outputs_soft, resized_label.unsqueeze(1))
+            val_losses.append(float((0.5 * (loss_ce + loss_dice)).item()))
+
             need_prediction = bool(args.save_visualizations) and len(vis_samples) < args.vis_num_samples
             metric_output = val_2d.test_single_volume(
                 sampled_val["image"],
@@ -250,16 +273,17 @@ def run_validation(args, model, valloader, device):
 
     metric_array = np.stack(metric_list, axis=0).mean(axis=0)
     performance = float(np.mean(metric_array[:, 0]))
-    return performance, vis_samples
+    return performance, float(np.mean(val_losses)) if val_losses else 0.0, vis_samples
 
 
-def _run_final_evaluations(snapshot_path: Path, checkpoint_path: Path, model, device, image_mode: str) -> None:
+def _run_final_evaluations(snapshot_path: Path, checkpoint_path: Path, model, device, image_mode: str, profile: dict) -> None:
     logging.info("Running final evaluation with best checkpoint: %s", checkpoint_path)
-    model.load_state_dict(torch.load(checkpoint_path, map_location=device))
+    load_checkpoint_into_model(checkpoint_path, model, device=device)
     model.eval()
 
     eval_transform = transforms.Compose([Normalize(), ToTensor()])
     split_summaries = {}
+    metrics_rows = []
     for split in _unique_preserve_order(args.final_eval_splits):
         try:
             dataset = build_dataset(
@@ -275,6 +299,7 @@ def _run_final_evaluations(snapshot_path: Path, checkpoint_path: Path, model, de
 
         dataloader = DataLoader(dataset, batch_size=1, shuffle=False, num_workers=1, pin_memory=device.type == "cuda")
         output_dir = build_evaluation_output_dir(snapshot_path, args.dataset, args.model, checkpoint_path, split)
+        start_time = time.perf_counter()
         result = evaluate_segmentation_dataset(
             model,
             dataloader,
@@ -287,6 +312,7 @@ def _run_final_evaluations(snapshot_path: Path, checkpoint_path: Path, model, de
             sample_validator=validate_label_batch,
             progress_desc=f"final-{split}",
         )
+        elapsed = time.perf_counter() - start_time
         summary = save_evaluation_artifacts(
             output_dir,
             _build_evaluation_metadata(split, checkpoint_path),
@@ -295,16 +321,47 @@ def _run_final_evaluations(snapshot_path: Path, checkpoint_path: Path, model, de
         )
         split_summaries[split] = summary
         macro = summary["metrics"]["macro_mean"]
+        metrics_rows.append(
+            {
+                "experiment": args.exp,
+                "dataset": args.dataset,
+                "split": split,
+                "phase": "basic",
+                "model_name": args.model,
+                "backbone_name": get_model_metadata(args.model)["backbone_name"],
+                "student_name": None,
+                "dice": macro["dice"],
+                "iou": macro["iou"],
+                "hd95": macro["hd95"],
+                "params": profile.get("params"),
+                "trainable_params": profile.get("trainable_params"),
+                "flops": profile.get("flops"),
+                "fps": profile.get("fps"),
+                "inference_time_seconds": profile.get("inference_time_seconds"),
+                "evaluation_time_seconds": elapsed,
+                "checkpoint_path": str(checkpoint_path.resolve()),
+            }
+        )
         logging.info(
-            "Final evaluation | split=%s | checkpoint=%s | macro_dice=%.6f | macro_hd95=%.6f | cases=%d",
+            "Final evaluation | split=%s | checkpoint=%s | macro_dice=%.6f | macro_iou=%.6f | macro_hd95=%.6f | cases=%d",
             split,
             checkpoint_path.name,
             macro["dice"],
+            macro["iou"],
             macro["hd95"],
             summary["num_cases"],
         )
+        if result["visualization_samples"]:
+            save_visualization_pdf(
+                result["visualization_samples"],
+                snapshot_path / "reports" / f"basic_{split}_visualizations.pdf",
+                title=f"basic | {split}",
+            )
 
     _write_evaluation_overview(snapshot_path, checkpoint_path, split_summaries)
+    if metrics_rows:
+        write_metrics_rows(metrics_rows, snapshot_path / "metrics" / "basic_metrics.csv")
+        save_performance_pdf(metrics_rows, snapshot_path / "reports" / "basic_performance.pdf", title="Basic model performance")
 
 
 def train(args, snapshot_path):
@@ -388,25 +445,37 @@ def train(args, snapshot_path):
     model.train()
     iter_num = 0
     best_performance = float("-inf")
-    weights_dir = Path(snapshot_path) / "weights"
-    weights_dir.mkdir(parents=True, exist_ok=True)
     best_checkpoint_path = None
+    history = {"train_total_loss": [], "val_total_loss": [], "val_macro_dice": []}
+    model_metadata = get_model_metadata(args.model)
 
     def evaluate_and_checkpoint(metric_prefix, log_prefix):
         nonlocal best_performance, best_checkpoint_path
 
-        performance, vis_samples = run_validation(args, model, valloader, device)
+        performance, val_loss, vis_samples = run_validation(args, model, valloader, device, ce_loss)
+        history["val_total_loss"].append(val_loss)
+        history["val_macro_dice"].append(performance)
 
         if performance > best_performance:
             best_performance = performance
             metric_prefix_safe = sanitize_tag(metric_prefix)
-            unique_checkpoint_path = weights_dir / f"{_run_prefix()}_{metric_prefix_safe}_valdice_{best_performance:.4f}.pth"
-            alias_checkpoint_path = weights_dir / f"{_run_prefix()}_best.pth"
-            legacy_checkpoint_path = Path(snapshot_path) / f"{args.model}_best_model.pth"
-
-            torch.save(model.state_dict(), unique_checkpoint_path)
-            torch.save(model.state_dict(), alias_checkpoint_path)
-            torch.save(model.state_dict(), legacy_checkpoint_path)
+            unique_checkpoint_path = save_checkpoint(
+                snapshot_path,
+                f"{_run_prefix()}_{metric_prefix_safe}_valdice_{best_performance:.4f}",
+                model=model,
+                optimizer=optimizer,
+                epoch=len(history["train_total_loss"]),
+                global_step=iter_num,
+                best_metric=best_performance,
+                metrics={"val_macro_dice": performance, "val_total_loss": val_loss},
+                config=vars(args),
+                model_info=model_metadata,
+                phase="basic",
+                extra_state={"history": history},
+                is_best=True,
+            )
+            alias_checkpoint_path = Path(snapshot_path) / "checkpoints" / "best.pth"
+            legacy_checkpoint_path = alias_checkpoint_path
             best_checkpoint_path = unique_checkpoint_path
 
             manifest = _build_checkpoint_manifest(
@@ -418,13 +487,13 @@ def train(args, snapshot_path):
             )
             _write_json(_best_checkpoint_manifest_path(Path(snapshot_path)), manifest)
             logging.info("Saved best model to %s", unique_checkpoint_path)
-            logging.info("Updated stable best aliases: %s | %s", alias_checkpoint_path, legacy_checkpoint_path)
+            logging.info("Updated stable best alias: %s", alias_checkpoint_path)
 
             if args.save_visualizations and vis_samples:
                 vis_dir = build_evaluation_output_dir(snapshot_path, args.dataset, args.model, unique_checkpoint_path, args.val_split)
                 save_validation_visualizations(vis_samples, vis_dir)
 
-        logging.info("%s : val_macro_dice : %f", log_prefix, performance)
+        logging.info("%s : val_loss : %f | val_macro_dice : %f", log_prefix, val_loss, performance)
         model.train()
 
     if args.max_epochs is not None:
@@ -455,6 +524,7 @@ def train(args, snapshot_path):
                 logging.info("epoch %d/%d iteration %d : loss : %f", epoch_num, args.max_epochs, iter_num, loss.item())
 
             epoch_loss = float(np.mean(epoch_losses))
+            history["train_total_loss"].append(epoch_loss)
             logging.info("epoch %d/%d : mean_loss : %f", epoch_num, args.max_epochs, epoch_loss)
 
             should_eval = (epoch_num % args.eval_interval_epochs == 0) or (epoch_num == args.max_epochs)
@@ -509,18 +579,30 @@ def train(args, snapshot_path):
                     break
 
             epoch_loss = float(np.mean(epoch_losses))
+            history["train_total_loss"].append(epoch_loss)
             logging.info("epoch %d/%d : mean_loss : %f", epoch_num, max_epoch, epoch_loss)
 
             if iter_num >= args.max_iterations:
                 break
 
     if best_checkpoint_path is None:
-        fallback_checkpoint_path = weights_dir / f"{_run_prefix()}_last.pth"
-        alias_checkpoint_path = weights_dir / f"{_run_prefix()}_best.pth"
-        legacy_checkpoint_path = Path(snapshot_path) / f"{args.model}_best_model.pth"
-        torch.save(model.state_dict(), fallback_checkpoint_path)
-        torch.save(model.state_dict(), alias_checkpoint_path)
-        torch.save(model.state_dict(), legacy_checkpoint_path)
+        fallback_checkpoint_path = save_checkpoint(
+            snapshot_path,
+            f"{_run_prefix()}_last",
+            model=model,
+            optimizer=optimizer,
+            epoch=len(history["train_total_loss"]),
+            global_step=iter_num,
+            best_metric=-1.0,
+            metrics={"val_macro_dice": -1.0},
+            config=vars(args),
+            model_info=model_metadata,
+            phase="basic",
+            extra_state={"history": history},
+            is_best=True,
+        )
+        alias_checkpoint_path = Path(snapshot_path) / "checkpoints" / "best.pth"
+        legacy_checkpoint_path = alias_checkpoint_path
         best_checkpoint_path = fallback_checkpoint_path
         manifest = _build_checkpoint_manifest(
             fallback_checkpoint_path,
@@ -532,7 +614,8 @@ def train(args, snapshot_path):
         _write_json(_best_checkpoint_manifest_path(Path(snapshot_path)), manifest)
         logging.warning("No validation checkpoint was selected; using the last model state at %s", fallback_checkpoint_path)
 
-    _run_final_evaluations(Path(snapshot_path), best_checkpoint_path, model, device, image_mode)
+    save_loss_pdf(history, Path(snapshot_path) / "reports" / "basic_loss.pdf", title="Basic model loss")
+    _run_final_evaluations(Path(snapshot_path), best_checkpoint_path, model, device, image_mode, _compute_model_profile(model, device))
 
 
 if __name__ == "__main__":
@@ -548,7 +631,7 @@ if __name__ == "__main__":
     snapshot_path = PROJECT_ROOT / "logs" / "model" / "supervised" / args.exp
     snapshot_path.mkdir(parents=True, exist_ok=True)
 
-    shutil.copy(Path(__file__).resolve(), snapshot_path / "train2d.py")
+    shutil.copy(Path(__file__).resolve(), snapshot_path / "train_basic_model.py")
     _write_json(snapshot_path / "run_config.json", vars(args))
 
     logging.basicConfig(

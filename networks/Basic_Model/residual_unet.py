@@ -6,7 +6,8 @@ import torch
 import torch.nn.functional as F
 from torch import nn
 
-from networks.common import ResidualBlock2d
+from networks.Basic_Model.common import ResidualBlock2d
+from utils.model_output import BaseSegmentationModel
 
 
 class DecoderBlock(nn.Module):
@@ -23,7 +24,7 @@ class DecoderBlock(nn.Module):
         return self.block(x)
 
 
-class ResidualUNet2D(nn.Module):
+class ResidualUNet2D(BaseSegmentationModel):
     def __init__(
         self,
         in_channels: int = 3,
@@ -37,6 +38,8 @@ class ResidualUNet2D(nn.Module):
         if len(channels) != 5:
             raise ValueError("ResidualUNet2D expects exactly 5 encoder stages.")
 
+        self.model_name = "resunet"
+        self.backbone_name = "residual_encoder"
         self.pool = nn.MaxPool2d(kernel_size=2, stride=2)
 
         self.enc1 = ResidualBlock2d(in_channels, channels[0], normalization=normalization)
@@ -67,11 +70,12 @@ class ResidualUNet2D(nn.Module):
         logits = self.head(features)
         return logits, features
 
-    def forward(self, x: torch.Tensor, return_features: bool = False) -> Union[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]]:
+    def forward(self, x: torch.Tensor, return_features: bool = False):
         logits, features = self.forward_features(x)
+        output = self.build_output(logits, features={"decoder": features})
         if return_features:
-            return logits, features
-        return logits
+            return output
+        return output
 
 
 ResidualUNet = ResidualUNet2D

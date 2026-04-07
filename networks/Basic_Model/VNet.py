@@ -6,7 +6,8 @@ import torch
 import torch.nn.functional as F
 from torch import nn
 
-from networks.common import make_norm
+from networks.Basic_Model.common import make_norm
+from utils.model_output import BaseSegmentationModel
 
 
 class ConvBlock(nn.Module):
@@ -176,7 +177,7 @@ class Decoder(nn.Module):
         return logits, features[-1]
 
 
-class VNet2D(nn.Module):
+class VNet2D(BaseSegmentationModel):
     def __init__(
         self,
         in_channels: int = 3,
@@ -187,6 +188,8 @@ class VNet2D(nn.Module):
         has_residual: bool = False,
     ) -> None:
         super().__init__()
+        self.model_name = "vnet"
+        self.backbone_name = "vnet_encoder"
         self.encoder = Encoder(
             in_channels=in_channels,
             base_channels=base_channels,
@@ -202,12 +205,13 @@ class VNet2D(nn.Module):
             has_residual=has_residual,
         )
 
-    def forward(self, x: torch.Tensor, return_features: bool = False) -> Union[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]]:
+    def forward(self, x: torch.Tensor, return_features: bool = False):
         encoded_features = self.encoder(x)
         logits, bottleneck = self.decoder(encoded_features)
+        output = self.build_output(logits, features={"encoder": encoded_features, "bottleneck": bottleneck})
         if return_features:
-            return logits, bottleneck
-        return logits
+            return output
+        return output
 
 
 VNet = VNet2D

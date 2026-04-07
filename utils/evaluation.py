@@ -14,7 +14,7 @@ from utils.val_2d import test_single_volume
 from utils.visualization import save_triplet_visualization
 
 
-METRIC_NAMES = ("dice", "hd95")
+METRIC_NAMES = ("dice", "iou", "hd95")
 
 
 def sanitize_tag(value: object) -> str:
@@ -68,6 +68,7 @@ def evaluate_segmentation_dataset(
     total_metric: List[np.ndarray] = []
     case_metrics: List[Dict] = []
     saved_visualizations = 0
+    visualization_samples: List[Dict] = []
 
     iterator: Iterable = dataloader
     if progress_desc:
@@ -91,13 +92,14 @@ def evaluate_segmentation_dataset(
             total_metric.append(metric_array)
 
             case_name = _normalize_case_name(sample)
-            for class_index, (dice_value, hd95_value) in enumerate(metric_array, start=1):
+            for class_index, metric_row in enumerate(metric_array, start=1):
                 case_metrics.append(
                     {
                         "case": case_name,
                         "class_index": class_index,
-                        "dice": float(dice_value),
-                        "hd95": float(hd95_value),
+                        "dice": float(metric_row[0]),
+                        "iou": float(metric_row[1]),
+                        "hd95": float(metric_row[2]),
                     }
                 )
 
@@ -110,6 +112,18 @@ def evaluate_segmentation_dataset(
                     output_dir=output_dir,
                     case_name=case_name,
                 )
+                per_case_mean = metric_array.mean(axis=0)
+                visualization_samples.append(
+                    {
+                        "case": case_name,
+                        "image": sample["image"][0].detach().cpu(),
+                        "label": sample["label"][0].detach().cpu(),
+                        "prediction": prediction[0].detach().cpu(),
+                        "dice": float(per_case_mean[0]),
+                        "iou": float(per_case_mean[1]),
+                        "hd95": float(per_case_mean[2]),
+                    }
+                )
                 saved_visualizations += 1
 
     if not total_metric:
@@ -121,6 +135,7 @@ def evaluate_segmentation_dataset(
         "case_metrics": case_metrics,
         "num_cases": len({row["case"] for row in case_metrics}),
         "saved_visualizations": saved_visualizations,
+        "visualization_samples": visualization_samples,
     }
 
 
@@ -129,7 +144,8 @@ def _per_class_summary(average_metric: np.ndarray) -> List[Dict]:
         {
             "class_index": int(class_index),
             "dice": float(row[0]),
-            "hd95": float(row[1]),
+            "iou": float(row[1]),
+            "hd95": float(row[2]),
         }
         for class_index, row in enumerate(average_metric, start=1)
     ]
@@ -158,7 +174,7 @@ def build_evaluation_summary(metadata: Dict, average_metric: np.ndarray, case_me
 def _write_case_metrics_csv(case_metrics: List[Dict], output_dir: Path) -> Path:
     csv_path = output_dir / "case_metrics.csv"
     with csv_path.open("w", newline="", encoding="utf-8") as file:
-        writer = csv.DictWriter(file, fieldnames=["case", "class_index", "dice", "hd95"])
+        writer = csv.DictWriter(file, fieldnames=["case", "class_index", "dice", "iou", "hd95"])
         writer.writeheader()
         writer.writerows(case_metrics)
     return csv_path
@@ -182,7 +198,7 @@ def _summary_to_markdown(summary: Dict) -> str:
     ]
     for row in summary["metrics"]["per_class_mean"]:
         lines.append(
-            f"- Class `{row['class_index']}` | dice `{row['dice']:.6f}` | hd95 `{row['hd95']:.6f}`"
+            f"- Class `{row['class_index']}` | dice `{row['dice']:.6f}` | iou `{row['iou']:.6f}` | hd95 `{row['hd95']:.6f}`"
         )
     lines.extend(
         [
@@ -190,6 +206,7 @@ def _summary_to_markdown(summary: Dict) -> str:
             "## Macro Mean",
             "",
             f"- Dice: `{summary['metrics']['macro_mean']['dice']:.6f}`",
+            f"- IoU: `{summary['metrics']['macro_mean']['iou']:.6f}`",
             f"- HD95: `{summary['metrics']['macro_mean']['hd95']:.6f}`",
             "",
         ]

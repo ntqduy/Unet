@@ -6,7 +6,8 @@ import torch
 import torch.nn.functional as F
 from torch import nn
 
-from networks.common import DoubleConv2d
+from networks.Basic_Model.common import DoubleConv2d
+from utils.model_output import BaseSegmentationModel
 
 
 class DownBlock(nn.Module):
@@ -46,7 +47,7 @@ class UpBlock(nn.Module):
         return self.conv(x)
 
 
-class UNet2D(nn.Module):
+class UNet2D(BaseSegmentationModel):
     def __init__(
         self,
         in_channels: int = 3,
@@ -61,6 +62,8 @@ class UNet2D(nn.Module):
         if len(channels) != 5:
             raise ValueError("UNet2D expects exactly 5 encoder stages.")
 
+        self.model_name = "unet"
+        self.backbone_name = "unet_encoder"
         self.stem = DoubleConv2d(in_channels, channels[0], normalization=normalization, dropout=dropout)
         self.down1 = DownBlock(channels[0], channels[1], normalization=normalization, dropout=dropout)
         self.down2 = DownBlock(channels[1], channels[2], normalization=normalization, dropout=dropout)
@@ -88,11 +91,16 @@ class UNet2D(nn.Module):
         logits = self.head(features)
         return logits, features
 
-    def forward(self, x: torch.Tensor, return_features: bool = False) -> Union[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]]:
+    def forward(self, x: torch.Tensor, return_features: bool = False):
         logits, features = self.forward_features(x)
+        output = self.build_output(
+            logits,
+            features={"decoder": features},
+            aux={"feature_channels": list(self.head.weight.shape[1:2])},
+        )
         if return_features:
-            return logits, features
-        return logits
+            return output
+        return output
 
 
 UNet = UNet2D

@@ -7,7 +7,8 @@ import torch.nn.functional as F
 from torch import nn
 from torchvision import models
 
-from networks.common import DoubleConv2d
+from networks.Basic_Model.common import DoubleConv2d
+from utils.model_output import BaseSegmentationModel
 
 
 def _build_resnet152(encoder_pretrained: bool):
@@ -46,7 +47,7 @@ class FinalUpBlock(nn.Module):
         return self.block(x)
 
 
-class UNetResNet152(nn.Module):
+class UNetResNet152(BaseSegmentationModel):
     def __init__(
         self,
         in_channels: int = 3,
@@ -56,6 +57,8 @@ class UNetResNet152(nn.Module):
     ) -> None:
         super().__init__()
         backbone = _build_resnet152(encoder_pretrained=encoder_pretrained)
+        self.model_name = "unet_resnet152"
+        self.backbone_name = "resnet152"
 
         if in_channels != 3:
             original_conv = backbone.conv1
@@ -105,11 +108,12 @@ class UNetResNet152(nn.Module):
         logits = self.head(features)
         return logits, features
 
-    def forward(self, x: torch.Tensor, return_features: bool = False) -> Union[torch.Tensor, Tuple[torch.Tensor, torch.Tensor]]:
+    def forward(self, x: torch.Tensor, return_features: bool = False):
         logits, features = self.forward_features(x)
+        output = self.build_output(logits, features={"decoder": features})
         if return_features:
-            return logits, features
-        return logits
+            return output
+        return output
 
 
 UNetRestNet152 = UNetResNet152
