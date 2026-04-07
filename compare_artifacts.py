@@ -605,7 +605,7 @@ def main() -> None:
     report = build_report(args)
 
     output_dir = Path(args.output_dir).expanduser().resolve() if args.output_dir else (
-        PROJECT_ROOT / "logs" / "comparisons" / sanitize_tag(args.comparison_name)
+        PROJECT_ROOT / "outputs" / "comparisons" / sanitize_tag(args.comparison_name)
     )
     output_dir.mkdir(parents=True, exist_ok=True)
 

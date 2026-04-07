@@ -17,6 +17,7 @@ from utils.evaluation import (
     sanitize_tag,
     save_evaluation_artifacts,
 )
+from utils.experiment import build_run_dir
 
 
 PROJECT_ROOT = Path(__file__).resolve().parent
@@ -37,6 +38,7 @@ parser.add_argument("--gpu", type=str, default="0")
 parser.add_argument("--patch_size", nargs=2, type=int, default=[256, 256])
 parser.add_argument("--save_visualizations", type=int, default=1)
 parser.add_argument("--vis_limit", type=int, default=200, help="-1 means save all")
+parser.add_argument("--output_root", type=str, default="", help="root directory for exported outputs; defaults to PROJECT_ROOT/outputs")
 
 FLAGS = parser.parse_args()
 
@@ -54,9 +56,17 @@ def _resolve_checkpoint_path(snapshot_path: Path) -> Path:
             raise FileNotFoundError(f"Checkpoint '{checkpoint_path}' does not exist.")
         return checkpoint_path
 
-    manifest_path = snapshot_path / "best_checkpoint.json"
+    manifest_path = snapshot_path / "checkpoints" / "metadata" / "best.json"
     if manifest_path.is_file():
         with manifest_path.open("r", encoding="utf-8") as file:
+            manifest = json.load(file)
+        candidate = Path(manifest.get("checkpoint_path", "")).expanduser()
+        if candidate.is_file():
+            return candidate.resolve()
+
+    legacy_manifest_path = snapshot_path / "best_checkpoint.json"
+    if legacy_manifest_path.is_file():
+        with legacy_manifest_path.open("r", encoding="utf-8") as file:
             manifest = json.load(file)
         candidate = Path(manifest.get("checkpoint_path", "")).expanduser()
         if candidate.is_file():
@@ -138,7 +148,17 @@ def _write_overview(checkpoint_root: Path, split_summaries: dict) -> None:
 def test_calculate_metric():
     os.environ["CUDA_VISIBLE_DEVICES"] = FLAGS.gpu
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    snapshot_path = PROJECT_ROOT / "logs" / "model" / "supervised" / FLAGS.exp
+    snapshot_path = build_run_dir(
+        project_root=PROJECT_ROOT,
+        experiment=FLAGS.exp,
+        dataset=FLAGS.dataset,
+        model_name=FLAGS.model,
+        phase="basic",
+        output_root=FLAGS.output_root or None,
+    )
+    legacy_snapshot_path = PROJECT_ROOT / "logs" / "model" / "supervised" / FLAGS.exp
+    if not snapshot_path.exists() and legacy_snapshot_path.exists():
+        snapshot_path = legacy_snapshot_path
     image_mode = "grayscale" if FLAGS.in_channels == 1 else "rgb"
     checkpoint_path = _resolve_checkpoint_path(snapshot_path)
 

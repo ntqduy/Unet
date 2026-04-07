@@ -6,6 +6,21 @@ from typing import Dict, Optional, Sequence
 import torch
 
 
+PROFILING_BUFFER_NAMES = ("total_ops", "total_params")
+
+
+def _remove_profiling_buffers(model) -> None:
+    for module in model.modules():
+        buffer_store = getattr(module, "_buffers", None)
+        if isinstance(buffer_store, dict):
+            for key in PROFILING_BUFFER_NAMES:
+                buffer_store.pop(key, None)
+        non_persistent = getattr(module, "_non_persistent_buffers_set", None)
+        if hasattr(non_persistent, "discard"):
+            for key in PROFILING_BUFFER_NAMES:
+                non_persistent.discard(key)
+
+
 def count_parameters(model, *, trainable_only: bool = False) -> int:
     parameters = model.parameters()
     if trainable_only:
@@ -22,6 +37,7 @@ def maybe_compute_flops(model, input_shape: Sequence[int], device: torch.device)
     dummy = torch.randn(*input_shape, device=device)
     with torch.no_grad():
         flops, _ = profile(model, inputs=(dummy,), verbose=False)
+    _remove_profiling_buffers(model)
     return int(flops)
 
 

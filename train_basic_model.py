@@ -3,7 +3,6 @@ import json
 import logging
 import os
 import random
-import shutil
 import sys
 import time
 from pathlib import Path
@@ -25,12 +24,10 @@ from utils import losses, val_2d
 from utils.channel_analysis import extract_channel_analysis, save_channel_analysis_artifacts
 from utils.evaluation import (
     build_evaluation_output_dir,
-    checkpoint_label,
     evaluate_segmentation_dataset,
-    sanitize_tag,
     save_evaluation_artifacts,
 )
-from utils.experiment import ensure_run_layout, write_model_config
+from utils.experiment import build_run_dir, ensure_run_layout, sanitize_tag, write_model_config, write_run_config
 from utils.model_output import extract_logits, extract_model_info
 from utils.profiling import benchmark_inference, count_parameters, maybe_compute_flops
 from utils.reporting import save_loss_pdf, save_performance_pdf, save_visualization_pdf, write_metrics_rows
@@ -65,6 +62,8 @@ parser.add_argument("--gpu", type=str, default="0")
 parser.add_argument("--num_workers", type=int, default=4)
 parser.add_argument("--save_visualizations", type=int, default=1)
 parser.add_argument("--vis_num_samples", type=int, default=5)
+parser.add_argument("--output_root", type=str, default="", help="root directory for all exported outputs; defaults to PROJECT_ROOT/outputs")
+parser.add_argument("--save_history_checkpoints", type=int, default=0, help="set to 1 to keep epoch/iteration checkpoint history in addition to best/last")
 parser.add_argument(
     "--final_eval_splits",
     nargs="*",
@@ -140,38 +139,6 @@ def _unique_preserve_order(values):
     return ordered
 
 
-def _run_prefix() -> str:
-    return f"{sanitize_tag(args.dataset)}_{sanitize_tag(args.model)}"
-
-
-def _best_checkpoint_manifest_path(snapshot_path: Path) -> Path:
-    return snapshot_path / "best_checkpoint.json"
-
-
-def _build_checkpoint_manifest(checkpoint_path: Path, alias_path: Path, legacy_path: Path, metric_prefix: str, metric_value: float, model_info: dict | None = None) -> dict:
-    resolved_model_info = dict(model_info or get_model_metadata(args.model))
-    return {
-        "experiment": args.exp,
-        "dataset": args.dataset,
-        "dataset_root": str(Path(args.root_path).expanduser().resolve()),
-        "model": args.model,
-        "architecture": args.model,
-        "backbone_name": resolved_model_info.get("backbone_name"),
-        "student_name": resolved_model_info.get("student_name"),
-        "model_info": resolved_model_info,
-        "train_split": args.train_split,
-        "val_split": args.val_split,
-        "metric_name": "val_macro_dice",
-        "metric_value": float(metric_value),
-        "metric_prefix": metric_prefix,
-        "checkpoint_name": checkpoint_path.name,
-        "checkpoint_path": str(checkpoint_path.resolve()),
-        "checkpoint_alias_path": str(alias_path.resolve()),
-        "legacy_checkpoint_path": str(legacy_path.resolve()),
-        "checkpoint_label": checkpoint_label(checkpoint_path),
-    }
-
-
 def _build_evaluation_metadata(split: str, checkpoint_path: Path, model_info: dict | None = None) -> dict:
     resolved_model_info = dict(model_info or get_model_metadata(args.model))
     return {
@@ -188,7 +155,6 @@ def _build_evaluation_metadata(split: str, checkpoint_path: Path, model_info: di
         "in_channels": args.in_channels,
         "patch_size": list(args.patch_size),
         "checkpoint_name": checkpoint_path.name,
-        "checkpoint_label": checkpoint_label(checkpoint_path),
         "checkpoint_path": str(checkpoint_path.resolve()),
     }
 
@@ -489,43 +455,32 @@ def train(args, snapshot_path):
         performance, val_loss, vis_samples = run_validation(args, model, valloader, device, ce_loss)
         history["val_total_loss"].append(val_loss)
         history["val_macro_dice"].append(performance)
-
-        if performance > best_performance:
+        is_best = performance > best_performance
+        if is_best:
             best_performance = performance
-            metric_prefix_safe = sanitize_tag(metric_prefix)
-            unique_checkpoint_path = save_checkpoint(
-                snapshot_path,
-                f"{_run_prefix()}_{metric_prefix_safe}_valdice_{best_performance:.4f}",
-                model=model,
-                optimizer=optimizer,
-                epoch=len(history["train_total_loss"]),
-                global_step=iter_num,
-                best_metric=best_performance,
-                metrics={"val_macro_dice": performance, "val_total_loss": val_loss},
-                config=vars(args),
-                model_info=model_info,
-                phase="basic",
-                extra_state={"history": history},
-                is_best=True,
-            )
-            alias_checkpoint_path = Path(snapshot_path) / "checkpoints" / "best.pth"
-            legacy_checkpoint_path = alias_checkpoint_path
-            best_checkpoint_path = unique_checkpoint_path
 
-            manifest = _build_checkpoint_manifest(
-                unique_checkpoint_path,
-                alias_checkpoint_path,
-                legacy_checkpoint_path,
-                metric_prefix=metric_prefix,
-                metric_value=best_performance,
-                model_info=model_info,
-            )
-            _write_json(_best_checkpoint_manifest_path(Path(snapshot_path)), manifest)
-            logging.info("Saved best model to %s", unique_checkpoint_path)
-            logging.info("Updated stable best alias: %s", alias_checkpoint_path)
+        checkpoint_path = save_checkpoint(
+            snapshot_path,
+            sanitize_tag(metric_prefix),
+            model=model,
+            optimizer=optimizer,
+            epoch=len(history["train_total_loss"]),
+            global_step=iter_num,
+            best_metric=best_performance,
+            metrics={"val_macro_dice": performance, "val_total_loss": val_loss},
+            config=vars(args),
+            model_info=model_info,
+            phase="basic",
+            extra_state={"history": history},
+            is_best=is_best,
+            save_tagged_checkpoint=bool(args.save_history_checkpoints),
+        )
 
+        if is_best:
+            best_checkpoint_path = checkpoint_path
+            logging.info("Updated best checkpoint: %s", checkpoint_path)
             if args.save_visualizations and vis_samples:
-                vis_dir = build_evaluation_output_dir(snapshot_path, args.dataset, args.model, unique_checkpoint_path, args.val_split)
+                vis_dir = build_evaluation_output_dir(snapshot_path, args.dataset, args.model, checkpoint_path, args.val_split)
                 save_validation_visualizations(vis_samples, vis_dir)
 
         logging.info("%s : val_loss : %f | val_macro_dice : %f", log_prefix, val_loss, performance)
@@ -623,7 +578,7 @@ def train(args, snapshot_path):
     if best_checkpoint_path is None:
         fallback_checkpoint_path = save_checkpoint(
             snapshot_path,
-            f"{_run_prefix()}_last",
+            "final",
             model=model,
             optimizer=optimizer,
             epoch=len(history["train_total_loss"]),
@@ -635,19 +590,9 @@ def train(args, snapshot_path):
             phase="basic",
             extra_state={"history": history},
             is_best=True,
+            save_tagged_checkpoint=bool(args.save_history_checkpoints),
         )
-        alias_checkpoint_path = Path(snapshot_path) / "checkpoints" / "best.pth"
-        legacy_checkpoint_path = alias_checkpoint_path
         best_checkpoint_path = fallback_checkpoint_path
-        manifest = _build_checkpoint_manifest(
-            fallback_checkpoint_path,
-            alias_checkpoint_path,
-            legacy_checkpoint_path,
-            metric_prefix="last",
-            metric_value=-1.0,
-            model_info=model_info,
-        )
-        _write_json(_best_checkpoint_manifest_path(Path(snapshot_path)), manifest)
         logging.warning("No validation checkpoint was selected; using the last model state at %s", fallback_checkpoint_path)
 
     save_loss_pdf(history, Path(snapshot_path) / "reports" / "basic_loss.pdf", title="Basic model loss")
@@ -665,15 +610,20 @@ if __name__ == "__main__":
         if torch.cuda.is_available():
             torch.cuda.manual_seed_all(args.seed)
 
-    snapshot_path = PROJECT_ROOT / "logs" / "model" / "supervised" / args.exp
+    snapshot_path = build_run_dir(
+        project_root=PROJECT_ROOT,
+        experiment=args.exp,
+        dataset=args.dataset,
+        model_name=args.model,
+        phase="basic",
+        output_root=args.output_root or None,
+    )
     snapshot_path.mkdir(parents=True, exist_ok=True)
     ensure_run_layout(snapshot_path)
-
-    shutil.copy(Path(__file__).resolve(), snapshot_path / "train_basic_model.py")
-    _write_json(snapshot_path / "run_config.json", vars(args))
+    write_run_config(snapshot_path, vars(args))
 
     logging.basicConfig(
-        filename=str(snapshot_path / "log.txt"),
+        filename=str(snapshot_path / "run.log"),
         level=logging.INFO,
         format="[%(asctime)s.%(msecs)03d] %(message)s",
         datefmt="%H:%M:%S",

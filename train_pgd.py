@@ -70,10 +70,12 @@ parser.add_argument("--gpu", type=str, default="0")
 parser.add_argument("--num_workers", type=int, default=4)
 parser.add_argument("--save_visualizations", type=int, default=1)
 parser.add_argument("--vis_num_samples", type=int, default=8)
-parser.add_argument("--final_eval_splits", nargs="*", default=["val", "test"])
+parser.add_argument("--final_eval_splits", nargs="*", default=["train", "val", "test"])
 parser.add_argument("--force_retrain_teacher", type=int, default=0)
 parser.add_argument("--force_reprune", type=int, default=0)
 parser.add_argument("--force_retrain_student", type=int, default=0)
+parser.add_argument("--output_root", type=str, default="", help="root directory for all exported outputs; defaults to PROJECT_ROOT/outputs")
+parser.add_argument("--save_history_checkpoints", type=int, default=0, help="set to 1 to keep per-epoch checkpoint history in addition to best/last")
 args = parser.parse_args()
 
 
@@ -86,12 +88,12 @@ def _write_json(path: Path, payload: dict) -> None:
 def _phase_dir(phase: str, variant: str) -> Path:
     return build_run_dir(
         project_root=PROJECT_ROOT,
-        branch="proposal",
         experiment=args.exp,
         dataset=args.dataset,
         model_name="pdg_unet",
         phase=phase,
         variant=variant,
+        output_root=args.output_root or None,
     )
 
 
@@ -359,6 +361,7 @@ def _run_teacher(device: torch.device, image_mode: str, db_train, trainloader, v
                 phase="teacher",
                 extra_state={"history": history},
                 is_best=is_best,
+                save_tagged_checkpoint=bool(args.save_history_checkpoints),
             )
             if is_best:
                 best_path = checkpoint_path
@@ -564,6 +567,7 @@ def _run_student(device: torch.device, image_mode: str, db_train, trainloader, v
                 phase="student",
                 extra_state={"history": history, "blueprint": pruning_artifact["blueprint"]},
                 is_best=is_best,
+                save_tagged_checkpoint=bool(args.save_history_checkpoints),
             )
             if is_best:
                 best_path = checkpoint_path
@@ -646,7 +650,7 @@ if __name__ == "__main__":
     pipeline_dir = _phase_dir("pipeline", args.teacher_model)
     ensure_run_layout(pipeline_dir)
     write_run_config(pipeline_dir, vars(args))
-    _configure_logging(pipeline_dir / "log.txt")
+    _configure_logging(pipeline_dir / "run.log")
     logging.info("PDG pipeline args: %s", args)
 
     db_train, db_val, trainloader, valloader = _build_loaders(device, image_mode)

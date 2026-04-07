@@ -8,29 +8,36 @@ from typing import Dict, Optional
 from utils.model_output import extract_model_info
 
 
+DEFAULT_OUTPUT_ROOT_NAME = "outputs"
+
+
 def sanitize_tag(value: object) -> str:
     text = re.sub(r"[^A-Za-z0-9._-]+", "_", str(value).strip())
     return text.strip("._-") or "unknown"
 
 
+def resolve_output_root(project_root: Path | str, output_root: Path | str | None = None) -> Path:
+    if output_root:
+        return Path(output_root).expanduser()
+    return Path(project_root) / DEFAULT_OUTPUT_ROOT_NAME
+
+
 def build_run_dir(
     *,
     project_root: Path | str,
-    branch: str,
     experiment: str,
     dataset: str,
     model_name: str,
     phase: str = "main",
     variant: Optional[str] = None,
+    branch: Optional[str] = None,
+    output_root: Path | str | None = None,
 ) -> Path:
     run_dir = (
-        Path(project_root)
-        / "logs"
-        / "runs"
-        / sanitize_tag(branch)
+        resolve_output_root(project_root, output_root)
+        / sanitize_tag(model_name)
         / sanitize_tag(experiment)
         / sanitize_tag(dataset)
-        / sanitize_tag(model_name)
         / sanitize_tag(phase)
     )
     if variant:

@@ -1,12 +1,14 @@
 from __future__ import annotations
 
 import json
-import shutil
 from pathlib import Path
 from typing import Any, Dict, Optional
 
 import torch
 from utils.model_output import extract_model_info
+
+
+PROFILING_STATE_KEYS = {"total_ops", "total_params"}
 
 
 def ensure_checkpoint_layout(run_dir: Path | str) -> Dict[str, Path]:
@@ -20,6 +22,28 @@ def ensure_checkpoint_layout(run_dir: Path | str) -> Dict[str, Path]:
         if path != run_dir:
             path.mkdir(parents=True, exist_ok=True)
     return layout
+
+
+def _strip_profiling_state_keys(state_dict: Dict[str, Any]) -> Dict[str, Any]:
+    cleaned_state_dict: Dict[str, Any] = {}
+    for key, value in state_dict.items():
+        suffix = key.rsplit(".", 1)[-1]
+        if suffix in PROFILING_STATE_KEYS:
+            continue
+        cleaned_state_dict[key] = value
+    return cleaned_state_dict
+
+
+def _remove_profiling_buffers_from_model(model) -> None:
+    for module in model.modules():
+        buffer_store = getattr(module, "_buffers", None)
+        if isinstance(buffer_store, dict):
+            for key in PROFILING_STATE_KEYS:
+                buffer_store.pop(key, None)
+        non_persistent = getattr(module, "_non_persistent_buffers_set", None)
+        if hasattr(non_persistent, "discard"):
+            for key in PROFILING_STATE_KEYS:
+                non_persistent.discard(key)
 
 
 def build_checkpoint_payload(
@@ -42,7 +66,7 @@ def build_checkpoint_payload(
     if model_info:
         merged_model_info.update(model_info)
     payload = {
-        "model_state_dict": model.state_dict(),
+        "model_state_dict": _strip_profiling_state_keys(dict(model.state_dict())),
         "epoch": epoch,
         "global_step": global_step,
         "best_metric": best_metric,
@@ -96,6 +120,7 @@ def save_checkpoint(
     phase: Optional[str] = None,
     extra_state: Optional[Dict[str, Any]] = None,
     is_best: bool = False,
+    save_tagged_checkpoint: bool = False,
 ) -> Path:
     layout = ensure_checkpoint_layout(run_dir)
     payload = build_checkpoint_payload(
@@ -112,22 +137,23 @@ def save_checkpoint(
         phase=phase,
         extra_state=extra_state,
     )
-    checkpoint_path = layout["checkpoint_dir"] / f"{tag}.pth"
-    torch.save(payload, checkpoint_path)
-    _write_metadata(layout["metadata_dir"] / f"{tag}.json", payload, checkpoint_path)
-
     last_checkpoint_path = layout["checkpoint_dir"] / "last.pth"
-    if checkpoint_path != last_checkpoint_path:
-        shutil.copyfile(checkpoint_path, last_checkpoint_path)
-        _write_metadata(layout["metadata_dir"] / "last.json", payload, last_checkpoint_path)
+    torch.save(payload, last_checkpoint_path)
+    _write_metadata(layout["metadata_dir"] / "last.json", payload, last_checkpoint_path)
 
+    if save_tagged_checkpoint and tag not in {"last", "best"}:
+        checkpoint_path = layout["checkpoint_dir"] / f"{tag}.pth"
+        torch.save(payload, checkpoint_path)
+        _write_metadata(layout["metadata_dir"] / f"{tag}.json", payload, checkpoint_path)
+
+    return_path = last_checkpoint_path
     if is_best:
         best_checkpoint_path = layout["checkpoint_dir"] / "best.pth"
-        if checkpoint_path != best_checkpoint_path:
-            shutil.copyfile(checkpoint_path, best_checkpoint_path)
+        torch.save(payload, best_checkpoint_path)
         _write_metadata(layout["metadata_dir"] / "best.json", payload, best_checkpoint_path)
+        return_path = best_checkpoint_path
 
-    return checkpoint_path
+    return return_path
 
 
 def load_checkpoint(checkpoint_path: Path | str, *, device: Optional[torch.device] = None) -> Dict[str, Any]:
@@ -139,6 +165,8 @@ def load_checkpoint(checkpoint_path: Path | str, *, device: Optional[torch.devic
 def load_checkpoint_into_model(checkpoint_path: Path | str, model, *, device: Optional[torch.device] = None, strict: bool = True) -> Dict[str, Any]:
     payload = load_checkpoint(checkpoint_path, device=device)
     state_dict = payload["model_state_dict"] if "model_state_dict" in payload else payload
+    state_dict = _strip_profiling_state_keys(dict(state_dict))
+    _remove_profiling_buffers_from_model(model)
     model.load_state_dict(state_dict, strict=strict)
     return payload if isinstance(payload, dict) else {"model_state_dict": state_dict}
 
