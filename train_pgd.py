@@ -14,6 +14,7 @@ import torch
 import torch.backends.cudnn as cudnn
 import torch.nn.functional as F
 import torch.optim as optim
+from torch import nn
 from torch.nn.modules.loss import CrossEntropyLoss
 from torch.utils.data import DataLoader
 from torchvision import transforms
@@ -432,6 +433,214 @@ def _copy_exact_matching_weights(source_model, target_model) -> dict:
         "copy_ratio": float(len(copied_keys) / max(1, total_target_tensors)),
         "copied_key_examples": copied_keys[:20],
         "skipped_key_examples": skipped_keys[:20],
+    }
+
+
+NORM_LAYER_TYPES = (nn.BatchNorm2d, nn.GroupNorm, nn.InstanceNorm2d)
+
+
+def _safe_copy_norm_state(source_norm, target_norm, out_indices: list[int]) -> bool:
+    if source_norm is None or target_norm is None or not out_indices:
+        return False
+    if not hasattr(source_norm, "weight") or getattr(source_norm, "weight", None) is None:
+        return False
+    if not hasattr(target_norm, "weight") or getattr(target_norm, "weight", None) is None:
+        return False
+    if max(out_indices) >= int(source_norm.weight.shape[0]):
+        return False
+    if int(target_norm.weight.shape[0]) != len(out_indices):
+        return False
+    _copy_norm_state(source_norm, target_norm, out_indices)
+    return True
+
+
+def _safe_copy_conv2d_state(source_conv, target_conv, out_indices: list[int], in_indices: list[int]) -> bool:
+    if source_conv is None or target_conv is None or not out_indices or not in_indices:
+        return False
+    if not isinstance(source_conv, nn.Conv2d) or not isinstance(target_conv, nn.Conv2d):
+        return False
+    if max(out_indices) >= int(source_conv.weight.shape[0]):
+        return False
+    if max(in_indices) >= int(source_conv.weight.shape[1]):
+        return False
+    if int(target_conv.weight.shape[0]) != len(out_indices):
+        return False
+    if int(target_conv.weight.shape[1]) != len(in_indices):
+        return False
+    _copy_conv2d_state(source_conv, target_conv, out_indices, in_indices)
+    return True
+
+
+def _collect_conv2d_layers(module: nn.Module) -> list[nn.Conv2d]:
+    return [child for child in module.modules() if isinstance(child, nn.Conv2d)]
+
+
+def _collect_norm_layers(module: nn.Module) -> list[nn.Module]:
+    return [child for child in module.modules() if isinstance(child, NORM_LAYER_TYPES)]
+
+
+def _copy_source_convnorm_to_target(source_conv, source_norm, target_convnormact, out_indices: list[int], in_indices: list[int]) -> list[str]:
+    copied_components = []
+    target_conv = target_convnormact.block[0]
+    target_norm = target_convnormact.block[1] if len(target_convnormact.block) > 1 else None
+    if _safe_copy_conv2d_state(source_conv, target_conv, out_indices, in_indices):
+        copied_components.append("conv")
+    if _safe_copy_norm_state(source_norm, target_norm, out_indices):
+        copied_components.append("norm")
+    return copied_components
+
+
+def _transfer_teacher_stage_to_student_block(source_module: nn.Module, target_block, out_indices: list[int], in_indices: list[int]) -> dict:
+    copied_components: list[str] = []
+
+    if hasattr(source_module, "conv") and hasattr(source_module.conv, "block"):
+        source_module = source_module.conv
+
+    if hasattr(source_module, "block") and isinstance(source_module.block, nn.Sequential) and len(source_module.block) >= 2:
+        try:
+            _copy_double_conv_state(source_module, target_block.conv, out_indices, in_indices)
+            copied_components.extend(["double_conv_1", "double_conv_2", "norm_1", "norm_2"])
+        except Exception:
+            pass
+    elif hasattr(source_module, "conv1") and hasattr(source_module, "conv2"):
+        first_components = _copy_source_convnorm_to_target(
+            getattr(source_module, "conv1", None),
+            getattr(source_module, "bn1", None),
+            target_block.conv.block[0],
+            out_indices,
+            in_indices,
+        )
+        copied_components.extend(f"first_{name}" for name in first_components)
+        source_conv2 = None
+        source_norm2 = None
+        if isinstance(getattr(source_module, "conv2", None), nn.Sequential):
+            source_conv2 = source_module.conv2[0] if len(source_module.conv2) > 0 else None
+            source_norm2 = source_module.conv2[1] if len(source_module.conv2) > 1 else None
+        elif isinstance(getattr(source_module, "conv2", None), nn.Conv2d):
+            source_conv2 = source_module.conv2
+            source_norm2 = getattr(source_module, "bn2", None)
+        second_components = _copy_source_convnorm_to_target(
+            source_conv2,
+            source_norm2,
+            target_block.conv.block[1],
+            out_indices,
+            out_indices,
+        )
+        copied_components.extend(f"second_{name}" for name in second_components)
+    else:
+        source_convs = _collect_conv2d_layers(source_module)
+        source_norms = _collect_norm_layers(source_module)
+        first_components = _copy_source_convnorm_to_target(
+            source_convs[0] if len(source_convs) >= 1 else None,
+            source_norms[0] if len(source_norms) >= 1 else None,
+            target_block.conv.block[0],
+            out_indices,
+            in_indices,
+        )
+        copied_components.extend(f"first_{name}" for name in first_components)
+        second_components = _copy_source_convnorm_to_target(
+            source_convs[1] if len(source_convs) >= 2 else None,
+            source_norms[1] if len(source_norms) >= 2 else None,
+            target_block.conv.block[1],
+            out_indices,
+            out_indices,
+        )
+        copied_components.extend(f"second_{name}" for name in second_components)
+
+    return {
+        "copied_components": copied_components,
+        "copied": bool(copied_components),
+    }
+
+
+def _copy_teacher_head_to_student_head(teacher_model, student_model: PDGUNet, stem_indices: list[int]) -> bool:
+    source_head = getattr(teacher_model, "head", None)
+    target_head = getattr(student_model, "head", None)
+    if not isinstance(source_head, nn.Conv2d) or not isinstance(target_head, nn.Conv2d):
+        return False
+    out_indices = list(range(int(target_head.out_channels)))
+    if int(source_head.out_channels) != int(target_head.out_channels):
+        return False
+    if not stem_indices:
+        return False
+    if max(stem_indices) >= int(source_head.in_channels):
+        return False
+    if len(stem_indices) != int(target_head.in_channels):
+        return False
+    _copy_conv2d_state(source_head, target_head, out_indices, stem_indices)
+    return True
+
+
+def _initialize_pruned_student_from_teacher(teacher_model, student_model: PDGUNet, blueprint: dict, *, input_channels: int) -> dict:
+    teacher_modules = dict(teacher_model.named_modules())
+    stage_names = ("stem", "down1", "down2", "down3", "down4")
+    student_stage_map = {
+        "stem": student_model.stem,
+        "down1": student_model.down1.conv,
+        "down2": student_model.down2.conv,
+        "down3": student_model.down3.conv,
+        "down4": student_model.down4.conv,
+    }
+    blueprint_modules = list(blueprint.get("modules", []))
+    previous_indices = list(range(int(input_channels)))
+    stem_indices: list[int] = []
+    stage_transfer_rows = []
+    transferred_stages = 0
+
+    for stage_index, stage_name in enumerate(stage_names):
+        module_row = blueprint_modules[stage_index] if stage_index < len(blueprint_modules) else {}
+        teacher_module_name = module_row.get("module_name") or module_row.get("layer_name")
+        kept_indices = [int(index) for index in module_row.get("kept_channel_indices", [])]
+        target_block = student_stage_map[stage_name]
+        target_channels = int(target_block.gate.alpha.numel())
+        if not kept_indices:
+            kept_indices = list(range(target_channels))
+        elif len(kept_indices) != target_channels:
+            kept_indices = kept_indices[:target_channels]
+
+        row = {
+            "student_stage": stage_name,
+            "teacher_module": teacher_module_name,
+            "teacher_kept_channels": int(len(kept_indices)),
+            "student_out_channels": int(target_channels),
+            "copied_components": [],
+            "status": "skipped",
+        }
+        source_module = teacher_modules.get(teacher_module_name) if teacher_module_name else None
+        if source_module is not None:
+            transfer_result = _transfer_teacher_stage_to_student_block(source_module, target_block, kept_indices, previous_indices)
+            row["copied_components"] = list(transfer_result["copied_components"])
+            if transfer_result["copied"]:
+                row["status"] = "channel_subset_reused"
+                transferred_stages += 1
+            else:
+                row["status"] = "found_teacher_stage_but_no_compatible_subset"
+        else:
+            row["status"] = "teacher_stage_not_found"
+        stage_transfer_rows.append(row)
+        if stage_name == "stem":
+            stem_indices = list(kept_indices)
+        previous_indices = list(kept_indices)
+
+    head_transfer = _copy_teacher_head_to_student_head(
+        teacher_model,
+        student_model,
+        stem_indices if stem_indices else list(range(int(student_model.channel_config[0]))),
+    )
+    student_model.force_gates_open(args.student_gate_open_value)
+
+    return {
+        "strategy": "channel_subset_teacher_weight_reuse",
+        "teacher_target_modules": [row.get("module_name") or row.get("layer_name") for row in blueprint_modules],
+        "transferred_stages": int(transferred_stages),
+        "requested_stages": int(len(stage_names)),
+        "stage_transfer_ratio": float(transferred_stages / max(1, len(stage_names))),
+        "stage_transfer_rows": stage_transfer_rows,
+        "head_transfer_applied": bool(head_transfer),
+        "gate_initialization": {
+            "strategy": "force_open_after_teacher_subset_transfer",
+            "open_probability": float(args.student_gate_open_value),
+        },
     }
 
 
@@ -1215,7 +1424,36 @@ def _run_pruning(device: torch.device, image_mode: str, db_train, teacher_artifa
         num_classes=args.num_classes,
         channel_config=tuple(blueprint["channel_config"]),
     ).to(device)
-    weight_transfer = _copy_exact_matching_weights(teacher_artifact["model"], pruned_student)
+    weight_transfer = _initialize_pruned_student_from_teacher(
+        teacher_artifact["model"],
+        pruned_student,
+        blueprint,
+        input_channels=db_train.in_channels,
+    )
+    exact_match_fallback = _copy_exact_matching_weights(teacher_artifact["model"], pruned_student)
+    pruned_student.force_gates_open(args.student_gate_open_value)
+    weight_transfer["exact_match_fallback"] = exact_match_fallback
+    weight_transfer["copy_ratio"] = weight_transfer.get("stage_transfer_ratio")
+    weight_transfer["exact_match_copy_ratio"] = exact_match_fallback.get("copy_ratio")
+    weight_transfer["effective_note"] = (
+        "Step-2 pruned student is initialized from teacher channels kept by the pruning blueprint. "
+        "Remaining compatible tensors are then copied via exact-key fallback, and gates are forced open for fair baseline evaluation."
+    )
+    logging.info(
+        "Step-2 teacher reuse | transferred_stages=%s/%s | head_transfer=%s | exact_match_copy_ratio=%.4f",
+        weight_transfer.get("transferred_stages"),
+        weight_transfer.get("requested_stages"),
+        int(bool(weight_transfer.get("head_transfer_applied"))),
+        float(exact_match_fallback.get("copy_ratio", 0.0)),
+    )
+    for row in weight_transfer.get("stage_transfer_rows", []):
+        logging.info(
+            "Step-2 stage reuse | student_stage=%s | teacher_module=%s | status=%s | copied=%s",
+            row.get("student_stage"),
+            row.get("teacher_module"),
+            row.get("status"),
+            ",".join(row.get("copied_components", [])) if row.get("copied_components") else "none",
+        )
     pruning_model_info = extract_model_info(pruned_student)
     pruning_model_info.update(
         {
@@ -1227,7 +1465,11 @@ def _run_pruning(device: torch.device, image_mode: str, db_train, teacher_artifa
             "blueprint_path": project_relative_path(blueprint_path, PROJECT_ROOT),
             "blueprint": blueprint,
             "weight_transfer": weight_transfer,
-            "evaluation_note": "This phase evaluates the pruned student immediately after pruning/baseline initialization, before student tuning.",
+            "evaluation_note": (
+                "This phase evaluates the pruned student immediately after structural pruning. "
+                "The student is initialized with the teacher weights of the kept channels whenever the stage-wise mapping is compatible, "
+                "instead of starting from a fresh random initialization."
+            ),
             "build_kwargs": {
                 "in_channels": db_train.in_channels,
                 "num_classes": args.num_classes,
