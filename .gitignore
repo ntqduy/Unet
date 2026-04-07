@@ -56,3 +56,8 @@ data/Kvasir-SEG/**
 !data/Kvasir-SEG/
 !data/Kvasir-SEG/splits/
 !data/Kvasir-SEG/splits/**
+
+dataset/
+data/
+venv/
+.venv/
