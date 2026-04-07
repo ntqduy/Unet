@@ -7,6 +7,7 @@ from typing import Dict, Iterable, List, Mapping, Sequence
 import matplotlib.pyplot as plt
 import numpy as np
 import torch
+import torch.nn.functional as F
 from matplotlib.backends.backend_pdf import PdfPages
 from torchvision.utils import save_image
 
@@ -117,7 +118,9 @@ def save_visualization_overview_image(
 ) -> Path:
     image_path = Path(image_path)
     image_path.parent.mkdir(parents=True, exist_ok=True)
-    panels = []
+    prepared_samples = []
+    target_height = 0
+    target_width = 0
     for sample in samples:
         image = sample["image"].detach().cpu().float()
         if image.ndim == 2:
@@ -134,11 +137,23 @@ def save_visualization_overview_image(
             image = torch.zeros_like(image)
         label = colorize_mask(sample["label"])
         prediction = colorize_mask(sample["prediction"])
-        panels.append(torch.cat([image, label, prediction], dim=2))
-    if not panels:
+        target_height = max(target_height, int(image.shape[-2]), int(label.shape[-2]), int(prediction.shape[-2]))
+        target_width = max(target_width, int(image.shape[-1]), int(label.shape[-1]), int(prediction.shape[-1]))
+        prepared_samples.append((image, label, prediction))
+    if not prepared_samples:
         blank = torch.zeros(3, 64, 192)
         save_image(blank, image_path)
         return image_path
+    panels = []
+    target_size = (target_height, target_width)
+    for image, label, prediction in prepared_samples:
+        if tuple(image.shape[-2:]) != target_size:
+            image = F.interpolate(image.unsqueeze(0), size=target_size, mode="bilinear", align_corners=False).squeeze(0)
+        if tuple(label.shape[-2:]) != target_size:
+            label = F.interpolate(label.unsqueeze(0), size=target_size, mode="nearest").squeeze(0)
+        if tuple(prediction.shape[-2:]) != target_size:
+            prediction = F.interpolate(prediction.unsqueeze(0), size=target_size, mode="nearest").squeeze(0)
+        panels.append(torch.cat([image, label, prediction], dim=2))
     save_image(torch.cat(panels, dim=1), image_path)
     return image_path
 
