@@ -80,7 +80,7 @@ def build_basic_model(net_type: str = "unet", in_chns: int = 3, class_num: int =
         if "img_size" in kwargs and "image_size" not in kwargs:
             kwargs["image_size"] = kwargs.pop("img_size")
     if model_name == "unet_resnet152" and "encoder_pretrained" not in kwargs:
-        model_kwargs["encoder_pretrained"] = False
+        model_kwargs["encoder_pretrained"] = True
 
     model_kwargs.update(kwargs)
     return MODEL_REGISTRY[model_name](**model_kwargs)

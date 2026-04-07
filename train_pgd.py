@@ -84,7 +84,7 @@ parser.add_argument("--student_lr", type=float, default=1e-4)
 parser.add_argument("--patch_size", nargs=2, type=int, default=[256, 256])
 parser.add_argument("--num_classes", type=int, default=2)
 parser.add_argument("--in_channels", type=int, default=3)
-parser.add_argument("--encoder_pretrained", type=int, default=0)
+parser.add_argument("--encoder_pretrained", type=int, default=1, help="defaults to 1 for unet_resnet152 teacher builds")
 parser.add_argument("--prune_ratio", type=float, default=0.5)
 parser.add_argument("--lambda_distill", type=float, default=0.3)
 parser.add_argument("--lambda_sparsity", type=float, default=0.3)
@@ -329,25 +329,37 @@ def _build_student_pruning_epoch_config(total_epochs: int, pruning_schedule: dic
     hard_pruning_start_epoch = pruning_schedule.get("hard_pruning_start_epoch")
     if hard_pruning_start_epoch is not None:
         hard_pruning_start_epoch = int(hard_pruning_start_epoch)
+    hard_pruning_apply_epoch_0based = None if hard_pruning_start_epoch is None else max(0, hard_pruning_start_epoch - 1)
 
     if hard_pruning_start_epoch is None:
         late_window_epochs: list[int] = []
         gate_search_epochs = list(range(1, total_epochs + 1))
+        late_window_epochs_0based: list[int] = []
+        gate_search_epochs_0based = list(range(0, total_epochs))
     else:
         late_window_epochs = list(range(hard_pruning_start_epoch, total_epochs + 1))
         gate_search_epochs = list(range(1, hard_pruning_start_epoch))
+        late_window_epochs_0based = [max(0, epoch - 1) for epoch in late_window_epochs]
+        gate_search_epochs_0based = [max(0, epoch - 1) for epoch in gate_search_epochs]
 
     return {
         "total_student_epochs": int(total_epochs),
+        "total_student_epochs_0based_last_index": int(total_epochs - 1),
+        "requested_warmup_pruning_epochs": int(pruning_schedule.get("requested_warmup_pruning_epochs", 0) or 0),
+        "warmup_pruning_epochs": int(pruning_schedule.get("effective_warmup_pruning_epochs", 0) or 0),
         "requested_late_pruning_epochs": int(pruning_schedule.get("requested_warmup_pruning_epochs", 0) or 0),
         "effective_late_pruning_epochs": int(pruning_schedule.get("effective_warmup_pruning_epochs", 0) or 0),
         "active_soft_pruning_epochs": int(pruning_schedule.get("active_soft_pruning_epochs", 0) or 0),
         "hard_pruning_enabled": bool(pruning_schedule.get("hard_pruning_enabled", False)),
         "hard_pruning_threshold": pruning_schedule.get("hard_pruning_threshold"),
         "hard_pruning_start_epoch": hard_pruning_start_epoch,
-        "hard_pruning_apply_epoch": hard_pruning_start_epoch,
+        "hard_pruning_apply_epoch": hard_pruning_apply_epoch_0based,
+        "hard_pruning_apply_epoch_0based": hard_pruning_apply_epoch_0based,
+        "hard_pruning_apply_epoch_1based": hard_pruning_start_epoch,
         "late_pruning_epoch_window": late_window_epochs,
+        "late_pruning_epoch_window_0based": late_window_epochs_0based,
         "gate_search_epoch_window": gate_search_epochs,
+        "gate_search_epoch_window_0based": gate_search_epochs_0based,
     }
 
 

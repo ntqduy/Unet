@@ -134,6 +134,11 @@ Ví dụ với `unet_resnet152`:
 python train_basic_model.py --dataset cvc --root_path data/CVC-ClinicDB --model unet_resnet152 --encoder_pretrained 1 --exp supervised_resnet152 --max_epochs 100
 ```
 
+Lưu ý:
+
+- với `unet_resnet152`, `encoder_pretrained` hiện mặc định là `1`
+- nghĩa là nếu bạn không truyền cờ này, repo vẫn sẽ build encoder ResNet152 từ pretrained weights
+
 ### Evaluate
 
 ```bash
@@ -156,6 +161,12 @@ python test2d.py --dataset kvasir --root_path data/Kvasir-SEG --model unet --spl
 python train_pgd.py --dataset kvasir --root_path data/Kvasir-SEG --teacher_model unet_resnet152 --exp pdg_kvasir --max_epochs_teacher 50 --max_epochs_student 100 --prune_ratio 0.5 --lambda_distill 0.3 --lambda_sparsity 0.3 --batch_size 8 --patch_size 256 256
 ```
 
+Lưu ý:
+
+- với `teacher_model=unet_resnet152`, `--encoder_pretrained` hiện mặc định là `1`
+- nên nếu teacher phải train lại từ đầu ở step 1, encoder ResNet152 sẽ mặc định dùng pretrained weights
+- nếu bạn muốn tắt pretrained và train teacher từ random backbone, hãy truyền `--encoder_pretrained 0`
+
 ### Teacher reuse
 
 Khi cần teacher checkpoint, `train_pgd.py` sẽ check theo thứ tự:
@@ -167,6 +178,8 @@ Khi cần teacher checkpoint, `train_pgd.py` sẽ check theo thứ tự:
 Nếu reuse từ `basic branch`, checkpoint sẽ được register lại vào `1_teacher/checkpoints/` để output proposal luôn đầy đủ và dễ đọc.
 
 Mặc định repo **không train lại teacher nếu đã có checkpoint compatible**. Chỉ khi cả 3 nguồn trên đều không có checkpoint phù hợp, hoặc bạn bật `--force_retrain_teacher 1`, thì `1_teacher` mới train lại từ đầu.
+
+Nếu teacher phải train lại từ đầu và `teacher_model=unet_resnet152`, mặc định repo sẽ dùng `encoder_pretrained=1`.
 
 ### Cách tận dụng weight teacher để không cần train lại
 
@@ -291,11 +304,24 @@ Nếu `student_variant` bật distillation, teacher sẽ supervise student xuyê
 
 Trong `3_student/configs/`, repo hiện lưu thêm `student_pruning_config.json` để nhìn nhanh các mốc epoch của pruning, ví dụ:
 
+- `requested_warmup_pruning_epochs`
+- `warmup_pruning_epochs`
 - `hard_pruning_apply_epoch`
+- `hard_pruning_apply_epoch_0based`
+- `hard_pruning_apply_epoch_1based`
 - `hard_pruning_start_epoch`
 - `late_pruning_epoch_window`
+- `late_pruning_epoch_window_0based`
 - `gate_search_epoch_window`
+- `gate_search_epoch_window_0based`
 - `effective_late_pruning_epochs`
+
+Quy ước hiện tại:
+
+- `requested_warmup_pruning_epochs` là giá trị bạn truyền từ CLI
+- `warmup_pruning_epochs` là giá trị effective thật sau khi đã clamp theo `max_epochs_student`
+- `hard_pruning_apply_epoch` là mốc thực thi hard pruning theo **0-based index**
+- nếu số epoch train nhỏ hơn số epoch pruning cuối yêu cầu, config sẽ phản ánh đúng giá trị effective thực tế thay vì chỉ lặp lại giá trị request ban đầu
 
 ### Distillation
 
