@@ -61,7 +61,6 @@ def save_loss_pdf(history: Mapping[str, Sequence[float]], pdf_path: Path | str, 
             if not values:
                 continue
             ax.plot(range(1, len(values) + 1), values, label=series_name)
-        ax.set_title(title)
         ax.set_xlabel("Epoch")
         ax.set_ylabel("Loss")
         ax.grid(alpha=0.25)
@@ -80,7 +79,6 @@ def save_visualization_pdf(samples: Sequence[Mapping], pdf_path: Path | str, *, 
         if not samples:
             fig, ax = plt.subplots(figsize=(8, 3))
             ax.axis("off")
-            ax.set_title(title)
             ax.text(0.5, 0.5, "No visualization samples available.", ha="center", va="center")
             fig.tight_layout()
             pdf.savefig(fig)
@@ -95,23 +93,13 @@ def save_visualization_pdf(samples: Sequence[Mapping], pdf_path: Path | str, *, 
 
         for row_index, sample in enumerate(samples):
             row_axes = axes[row_index]
-            case_name = sample.get("case", f"sample_{row_index}")
             row_axes[0].imshow(_normalize_image_for_plot(sample["image"]))
-            row_axes[0].set_title(f"Image | {case_name}", fontsize=10, pad=8)
             row_axes[1].imshow(colorize_mask(sample["label"]).permute(1, 2, 0).numpy())
-            row_axes[1].set_title("Ground Truth", fontsize=10, pad=8)
             row_axes[2].imshow(colorize_mask(sample["prediction"]).permute(1, 2, 0).numpy())
-            dice_value = sample.get("dice")
-            predict_title = "Prediction" if dice_value is None else f"Prediction | Dice {dice_value:.4f}"
-            row_axes[2].set_title(predict_title, fontsize=10, pad=8)
             for axis in row_axes:
                 axis.axis("off")
 
-        if title:
-            fig.suptitle(title, fontsize=12, y=0.995)
-            fig.tight_layout(rect=(0.0, 0.0, 1.0, 0.95), h_pad=2.0, w_pad=1.5)
-        else:
-            fig.tight_layout(h_pad=2.0, w_pad=1.5)
+        fig.tight_layout(h_pad=0.6, w_pad=0.6)
         pdf.savefig(fig)
         plt.close(fig)
     return pdf_path
@@ -174,7 +162,6 @@ def save_performance_pdf(
             if not metric_candidates:
                 fig, ax = plt.subplots(figsize=(8, 3))
                 ax.axis("off")
-                ax.set_title(title)
                 ax.text(0.5, 0.5, "No plottable metrics available.", ha="center", va="center")
                 fig.tight_layout()
                 pdf.savefig(fig)
@@ -187,12 +174,10 @@ def save_performance_pdf(
                 axes = axes.flatten()
                 for axis, metric_name in zip(axes, chunk):
                     axis.bar(labels, [_numeric(row.get(metric_name, 0.0)) for row in rows])
-                    axis.set_title(metric_name)
                     axis.grid(alpha=0.25, axis="y")
                     axis.tick_params(axis="x", rotation=25)
                 for axis in axes[len(chunk) :]:
                     axis.axis("off")
-                fig.suptitle(title if start_index == 0 else f"{title} ({start_index + 1}-{start_index + len(chunk)})")
                 fig.tight_layout()
                 pdf.savefig(fig)
                 plt.close(fig)
@@ -214,8 +199,6 @@ def _save_table_page(pdf: PdfPages, rows: Sequence[Mapping], title: str, *, max_
         table.auto_set_font_size(False)
         table.set_fontsize(7)
         table.scale(1, 1.25)
-        suffix = "" if len(rows) <= max_rows else f" ({start_index + 1}-{start_index + len(chunk)})"
-        ax.set_title(f"{title}{suffix}")
         fig.tight_layout()
         pdf.savefig(fig)
         plt.close(fig)
@@ -250,11 +233,9 @@ def save_channel_analysis_pdf(
             fig, axes = plt.subplots(2, 1, figsize=(14, 8))
             labels = [str(row.get("layer_name")) for row in layer_summary_rows]
             axes[0].bar(labels, [row.get("out_channels", 0) or 0 for row in layer_summary_rows])
-            axes[0].set_title("Output Channels Per Layer")
             axes[0].grid(alpha=0.25, axis="y")
             axes[0].tick_params(axis="x", rotation=70)
             axes[1].bar(labels, [row.get("importance_mean", 0) or 0 for row in layer_summary_rows])
-            axes[1].set_title("Mean Channel Importance Per Layer")
             axes[1].grid(alpha=0.25, axis="y")
             axes[1].tick_params(axis="x", rotation=70)
             fig.tight_layout()
@@ -274,12 +255,10 @@ def save_channel_analysis_pdf(
                 axes[0].bar(x + width / 2, [row.get(student_key, 0) or 0 for row in pruning_summary_rows], width=width, label="student")
                 axes[0].set_xticks(x)
                 axes[0].set_xticklabels(labels, rotation=70)
-                axes[0].set_title("Teacher vs Student Channels")
                 axes[0].grid(alpha=0.25, axis="y")
                 axes[0].legend()
                 if ratio_key:
                     axes[1].bar(labels, [row.get(ratio_key, 0) or 0 for row in pruning_summary_rows])
-                    axes[1].set_title("Prune Ratio Per Layer")
                     axes[1].grid(alpha=0.25, axis="y")
                     axes[1].tick_params(axis="x", rotation=70)
                 fig.tight_layout()
