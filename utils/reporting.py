@@ -93,13 +93,19 @@ def save_visualization_pdf(samples: Sequence[Mapping], pdf_path: Path | str, *, 
 
         for row_index, sample in enumerate(samples):
             row_axes = axes[row_index]
+            case_name = sample.get("case", f"sample_{row_index}")
             row_axes[0].imshow(_normalize_image_for_plot(sample["image"]))
+            row_axes[0].set_title(f"Image ({case_name})", fontsize=10, pad=6)
             row_axes[1].imshow(colorize_mask(sample["label"]).permute(1, 2, 0).numpy())
+            row_axes[1].set_title("GT", fontsize=10, pad=6)
             row_axes[2].imshow(colorize_mask(sample["prediction"]).permute(1, 2, 0).numpy())
+            dice_value = sample.get("dice")
+            prediction_title = "PR" if dice_value is None else f"PR | Dice {dice_value:.4f}"
+            row_axes[2].set_title(prediction_title, fontsize=10, pad=6)
             for axis in row_axes:
                 axis.axis("off")
 
-        fig.tight_layout(h_pad=0.6, w_pad=0.6)
+        fig.tight_layout(h_pad=1.0, w_pad=0.8)
         pdf.savefig(fig)
         plt.close(fig)
     return pdf_path
