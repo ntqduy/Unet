@@ -1363,6 +1363,8 @@ def _run_teacher(device: torch.device, image_mode: str, db_train, trainloader, v
     history = {}
     best_path = None
     reused_from = None
+    source_checkpoint_path = None
+    registered_checkpoint_path = None
 
     if not bool(args.force_retrain_teacher):
         explicit_match = None
@@ -1385,6 +1387,7 @@ def _run_teacher(device: torch.device, image_mode: str, db_train, trainloader, v
 
         if explicit_match is not None:
             explicit_checkpoint_path = Path(explicit_match["checkpoint_path"])
+            source_checkpoint_path = explicit_checkpoint_path
             try:
                 explicit_checkpoint_path.resolve().relative_to(run_dir.resolve())
                 best_path = explicit_checkpoint_path
@@ -1398,15 +1401,27 @@ def _run_teacher(device: torch.device, image_mode: str, db_train, trainloader, v
                     payload_updates={"phase": "teacher"},
                 )
                 best_path = Path(copied["best"]["checkpoint_path"])
-            payload = load_checkpoint_into_model(best_path, model, device=device)
+                registered_checkpoint_path = best_path
+            payload = load_checkpoint_into_model(explicit_checkpoint_path, model, device=device)
             history = payload.get("extra_state", {}).get("history", {})
             model_info.update(payload.get("model_info", {}))
             reused_from = "explicit"
-            logging.info("Loaded teacher checkpoint from explicit --teacher_checkpoint: %s", project_relative_path(best_path, PROJECT_ROOT))
+            if registered_checkpoint_path is not None:
+                logging.info(
+                    "Loaded teacher checkpoint from explicit --teacher_checkpoint source: %s | registered at: %s",
+                    project_relative_path(source_checkpoint_path, PROJECT_ROOT),
+                    project_relative_path(registered_checkpoint_path, PROJECT_ROOT),
+                )
+            else:
+                logging.info(
+                    "Loaded teacher checkpoint from explicit --teacher_checkpoint: %s",
+                    project_relative_path(source_checkpoint_path, PROJECT_ROOT),
+                )
         else:
             proposal_match = resolve_run_checkpoint(run_dir, expected_signature=teacher_signature)
             if proposal_match is not None:
                 proposal_checkpoint_path = Path(proposal_match["checkpoint_path"])
+                source_checkpoint_path = proposal_checkpoint_path
                 try:
                     proposal_checkpoint_path.resolve().relative_to(run_dir.resolve())
                     best_path = proposal_checkpoint_path
@@ -1421,6 +1436,7 @@ def _run_teacher(device: torch.device, image_mode: str, db_train, trainloader, v
                     )
                     best_path = Path(copied["best"]["checkpoint_path"])
                     reused_from = "external"
+                    registered_checkpoint_path = best_path
                 payload = load_checkpoint_into_model(best_path, model, device=device)
                 history = payload.get("extra_state", {}).get("history", {})
                 model_info.update(payload.get("model_info", {}))
@@ -1445,6 +1461,7 @@ def _run_teacher(device: torch.device, image_mode: str, db_train, trainloader, v
                         payload_updates={"phase": "teacher"},
                     )
                     best_path = Path(copied["best"]["checkpoint_path"])
+                    registered_checkpoint_path = best_path
                     payload = load_checkpoint_into_model(best_path, model, device=device)
                     history = payload.get("extra_state", {}).get("history", {})
                     model_info.update(payload.get("model_info", {}))
@@ -1548,6 +1565,8 @@ def _run_teacher(device: torch.device, image_mode: str, db_train, trainloader, v
         "model": model,
         "run_dir": run_dir,
         "checkpoint_path": best_path,
+        "source_checkpoint_path": source_checkpoint_path,
+        "registered_checkpoint_path": registered_checkpoint_path or best_path,
         "metadata": model_info,
         "history": history,
         "reused_from": reused_from,

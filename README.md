@@ -216,6 +216,12 @@ python train_pgd.py --dataset cvc --root_path data/CVC-ClinicDB --teacher_model 
 
 Repo sẽ kiểm tra compatibility của checkpoint này trước khi dùng. Nếu checkpoint này tồn tại và compatible, nó sẽ được ưu tiên dùng trước proposal outputs và basic outputs. Nếu checkpoint không tồn tại hoặc không tương thích, pipeline mới tiếp tục check các nguồn còn lại.
 
+Khi `--teacher_checkpoint` hợp lệ, pipeline sẽ:
+
+- load trực tiếp weight từ đúng path bạn truyền vào
+- sau đó register/mirror checkpoint đó vào `outputs/pgd_unet/.../1_teacher/checkpoints/`
+- dùng bản register này như proposal-owned checkpoint để export artifact và dễ tái sử dụng về sau
+
 #### Khi nào proposal sẽ train lại teacher?
 
 Teacher chỉ train lại khi:
