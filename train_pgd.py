@@ -162,6 +162,156 @@ def _restore_loss_pdf_if_possible(history: dict | None, pdf_path: Path, title: s
         save_loss_pdf(history, pdf_path, title=title)
 
 
+def _copy_exact_matching_weights(source_model, target_model) -> dict:
+    source_state = source_model.state_dict()
+    target_state = target_model.state_dict()
+    copied_keys = []
+    skipped_keys = []
+
+    for key, target_tensor in target_state.items():
+        source_tensor = source_state.get(key)
+        if source_tensor is None or source_tensor.shape != target_tensor.shape:
+            skipped_keys.append(key)
+            continue
+        target_state[key] = source_tensor.detach().clone()
+        copied_keys.append(key)
+
+    target_model.load_state_dict(target_state, strict=False)
+    total_target_tensors = len(target_state)
+    return {
+        "copied_tensor_keys": int(len(copied_keys)),
+        "skipped_tensor_keys": int(len(skipped_keys)),
+        "total_target_tensors": int(total_target_tensors),
+        "copy_ratio": float(len(copied_keys) / max(1, total_target_tensors)),
+        "copied_key_examples": copied_keys[:20],
+        "skipped_key_examples": skipped_keys[:20],
+    }
+
+
+def _aggregate_phase_metrics(*phase_exports: dict) -> list[dict]:
+    rows = []
+    for export_bundle in phase_exports:
+        rows.extend(list(export_bundle.get("metrics_rows", [])))
+    return rows
+
+
+def _build_pipeline_overview_rows(*phase_artifacts: dict) -> list[dict]:
+    rows = []
+    for artifact in phase_artifacts:
+        phase = artifact.get("phase")
+        export_bundle = artifact.get("evaluation_bundle", {})
+        metrics_rows = list(export_bundle.get("metrics_rows", []))
+        split_lookup = {row.get("split"): row for row in metrics_rows}
+        row = {
+            "phase": phase,
+            "run_dir": project_relative_path(artifact.get("run_dir"), PROJECT_ROOT),
+            "checkpoint_path": project_relative_path(artifact.get("checkpoint_path"), PROJECT_ROOT) if artifact.get("checkpoint_path") else "",
+            "model_name": artifact.get("metadata", {}).get("model_name"),
+            "backbone_name": artifact.get("metadata", {}).get("backbone_name"),
+            "student_name": artifact.get("metadata", {}).get("student_name"),
+            "train_dice": split_lookup.get("train", {}).get("dice"),
+            "val_dice": split_lookup.get("val", {}).get("dice"),
+            "test_dice": split_lookup.get("test", {}).get("dice"),
+            "params": next((metric.get("params") for metric in metrics_rows if metric.get("params") is not None), None),
+            "flops": next((metric.get("flops") for metric in metrics_rows if metric.get("flops") is not None), None),
+            "fps": next((metric.get("fps") for metric in metrics_rows if metric.get("fps") is not None), None),
+        }
+        if phase == "pruning":
+            row["evaluation_note"] = artifact.get("metadata", {}).get("evaluation_note")
+            row["weight_transfer_copy_ratio"] = artifact.get("metadata", {}).get("weight_transfer", {}).get("copy_ratio")
+        rows.append(row)
+    return rows
+
+
+def _save_pipeline_outputs(pipeline_dir: Path, *phase_artifacts: dict) -> dict:
+    layout = ensure_run_layout(pipeline_dir)
+    pipeline_metrics_rows = _aggregate_phase_metrics(*phase_artifacts)
+    pipeline_overview_rows = _build_pipeline_overview_rows(*phase_artifacts)
+
+    if pipeline_overview_rows:
+        write_metrics_rows(pipeline_overview_rows, layout["metrics_dir"] / "pipeline_stage_overview.csv")
+    if pipeline_metrics_rows:
+        write_metrics_rows(pipeline_metrics_rows, layout["metrics_dir"] / "pipeline_metrics.csv")
+        report_rows = []
+        for row in pipeline_metrics_rows:
+            report_row = dict(row)
+            report_row["split"] = f"{row.get('phase', 'phase')}:{row.get('split', 'split')}"
+            report_rows.append(report_row)
+        save_performance_pdf(
+            report_rows,
+            layout["reports_dir"] / "pipeline_performance.pdf",
+            title="Pipeline stage performance",
+        )
+
+    pipeline_visual_index = {}
+    for artifact in phase_artifacts:
+        phase = artifact.get("phase")
+        export_bundle = artifact.get("evaluation_bundle", {})
+        sample_map = export_bundle.get("visualization_samples_by_split", {})
+        pipeline_visual_index[phase] = {}
+        for split, samples in sample_map.items():
+            if not samples:
+                continue
+            prefixed_samples = []
+            for sample in samples:
+                cloned = dict(sample)
+                cloned["case"] = f"{phase}:{sample.get('case', 'unknown')}"
+                prefixed_samples.append(cloned)
+            save_visualization_pdf(
+                prefixed_samples,
+                layout["reports_dir"] / f"pipeline_{phase}_{split}_visualizations.pdf",
+                title=f"pipeline | {phase} | {split}",
+            )
+            save_visualization_overview_image(
+                prefixed_samples,
+                layout["visualization_dir"] / f"pipeline_{phase}_{split}_visualizations.png",
+            )
+            pipeline_visual_index[phase][split] = {
+                "pdf": project_relative_path(layout["reports_dir"] / f"pipeline_{phase}_{split}_visualizations.pdf", PROJECT_ROOT),
+                "image": project_relative_path(layout["visualization_dir"] / f"pipeline_{phase}_{split}_visualizations.png", PROJECT_ROOT),
+            }
+
+    summary = {
+        "dataset": args.dataset,
+        "teacher_model": args.teacher_model,
+        "prune_ratio": args.prune_ratio,
+        "stages": {
+            artifact.get("phase"): {
+                "run_dir": project_relative_path(artifact.get("run_dir"), PROJECT_ROOT),
+                "checkpoint_path": project_relative_path(artifact.get("checkpoint_path"), PROJECT_ROOT) if artifact.get("checkpoint_path") else "",
+                "model_info": artifact.get("metadata", {}),
+                "split_summaries": artifact.get("evaluation_bundle", {}).get("split_summaries", {}),
+            }
+            for artifact in phase_artifacts
+        },
+        "pipeline_stage_overview_csv": project_relative_path(layout["metrics_dir"] / "pipeline_stage_overview.csv", PROJECT_ROOT) if pipeline_overview_rows else "",
+        "pipeline_metrics_csv": project_relative_path(layout["metrics_dir"] / "pipeline_metrics.csv", PROJECT_ROOT) if pipeline_metrics_rows else "",
+        "pipeline_performance_pdf": project_relative_path(layout["reports_dir"] / "pipeline_performance.pdf", PROJECT_ROOT) if pipeline_metrics_rows else "",
+        "pipeline_visualizations": pipeline_visual_index,
+    }
+    _write_json(layout["evaluation_dir"] / "pipeline_summary.json", summary)
+    markdown_lines = [
+        f"# Pipeline Evaluation Summary | {args.dataset} | {args.teacher_model}",
+        "",
+        f"- Teacher model: `{args.teacher_model}`",
+        f"- Prune ratio: `{args.prune_ratio}`",
+        "",
+        "## Stages",
+        "",
+    ]
+    for row in pipeline_overview_rows:
+        markdown_lines.append(
+            f"- `{row.get('phase')}` | train dice `{row.get('train_dice')}` | val dice `{row.get('val_dice')}` | test dice `{row.get('test_dice')}` | checkpoint `{row.get('checkpoint_path')}`"
+        )
+    with (layout["evaluation_dir"] / "pipeline_summary.md").open("w", encoding="utf-8") as file:
+        file.write("\n".join(markdown_lines) + "\n")
+    return {
+        "overview_rows": pipeline_overview_rows,
+        "metrics_rows": pipeline_metrics_rows,
+        "summary": summary,
+    }
+
+
 def _export_student_final_shortcuts(student_run_dir: Path, proposal_root_dir: Path) -> dict:
     student_final_dir = proposal_root_dir / "student_final"
     student_final_dir.mkdir(parents=True, exist_ok=True)
@@ -277,10 +427,12 @@ def _export_model_channel_analysis(
     return analysis
 
 
-def _export_phase_outputs(run_dir: Path, model, checkpoint_path: Path, phase: str, profile: dict, extra: dict, device: torch.device, image_mode: str) -> None:
+def _export_phase_outputs(run_dir: Path, model, checkpoint_path: Path, phase: str, profile: dict, extra: dict, device: torch.device, image_mode: str) -> dict:
     load_checkpoint_into_model(checkpoint_path, model, device=device)
     layout = ensure_run_layout(run_dir)
     metrics_rows = []
+    split_summaries = {}
+    visualization_samples_by_split = {}
     eval_transform = transforms.Compose([Normalize(), ToTensor()])
     model_info = dict(extract_model_info(model))
     model_info.update({key: value for key, value in extra.items() if key in {"model_name", "backbone_name", "student_name", "teacher_model", "prune_ratio"}})
@@ -329,6 +481,8 @@ def _export_phase_outputs(run_dir: Path, model, checkpoint_path: Path, phase: st
             result["case_metrics"],
             project_root=PROJECT_ROOT,
         )
+        split_summaries[split] = summary
+        visualization_samples_by_split[split] = list(result["visualization_samples"])
         macro = summary["metrics"]["macro_mean"]
         metrics_rows.append(
             {
@@ -366,6 +520,12 @@ def _export_phase_outputs(run_dir: Path, model, checkpoint_path: Path, phase: st
     if metrics_rows:
         write_metrics_rows(metrics_rows, layout["metrics_dir"] / f"{phase}_metrics.csv")
         save_performance_pdf(metrics_rows, layout["reports_dir"] / f"{phase}_performance.pdf", title=f"{phase} performance")
+    return {
+        "metrics_rows": metrics_rows,
+        "split_summaries": split_summaries,
+        "visualization_samples_by_split": visualization_samples_by_split,
+        "phase": phase,
+    }
 
 
 def _build_teacher(in_channels: int):
@@ -530,7 +690,7 @@ def _run_teacher(device: torch.device, image_mode: str, db_train, trainloader, v
 
     write_model_config(run_dir, model_info)
     profile = _compute_profile(model, device)
-    _export_phase_outputs(
+    evaluation_bundle = _export_phase_outputs(
         run_dir,
         model,
         best_path,
@@ -555,10 +715,12 @@ def _run_teacher(device: torch.device, image_mode: str, db_train, trainloader, v
         "metadata": model_info,
         "history": history,
         "reused_from": reused_from,
+        "evaluation_bundle": evaluation_bundle,
+        "phase": "teacher",
     }
 
 
-def _run_pruning(teacher_artifact: dict):
+def _run_pruning(device: torch.device, image_mode: str, db_train, teacher_artifact: dict):
     run_dir = _phase_dir("pruning")
     layout = ensure_run_layout(run_dir)
     write_run_config(run_dir, vars(args))
@@ -607,7 +769,86 @@ def _run_pruning(teacher_artifact: dict):
             row["channels_pruned"],
             row["actual_prune_ratio"],
         )
-    return {"run_dir": run_dir, "blueprint": blueprint, "blueprint_path": blueprint_path}
+
+    pruned_student = PDGUNet(
+        in_channels=db_train.in_channels,
+        num_classes=args.num_classes,
+        channel_config=tuple(blueprint["channel_config"]),
+    ).to(device)
+    weight_transfer = _copy_exact_matching_weights(teacher_artifact["model"], pruned_student)
+    pruning_model_info = extract_model_info(pruned_student)
+    pruning_model_info.update(
+        {
+            "branch": "proposal",
+            "phase_name": "pruning",
+            "teacher_model": args.teacher_model,
+            "teacher_backbone_name": teacher_artifact["metadata"].get("backbone_name"),
+            "student_name": "pruned_student_init",
+            "blueprint_path": project_relative_path(blueprint_path, PROJECT_ROOT),
+            "blueprint": blueprint,
+            "weight_transfer": weight_transfer,
+            "evaluation_note": "This phase evaluates the pruned student immediately after pruning/baseline initialization, before student tuning.",
+            "build_kwargs": {
+                "in_channels": db_train.in_channels,
+                "num_classes": args.num_classes,
+                "channel_config": list(blueprint["channel_config"]),
+            },
+        }
+    )
+    write_model_config(run_dir, pruning_model_info)
+
+    checkpoint_path = save_checkpoint(
+        run_dir,
+        "pruning_init",
+        model=pruned_student,
+        epoch=0,
+        global_step=0,
+        best_metric=None,
+        metrics={},
+        config=vars(args),
+        model_info=pruning_model_info,
+        phase="pruning",
+        extra_state={"blueprint": blueprint, "weight_transfer": weight_transfer},
+        is_best=True,
+        save_tagged_checkpoint=False,
+        project_root=PROJECT_ROOT,
+    )
+
+    profile = _compute_profile(pruned_student, device)
+    evaluation_bundle = _export_phase_outputs(
+        run_dir,
+        pruned_student,
+        checkpoint_path,
+        "pruning",
+        profile,
+        {
+            "model_name": "pdg_unet",
+            "backbone_name": teacher_artifact["metadata"].get("backbone_name"),
+            "student_name": "pruned_student_init",
+            "prune_ratio": args.prune_ratio,
+            "teacher_model": args.teacher_model,
+        },
+        device,
+        image_mode,
+    )
+    _export_model_channel_analysis(
+        run_dir,
+        pruned_student,
+        checkpoint_path=checkpoint_path,
+        device=device,
+        prefix="pruned_student",
+        title="Pruned Student Before Tuning",
+    )
+    return {
+        "run_dir": run_dir,
+        "blueprint": blueprint,
+        "blueprint_path": blueprint_path,
+        "model": pruned_student,
+        "checkpoint_path": checkpoint_path,
+        "metadata": pruning_model_info,
+        "evaluation_bundle": evaluation_bundle,
+        "phase": "pruning",
+    }
 
 
 def _compute_student_val_losses(student, teacher, valloader, device, criterion):
@@ -761,7 +1002,7 @@ def _run_student(device: torch.device, image_mode: str, db_train, trainloader, v
         save_loss_pdf(history, layout["reports_dir"] / "student_loss.pdf", title="Student loss")
     write_model_config(run_dir, student_model_info)
     profile = _compute_profile(student, device)
-    _export_phase_outputs(
+    evaluation_bundle = _export_phase_outputs(
         run_dir,
         student,
         best_path,
@@ -810,6 +1051,8 @@ def _run_student(device: torch.device, image_mode: str, db_train, trainloader, v
         "student_input_analysis": student_input_analysis,
         "student_final_analysis": student_final_analysis,
         "student_final_exports": student_final_exports,
+        "evaluation_bundle": evaluation_bundle,
+        "phase": "student",
     }
 
 
@@ -839,8 +1082,9 @@ if __name__ == "__main__":
     logging.info("Dataset summary | train=%d | val=%d", len(db_train), len(db_val))
 
     teacher_artifact = _run_teacher(device, image_mode, db_train, trainloader, valloader)
-    pruning_artifact = _run_pruning(teacher_artifact)
+    pruning_artifact = _run_pruning(device, image_mode, db_train, teacher_artifact)
     student_artifact = _run_student(device, image_mode, db_train, trainloader, valloader, teacher_artifact, pruning_artifact)
+    pipeline_export = _save_pipeline_outputs(pipeline_dir, teacher_artifact, pruning_artifact, student_artifact)
 
     _write_json(
         pipeline_dir / "pipeline_summary.json",
@@ -850,6 +1094,8 @@ if __name__ == "__main__":
             "teacher_model_info": teacher_artifact["metadata"],
             "pruning_blueprint_path": project_relative_path(pruning_artifact["blueprint_path"], PROJECT_ROOT),
             "pruning_blueprint": pruning_artifact["blueprint"],
+            "pruning_checkpoint": project_relative_path(pruning_artifact["checkpoint_path"], PROJECT_ROOT),
+            "pruning_model_info": pruning_artifact["metadata"],
             "student_checkpoint": project_relative_path(student_artifact["checkpoint_path"], PROJECT_ROOT),
             "student_model_info": student_artifact["metadata"],
             "teacher_run_dir": project_relative_path(teacher_artifact["run_dir"], PROJECT_ROOT),
@@ -857,6 +1103,7 @@ if __name__ == "__main__":
             "student_run_dir": project_relative_path(student_artifact["run_dir"], PROJECT_ROOT),
             "student_final_exports": student_artifact.get("student_final_exports", {}),
             "teacher_reused_from": teacher_artifact.get("reused_from"),
+            "pipeline_evaluation": pipeline_export.get("summary", {}),
         },
     )
     logging.info("PDG pipeline completed.")
