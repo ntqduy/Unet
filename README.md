@@ -176,6 +176,26 @@ Pipeline proposal gồm:
 4. `student_final`
 5. `pipeline`
 
+### Step 2: Pruning / pruned-student initialization
+
+Step 2 hiện không chỉ sinh `blueprint` rồi dựng một student mới hoàn toàn.
+
+Luồng hiện tại là:
+
+1. phân tích teacher và chọn `kept_channel_indices` theo pruning criterion
+2. sinh `blueprint` và `channel_config` cho `PDGUNet`
+3. build `pruned student` từ blueprint
+4. nạp lại weight của teacher ứng với các channel được giữ lại vào từng stage encoder của student
+5. copy thêm các tensor còn tương thích bằng exact-match fallback
+6. force gate mở ra để baseline ở `2_pruning` không bị suy giảm do gate mặc định
+7. evaluate `train / val / test`
+
+Điều này có nghĩa:
+
+- `2_pruning` không còn là `random init baseline`
+- student ở bước này đã reuse lại phần weight sống sót từ teacher whenever compatible
+- metric ở `2_pruning` vì vậy phản ánh `pruned student after structural pruning + teacher weight subset reuse`, chứ không phải một model mới hoàn toàn từ đầu
+
 ## 7. Step 3: Student training / compression training
 
 Step 3 hiện bám theo logic implementation sau:
@@ -338,11 +358,13 @@ Lưu:
 - pruning analysis
 - pruned-student baseline checkpoint
 - pruned-student evaluation `train/val/test`
+- metadata về `weight_transfer`
 
 Quan trọng:
 
 - `2_pruning` bây giờ không chỉ là stage kiến trúc
 - nó còn evaluate một `pruned student before tuning` để bạn nhìn được hiệu quả ngay sau pruning
+- pruned student này được khởi tạo bằng các weight của teacher tương ứng với những channel không bị prune, thay vì để toàn bộ trọng số ở trạng thái khởi tạo mới
 
 #### `3_student`
 
