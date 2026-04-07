@@ -134,3 +134,92 @@ def save_performance_pdf(
                 pdf.savefig(fig)
                 plt.close(fig)
     return pdf_path
+
+
+def _save_table_page(pdf: PdfPages, rows: Sequence[Mapping], title: str, *, max_rows: int = 20) -> None:
+    rows = [dict(row) for row in rows]
+    if not rows:
+        return
+
+    headers = list(rows[0].keys())
+    for start_index in range(0, len(rows), max_rows):
+        chunk = rows[start_index : start_index + max_rows]
+        values = [[row.get(column, "") for column in headers] for row in chunk]
+        fig, ax = plt.subplots(figsize=(14, 4 + 0.35 * len(chunk)))
+        ax.axis("off")
+        table = ax.table(cellText=values, colLabels=headers, loc="center")
+        table.auto_set_font_size(False)
+        table.set_fontsize(7)
+        table.scale(1, 1.25)
+        suffix = "" if len(rows) <= max_rows else f" ({start_index + 1}-{start_index + len(chunk)})"
+        ax.set_title(f"{title}{suffix}")
+        fig.tight_layout()
+        pdf.savefig(fig)
+        plt.close(fig)
+
+
+def save_channel_analysis_pdf(
+    report: Mapping,
+    pdf_path: Path | str,
+    *,
+    title: str = "Channel Analysis Report",
+) -> Path:
+    pdf_path = Path(pdf_path)
+    pdf_path.parent.mkdir(parents=True, exist_ok=True)
+
+    with PdfPages(pdf_path) as pdf:
+        global_summary = dict(report.get("global_summary", {}))
+        if global_summary:
+            summary_rows = [{"key": key, "value": value} for key, value in global_summary.items()]
+            _save_table_page(pdf, summary_rows, f"{title} | Global Summary", max_rows=25)
+
+        layer_summary_rows = report.get("layer_summary_rows", [])
+        gate_summary_rows = report.get("gate_summary_rows", [])
+        comparison_rows = report.get("comparison_rows", [])
+        pruning_summary_rows = report.get("pruning_summary_rows", []) or report.get("teacher_vs_student_rows", [])
+
+        _save_table_page(pdf, layer_summary_rows, f"{title} | Layer Summary")
+        _save_table_page(pdf, gate_summary_rows, f"{title} | Gate Summary")
+        _save_table_page(pdf, comparison_rows, f"{title} | Comparison")
+        _save_table_page(pdf, pruning_summary_rows, f"{title} | Pruning Summary")
+
+        if layer_summary_rows:
+            fig, axes = plt.subplots(2, 1, figsize=(14, 8))
+            labels = [str(row.get("layer_name")) for row in layer_summary_rows]
+            axes[0].bar(labels, [row.get("out_channels", 0) or 0 for row in layer_summary_rows])
+            axes[0].set_title("Output Channels Per Layer")
+            axes[0].grid(alpha=0.25, axis="y")
+            axes[0].tick_params(axis="x", rotation=70)
+            axes[1].bar(labels, [row.get("importance_mean", 0) or 0 for row in layer_summary_rows])
+            axes[1].set_title("Mean Channel Importance Per Layer")
+            axes[1].grid(alpha=0.25, axis="y")
+            axes[1].tick_params(axis="x", rotation=70)
+            fig.tight_layout()
+            pdf.savefig(fig)
+            plt.close(fig)
+
+        if pruning_summary_rows:
+            teacher_key = "teacher_out_channels" if "teacher_out_channels" in pruning_summary_rows[0] else None
+            student_key = "student_out_channels" if "student_out_channels" in pruning_summary_rows[0] else None
+            ratio_key = "actual_prune_ratio" if "actual_prune_ratio" in pruning_summary_rows[0] else None
+            if teacher_key and student_key:
+                labels = [str(row.get("layer_name")) for row in pruning_summary_rows]
+                x = np.arange(len(labels))
+                width = 0.35
+                fig, axes = plt.subplots(2, 1, figsize=(14, 8))
+                axes[0].bar(x - width / 2, [row.get(teacher_key, 0) or 0 for row in pruning_summary_rows], width=width, label="teacher")
+                axes[0].bar(x + width / 2, [row.get(student_key, 0) or 0 for row in pruning_summary_rows], width=width, label="student")
+                axes[0].set_xticks(x)
+                axes[0].set_xticklabels(labels, rotation=70)
+                axes[0].set_title("Teacher vs Student Channels")
+                axes[0].grid(alpha=0.25, axis="y")
+                axes[0].legend()
+                if ratio_key:
+                    axes[1].bar(labels, [row.get(ratio_key, 0) or 0 for row in pruning_summary_rows])
+                    axes[1].set_title("Prune Ratio Per Layer")
+                    axes[1].grid(alpha=0.25, axis="y")
+                    axes[1].tick_params(axis="x", rotation=70)
+                fig.tight_layout()
+                pdf.savefig(fig)
+                plt.close(fig)
+    return pdf_path

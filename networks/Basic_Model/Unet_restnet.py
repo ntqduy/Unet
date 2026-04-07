@@ -59,6 +59,13 @@ class UNetResNet152(BaseSegmentationModel):
         backbone = _build_resnet152(encoder_pretrained=encoder_pretrained)
         self.model_name = "unet_resnet152"
         self.backbone_name = "resnet152"
+        self.set_architecture_config(
+            in_channels=in_channels,
+            num_classes=num_classes,
+            normalization=normalization,
+            encoder_pretrained=bool(encoder_pretrained),
+            encoder_name="resnet152",
+        )
 
         if in_channels != 3:
             original_conv = backbone.conv1

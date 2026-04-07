@@ -23,12 +23,19 @@ from dataloaders.dataset import Normalize, RandomGenerator, ToTensor, build_data
 from networks.PGD_Unet.gated_unet import PDGUNet
 from networks.PGD_Unet.pruning import extract_pruned_blueprint, load_blueprint_artifact, save_blueprint_artifact
 from networks.net_factory import get_model_metadata, list_models, net_factory
+from utils.channel_analysis import (
+    build_analysis_comparison,
+    extract_channel_analysis,
+    save_channel_analysis_artifacts,
+    save_comparison_artifacts,
+    save_pruning_analysis_artifacts,
+)
 from utils.checkpoints import load_checkpoint_into_model, resolve_phase_checkpoint, save_checkpoint
 from utils.compression_loss import CompressionLoss
 from utils.evaluation import build_evaluation_output_dir, evaluate_segmentation_dataset, save_evaluation_artifacts
-from utils.experiment import build_run_dir, ensure_run_layout, write_run_config
+from utils.experiment import build_run_dir, ensure_run_layout, write_model_config, write_run_config
 from utils.losses import DiceLoss
-from utils.model_output import extract_logits
+from utils.model_output import extract_logits, extract_model_info
 from utils.profiling import benchmark_inference, count_parameters, maybe_compute_flops
 from utils.reporting import save_loss_pdf, save_performance_pdf, save_visualization_pdf, write_metrics_rows
 
@@ -161,11 +168,36 @@ def _compute_profile(model, device: torch.device) -> dict:
     return profile
 
 
+def _export_model_channel_analysis(
+    run_dir: Path,
+    model,
+    *,
+    checkpoint_path: Path | None,
+    device: torch.device,
+    prefix: str | None,
+    title: str,
+) -> dict:
+    if checkpoint_path is not None:
+        load_checkpoint_into_model(checkpoint_path, model, device=device)
+    analysis = extract_channel_analysis(model, importance_name="filter_l1")
+    save_channel_analysis_artifacts(run_dir / "artifacts" / "channel_analysis", analysis, prefix=prefix, title=title)
+    logging.info(
+        "%s | analyzed_layers=%d | total_channels=%d | gate_layers=%d",
+        title,
+        analysis["global_summary"]["num_channel_layers"],
+        analysis["global_summary"]["total_output_channels"],
+        analysis["global_summary"]["num_gate_layers"],
+    )
+    return analysis
+
+
 def _export_phase_outputs(run_dir: Path, model, checkpoint_path: Path, phase: str, profile: dict, extra: dict, device: torch.device, image_mode: str) -> None:
     load_checkpoint_into_model(checkpoint_path, model, device=device)
     layout = ensure_run_layout(run_dir)
     metrics_rows = []
     eval_transform = transforms.Compose([Normalize(), ToTensor()])
+    model_info = dict(extract_model_info(model))
+    model_info.update({key: value for key, value in extra.items() if key in {"model_name", "backbone_name", "student_name", "teacher_model", "prune_ratio"}})
     for split in dict.fromkeys(args.final_eval_splits):
         try:
             dataset = build_dataset(args.dataset, args.root_path, split=split, transform=eval_transform, image_mode=image_mode)
@@ -200,6 +232,7 @@ def _export_phase_outputs(run_dir: Path, model, checkpoint_path: Path, phase: st
                 "backbone_name": extra.get("backbone_name"),
                 "student_name": extra.get("student_name"),
                 "phase": phase,
+                "model_info": model_info,
                 "num_classes": args.num_classes,
                 "in_channels": args.in_channels,
                 "patch_size": list(args.patch_size),
@@ -259,6 +292,16 @@ def _run_teacher(device: torch.device, image_mode: str, db_train, trainloader, v
     write_run_config(run_dir, vars(args))
     metadata = get_model_metadata(args.teacher_model)
     model = _build_teacher(db_train.in_channels).to(device)
+    model_info = dict(metadata)
+    model_info.update(extract_model_info(model))
+    model_info["build_kwargs"] = {
+        "net_type": args.teacher_model,
+        "in_channels": db_train.in_channels,
+        "num_classes": args.num_classes,
+        "image_size": list(args.patch_size) if args.teacher_model == "unetr" else None,
+        "encoder_pretrained": bool(args.encoder_pretrained) if args.teacher_model == "unet_resnet152" else None,
+    }
+    write_model_config(run_dir, model_info)
     reusable = Path(args.teacher_checkpoint).expanduser().resolve() if args.teacher_checkpoint else resolve_phase_checkpoint(run_dir, "best")
     if reusable and reusable.is_file() and not bool(args.force_retrain_teacher):
         payload = load_checkpoint_into_model(reusable, model, device=device)
@@ -312,7 +355,7 @@ def _run_teacher(device: torch.device, image_mode: str, db_train, trainloader, v
                 best_metric=best_metric,
                 metrics={"val_macro_dice": val_dice, "val_total_loss": val_loss},
                 config=vars(args),
-                model_info=metadata,
+                model_info=model_info,
                 phase="teacher",
                 extra_state={"history": history},
                 is_best=is_best,
@@ -337,11 +380,19 @@ def _run_teacher(device: torch.device, image_mode: str, db_train, trainloader, v
         best_path,
         "teacher",
         profile,
-        {"model_name": metadata["model_name"], "backbone_name": metadata["backbone_name"], "student_name": None, "prune_ratio": None},
+        {"model_name": metadata["model_name"], "backbone_name": metadata["backbone_name"], "student_name": None, "prune_ratio": None, "teacher_model": args.teacher_model},
         device,
         image_mode,
     )
-    return {"model": model, "run_dir": run_dir, "checkpoint_path": best_path, "metadata": metadata}
+    _export_model_channel_analysis(
+        run_dir,
+        model,
+        checkpoint_path=best_path,
+        device=device,
+        prefix=None,
+        title=f"Teacher Channel Analysis | {args.teacher_model}",
+    )
+    return {"model": model, "run_dir": run_dir, "checkpoint_path": best_path, "metadata": model_info}
 
 
 def _run_pruning(teacher_artifact: dict):
@@ -364,7 +415,27 @@ def _run_pruning(teacher_artifact: dict):
             }
         )
         save_blueprint_artifact(blueprint, layout["artifacts_dir"])
+    save_pruning_analysis_artifacts(layout["artifacts_dir"] / "pruning_analysis", blueprint, title="Teacher -> Student Pruning Analysis")
+    _write_json(layout["configs_dir"] / "pruning_config.json", blueprint)
     _write_json(layout["metrics_dir"] / "pruning_summary.json", blueprint)
+    global_summary = blueprint.get("global_pruning_summary", {})
+    logging.info(
+        "Global pruning summary | layers=%s | channels_before=%s | channels_after=%s | pruned=%s | ratio=%.4f",
+        global_summary.get("num_layers_analyzed"),
+        global_summary.get("total_channels_before"),
+        global_summary.get("total_channels_after"),
+        global_summary.get("total_channels_pruned"),
+        global_summary.get("global_prune_ratio", 0.0),
+    )
+    for row in blueprint.get("teacher_vs_student_rows", []):
+        logging.info(
+            "Pruning layer %s | %s -> %s | pruned=%s | ratio=%.4f",
+            row["layer_name"],
+            row["teacher_out_channels"],
+            row["student_out_channels"],
+            row["channels_pruned"],
+            row["actual_prune_ratio"],
+        )
     return {"run_dir": run_dir, "blueprint": blueprint, "blueprint_path": blueprint_path}
 
 
@@ -393,6 +464,31 @@ def _run_student(device: torch.device, image_mode: str, db_train, trainloader, v
     for parameter in teacher.parameters():
         parameter.requires_grad = False
     student = PDGUNet(in_channels=db_train.in_channels, num_classes=args.num_classes, channel_config=tuple(pruning_artifact["blueprint"]["channel_config"])).to(device)
+    student_model_info = extract_model_info(student)
+    student_model_info.update(
+        {
+            "branch": "proposal",
+            "teacher_model": args.teacher_model,
+            "teacher_backbone_name": teacher_artifact["metadata"].get("backbone_name"),
+            "student_name": "gated_student",
+            "blueprint_path": str(pruning_artifact["blueprint_path"]),
+            "blueprint": pruning_artifact["blueprint"],
+            "build_kwargs": {
+                "in_channels": db_train.in_channels,
+                "num_classes": args.num_classes,
+                "channel_config": list(pruning_artifact["blueprint"]["channel_config"]),
+            },
+        }
+    )
+    write_model_config(run_dir, student_model_info)
+    student_input_analysis = _export_model_channel_analysis(
+        run_dir,
+        student,
+        checkpoint_path=None,
+        device=device,
+        prefix="student_input",
+        title="Student Input Architecture Before Tuning",
+    )
     reusable = resolve_phase_checkpoint(run_dir, "best")
     if reusable and reusable.is_file() and not bool(args.force_retrain_student):
         payload = load_checkpoint_into_model(reusable, student, device=device)
@@ -464,7 +560,7 @@ def _run_student(device: torch.device, image_mode: str, db_train, trainloader, v
                 best_metric=best_metric,
                 metrics={"val_macro_dice": val_dice, "val_total_loss": val_losses["total_loss"]},
                 config=vars(args),
-                model_info={"branch": "proposal", "model_name": "pdg_unet", "backbone_name": teacher_artifact["metadata"]["backbone_name"], "student_name": "gated_student"},
+                model_info=student_model_info,
                 phase="student",
                 extra_state={"history": history, "blueprint": pruning_artifact["blueprint"]},
                 is_best=is_best,
@@ -489,11 +585,48 @@ def _run_student(device: torch.device, image_mode: str, db_train, trainloader, v
         best_path,
         "student",
         profile,
-        {"model_name": "pdg_unet", "backbone_name": teacher_artifact["metadata"]["backbone_name"], "student_name": "gated_student", "prune_ratio": args.prune_ratio},
+        {"model_name": "pdg_unet", "backbone_name": teacher_artifact["metadata"].get("backbone_name"), "student_name": "gated_student", "prune_ratio": args.prune_ratio, "teacher_model": args.teacher_model},
         device,
         image_mode,
     )
-    return {"model": student, "run_dir": run_dir, "checkpoint_path": best_path}
+    student_final_analysis = _export_model_channel_analysis(
+        run_dir,
+        student,
+        checkpoint_path=best_path,
+        device=device,
+        prefix="student_final",
+        title="Student Final Architecture After Tuning",
+    )
+    student_comparison_rows = build_analysis_comparison(
+        student_input_analysis,
+        student_final_analysis,
+        before_label="input",
+        after_label="final",
+    )
+    save_comparison_artifacts(
+        run_dir / "artifacts" / "channel_analysis",
+        student_comparison_rows,
+        prefix="student_tuning_comparison",
+        title="Student Tuning Comparison",
+        extra_report={
+            "global_summary": {
+                "input_channel_layers": student_input_analysis["global_summary"]["num_channel_layers"],
+                "final_channel_layers": student_final_analysis["global_summary"]["num_channel_layers"],
+                "input_total_channels": student_input_analysis["global_summary"]["total_output_channels"],
+                "final_total_channels": student_final_analysis["global_summary"]["total_output_channels"],
+                "input_gate_layers": student_input_analysis["global_summary"]["num_gate_layers"],
+                "final_gate_layers": student_final_analysis["global_summary"]["num_gate_layers"],
+            }
+        },
+    )
+    return {
+        "model": student,
+        "run_dir": run_dir,
+        "checkpoint_path": best_path,
+        "metadata": student_model_info,
+        "student_input_analysis": student_input_analysis,
+        "student_final_analysis": student_final_analysis,
+    }
 
 
 if __name__ == "__main__":
@@ -527,8 +660,11 @@ if __name__ == "__main__":
         pipeline_dir / "pipeline_summary.json",
         {
             "teacher_checkpoint": str(teacher_artifact["checkpoint_path"]),
+            "teacher_model_info": teacher_artifact["metadata"],
             "pruning_blueprint_path": str(pruning_artifact["blueprint_path"]),
+            "pruning_blueprint": pruning_artifact["blueprint"],
             "student_checkpoint": str(student_artifact["checkpoint_path"]),
+            "student_model_info": student_artifact["metadata"],
             "teacher_run_dir": str(teacher_artifact["run_dir"]),
             "pruning_run_dir": str(pruning_artifact["run_dir"]),
             "student_run_dir": str(student_artifact["run_dir"]),

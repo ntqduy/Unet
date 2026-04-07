@@ -76,6 +76,13 @@ class PDGUNet(BaseSegmentationModel):
         self.model_name = "pdg_unet"
         self.backbone_name = "pruned_teacher_blueprint"
         self.student_name = "gated_student"
+        self.set_architecture_config(
+            in_channels=in_channels,
+            num_classes=num_classes,
+            channel_config=list(channels),
+            normalization=normalization,
+            student_variant="gated_unet",
+        )
 
         self.channel_config = channels
         self.stem = GatedDoubleConv2d(in_channels, channels[0], normalization=normalization)

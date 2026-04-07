@@ -73,6 +73,22 @@ class BaseSegmentationModel(nn.Module):
     student_name: Optional[str] = None
     phase_name: Optional[str] = None
     prediction_threshold = 0.5
+    architecture_config: Dict[str, Any]
+
+    def set_architecture_config(self, **kwargs: Any) -> None:
+        self.architecture_config = {key: _to_serializable(value) for key, value in kwargs.items()}
+
+    def get_architecture_config(self) -> Dict[str, Any]:
+        return dict(getattr(self, "architecture_config", {}))
+
+    def get_model_info(self) -> Dict[str, Any]:
+        return {
+            "model_name": self.model_name,
+            "backbone_name": self.backbone_name,
+            "student_name": self.student_name,
+            "phase_name": self.phase_name,
+            "architecture_config": self.get_architecture_config(),
+        }
 
     def build_output(self, logits: torch.Tensor, *, features: Any = None, aux: Optional[Dict[str, Any]] = None) -> SegmentationModelOutput:
         return build_segmentation_output(
@@ -85,6 +101,28 @@ class BaseSegmentationModel(nn.Module):
             phase_name=self.phase_name,
             threshold=self.prediction_threshold,
         )
+
+
+def _to_serializable(value: Any) -> Any:
+    if isinstance(value, (str, int, float, bool)) or value is None:
+        return value
+    if isinstance(value, Mapping):
+        return {str(key): _to_serializable(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple, set)):
+        return [_to_serializable(item) for item in value]
+    return str(value)
+
+
+def extract_model_info(model: Any) -> Dict[str, Any]:
+    if hasattr(model, "get_model_info") and callable(model.get_model_info):
+        return _to_serializable(model.get_model_info())
+    return {
+        "model_name": getattr(model, "model_name", model.__class__.__name__),
+        "backbone_name": getattr(model, "backbone_name", None),
+        "student_name": getattr(model, "student_name", None),
+        "phase_name": getattr(model, "phase_name", None),
+        "architecture_config": _to_serializable(getattr(model, "architecture_config", {})),
+    }
 
 
 def _first_tensor_candidate(items: Any) -> Optional[torch.Tensor]:

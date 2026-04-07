@@ -40,6 +40,13 @@ class ResidualUNet2D(BaseSegmentationModel):
 
         self.model_name = "resunet"
         self.backbone_name = "residual_encoder"
+        self.set_architecture_config(
+            in_channels=in_channels,
+            num_classes=num_classes,
+            feature_channels=list(channels),
+            normalization=normalization,
+            decoder_dropout=decoder_dropout,
+        )
         self.pool = nn.MaxPool2d(kernel_size=2, stride=2)
 
         self.enc1 = ResidualBlock2d(in_channels, channels[0], normalization=normalization)

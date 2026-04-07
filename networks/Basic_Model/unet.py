@@ -64,6 +64,14 @@ class UNet2D(BaseSegmentationModel):
 
         self.model_name = "unet"
         self.backbone_name = "unet_encoder"
+        self.set_architecture_config(
+            in_channels=in_channels,
+            num_classes=num_classes,
+            feature_channels=list(channels),
+            normalization=normalization,
+            dropout=dropout,
+            bilinear=bilinear,
+        )
         self.stem = DoubleConv2d(in_channels, channels[0], normalization=normalization, dropout=dropout)
         self.down1 = DownBlock(channels[0], channels[1], normalization=normalization, dropout=dropout)
         self.down2 = DownBlock(channels[1], channels[2], normalization=normalization, dropout=dropout)

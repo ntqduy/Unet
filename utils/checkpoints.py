@@ -6,6 +6,7 @@ from pathlib import Path
 from typing import Any, Dict, Optional
 
 import torch
+from utils.model_output import extract_model_info
 
 
 def ensure_checkpoint_layout(run_dir: Path | str) -> Dict[str, Path]:
@@ -36,6 +37,10 @@ def build_checkpoint_payload(
     phase: Optional[str] = None,
     extra_state: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
+    extracted_model_info = extract_model_info(model)
+    merged_model_info = dict(extracted_model_info)
+    if model_info:
+        merged_model_info.update(model_info)
     payload = {
         "model_state_dict": model.state_dict(),
         "epoch": epoch,
@@ -43,7 +48,7 @@ def build_checkpoint_payload(
         "best_metric": best_metric,
         "metrics": metrics or {},
         "config": config or {},
-        "model_info": model_info or {},
+        "model_info": merged_model_info,
         "phase": phase,
         "extra_state": extra_state or {},
     }

@@ -5,6 +5,8 @@ import re
 from pathlib import Path
 from typing import Dict, Optional
 
+from utils.model_output import extract_model_info
+
 
 def sanitize_tag(value: object) -> str:
     text = re.sub(r"[^A-Za-z0-9._-]+", "_", str(value).strip())
@@ -57,3 +59,11 @@ def write_run_config(run_dir: Path | str, config: Dict) -> Path:
     with config_path.open("w", encoding="utf-8") as file:
         json.dump(config, file, indent=2)
     return config_path
+
+
+def write_model_config(run_dir: Path | str, model_or_info) -> Path:
+    model_config_path = ensure_run_layout(run_dir)["configs_dir"] / "model_config.json"
+    model_info = extract_model_info(model_or_info) if not isinstance(model_or_info, dict) else model_or_info
+    with model_config_path.open("w", encoding="utf-8") as file:
+        json.dump(model_info, file, indent=2)
+    return model_config_path

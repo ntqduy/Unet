@@ -190,6 +190,14 @@ class VNet2D(BaseSegmentationModel):
         super().__init__()
         self.model_name = "vnet"
         self.backbone_name = "vnet_encoder"
+        self.set_architecture_config(
+            in_channels=in_channels,
+            num_classes=num_classes,
+            base_channels=base_channels,
+            normalization=normalization,
+            has_dropout=has_dropout,
+            has_residual=has_residual,
+        )
         self.encoder = Encoder(
             in_channels=in_channels,
             base_channels=base_channels,

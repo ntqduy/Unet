@@ -8,7 +8,7 @@ from torch.utils.data import DataLoader
 from torchvision import transforms
 
 from dataloaders.dataset import Normalize, ToTensor, build_dataset, list_available_datasets
-from networks.net_factory import list_models, net_factory
+from networks.net_factory import get_model_metadata, list_models, net_factory
 from utils.checkpoints import load_checkpoint_into_model
 from utils.evaluation import (
     build_evaluation_output_dir,
@@ -81,7 +81,8 @@ def _resolve_checkpoint_path(snapshot_path: Path) -> Path:
     )
 
 
-def _build_summary_metadata(split: str, checkpoint_path: Path) -> dict:
+def _build_summary_metadata(split: str, checkpoint_path: Path, model_info: dict | None = None) -> dict:
+    resolved_model_info = dict(model_info or get_model_metadata(FLAGS.model))
     return {
         "experiment": FLAGS.exp,
         "dataset": FLAGS.dataset,
@@ -89,6 +90,9 @@ def _build_summary_metadata(split: str, checkpoint_path: Path) -> dict:
         "split": split,
         "model": FLAGS.model,
         "architecture": FLAGS.model,
+        "backbone_name": resolved_model_info.get("backbone_name"),
+        "student_name": resolved_model_info.get("student_name"),
+        "model_info": resolved_model_info,
         "num_classes": FLAGS.num_classes,
         "in_channels": FLAGS.in_channels,
         "patch_size": list(FLAGS.patch_size),
@@ -157,7 +161,8 @@ def test_calculate_metric():
         class_num=FLAGS.num_classes,
         **model_kwargs,
     ).to(device)
-    load_checkpoint_into_model(checkpoint_path, model, device=device)
+    checkpoint_payload = load_checkpoint_into_model(checkpoint_path, model, device=device)
+    checkpoint_model_info = checkpoint_payload.get("model_info", {})
     model.eval()
 
     split_summaries = {}
@@ -185,7 +190,7 @@ def test_calculate_metric():
         )
         summary = save_evaluation_artifacts(
             output_dir,
-            _build_summary_metadata(split, checkpoint_path),
+            _build_summary_metadata(split, checkpoint_path, model_info=checkpoint_model_info),
             result["average_metric"],
             result["case_metrics"],
         )

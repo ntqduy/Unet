@@ -168,6 +168,18 @@ class UNETR2D(BaseSegmentationModel):
 
         self.model_name = "unetr"
         self.backbone_name = "vit_encoder"
+        self.set_architecture_config(
+            in_channels=in_channels,
+            num_classes=num_classes,
+            image_size=list(image_size),
+            embed_dim=embed_dim,
+            patch_size=patch_size,
+            num_heads=num_heads,
+            num_layers=num_layers,
+            mlp_dim=mlp_dim,
+            dropout=dropout,
+            extract_layers=list(extract_layers),
+        )
         self.embed_dim = embed_dim
         self.patch_size = patch_size
         self.transformer = TransformerEncoder(

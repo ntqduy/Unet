@@ -273,6 +273,81 @@ Trong đó:
 - `visualizations.pdf` gồm `image / ground truth / prediction`
 - `performance.pdf` gồm bảng tổng hợp và biểu đồ các metric chính
 
+### 9.5 Channel and pruning artifacts
+
+Ngoài các artifact chuẩn phía trên, repo hiện xuất thêm một nhóm artifact riêng để theo dõi channel structure và pruning decision.
+
+#### Basic branch
+
+Final checkpoint của basic model sẽ có thêm:
+
+- `artifacts/channel_analysis/channel_summary.csv`
+- `artifacts/channel_analysis/channel_importance.csv`
+- `artifacts/channel_analysis/channel_analysis.json`
+- `artifacts/channel_analysis/channel_analysis.pdf`
+
+Nhóm file này dùng để lưu:
+
+- số `in_channels / out_channels` của từng layer
+- `kernel_size` và `weight_shape`
+- channel importance theo tiêu chí `filter_l1`
+- global summary của kiến trúc cuối cùng
+
+#### Proposal branch - teacher phase
+
+Teacher phase cũng xuất một channel profile tương tự tại:
+
+- `artifacts/channel_analysis/channel_summary.csv`
+- `artifacts/channel_analysis/channel_importance.csv`
+- `artifacts/channel_analysis/channel_analysis.json`
+- `artifacts/channel_analysis/channel_analysis.pdf`
+
+Mục tiêu là có một mốc trước pruning để so với student sau pruning và sau tuning.
+
+#### Proposal branch - pruning phase
+
+Pruning phase xuất chi tiết quyết định prune tại:
+
+- `artifacts/pruning_analysis/teacher_channel_summary.csv`
+- `artifacts/pruning_analysis/teacher_channel_importance.csv`
+- `artifacts/pruning_analysis/channel_level_detail.csv`
+- `artifacts/pruning_analysis/pruning_summary.csv`
+- `artifacts/pruning_analysis/teacher_vs_student_channels.csv`
+- `artifacts/pruning_analysis/global_pruning_summary.csv`
+- `artifacts/pruning_analysis/pruning_analysis.json`
+- `artifacts/pruning_analysis/pruning_analysis.pdf`
+
+Các file này trả lời trực tiếp các câu hỏi:
+
+- layer nào bị prune
+- teacher có bao nhiêu channel
+- student sau pruning còn bao nhiêu channel
+- channel nào được giữ
+- channel nào bị cắt
+- prune ratio thực tế của từng layer và toàn cục
+
+#### Proposal branch - student phase
+
+Student phase lưu cả trước và sau tuning:
+
+- `artifacts/channel_analysis/student_input_channel_summary.csv`
+- `artifacts/channel_analysis/student_input_channel_importance.csv`
+- `artifacts/channel_analysis/student_input_gate_summary.csv`
+- `artifacts/channel_analysis/student_input_gate_values.csv`
+- `artifacts/channel_analysis/student_final_channel_summary.csv`
+- `artifacts/channel_analysis/student_final_channel_importance.csv`
+- `artifacts/channel_analysis/student_final_gate_summary.csv`
+- `artifacts/channel_analysis/student_final_gate_values.csv`
+- `artifacts/channel_analysis/student_tuning_comparison.csv`
+- `artifacts/channel_analysis/student_tuning_comparison.json`
+- `artifacts/channel_analysis/student_tuning_comparison.pdf`
+
+Lưu ý về tiêu chí:
+
+- basic/teacher/final student channel analysis dùng `filter_l1`
+- pruning decision thật dùng `bn_weight_or_l1`
+- student phase lưu thêm `gate_value` để thấy channel nào gần như bị tắt
+
 ## 10. Vị trí output hiện tại
 
 ### Basic branch
@@ -379,3 +454,52 @@ Repo hiện đã được tổ chức theo hướng:
 - artifact xuất đồng nhất
 - support tái sử dụng teacher/student/blueprint
 - dễ so sánh công bằng giữa baseline và proposal
+
+## 17. Unified comparison report from saved outputs
+
+Repo hiện có thêm script `compare_artifacts.py` để gom kết quả của:
+
+- `basic baseline`
+- `teacher`
+- `pruned student blueprint`
+- `tuned student`
+
+thành một report duy nhất mà không cần train lại.
+
+### Cách chạy nhanh với pipeline summary
+
+```bash
+python compare_artifacts.py --basic_run_dir logs/model/supervised/<basic_exp> --pipeline_dir logs/runs/proposal/<proposal_exp>/<dataset>/pdg_unet/pipeline/<teacher_model> --comparison_name <report_name>
+```
+
+### Cách chạy khi muốn chỉ định từng phase riêng
+
+```bash
+python compare_artifacts.py --basic_run_dir logs/model/supervised/<basic_exp> --teacher_run_dir logs/runs/proposal/<proposal_exp>/<dataset>/pdg_unet/teacher/<teacher_model> --pruning_run_dir logs/runs/proposal/<proposal_exp>/<dataset>/pdg_unet/pruning/<teacher_model>_ratio_<ratio> --student_run_dir logs/runs/proposal/<proposal_exp>/<dataset>/pdg_unet/student/<teacher_model>_ratio_<ratio> --output_dir logs/comparisons/<report_name>
+```
+
+### Output của script tổng hợp
+
+Script sẽ sinh:
+
+- `stage_overview.csv`
+- `performance_comparison.csv`
+- `pruning_global_summary.csv`
+- `teacher_vs_student_channels.csv`
+- `student_tuning_comparison.csv`
+- `comparison_summary.json`
+- `comparison_report.pdf`
+
+Ý nghĩa:
+
+- `stage_overview.csv`: so sánh mức stage giữa basic, teacher, pruned student, tuned student
+- `performance_comparison.csv`: gom Dice/IoU/HD95 và thông tin profiling cho các stage có evaluate
+- `pruning_global_summary.csv`: tổng hợp pruning ratio toàn cục
+- `teacher_vs_student_channels.csv`: so sánh channel teacher và pruned student theo layer
+- `student_tuning_comparison.csv`: so sánh student trước tuning và sau tuning
+- `comparison_report.pdf`: bản PDF duy nhất để đọc nhanh toàn bộ pipeline
+
+Lưu ý:
+
+- `pruned student blueprint` là stage kiến trúc, nên thường không có Dice/IoU riêng nếu chưa evaluate nó như một model độc lập
+- so sánh layer-wise trực tiếp giữa `basic` và `proposal` không phải lúc nào cũng 1-1 vì topology khác nhau; script vì vậy ưu tiên `stage-level summary` cho cross-architecture comparison và giữ `teacher -> pruned student` ở mức layer-wise vì đó là mapping hợp lệ

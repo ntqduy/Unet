@@ -22,6 +22,7 @@ from dataloaders.dataset import Normalize, RandomGenerator, ToTensor, build_data
 from networks.net_factory import get_model_metadata, list_models, net_factory
 from utils.checkpoints import load_checkpoint_into_model, save_checkpoint
 from utils import losses, val_2d
+from utils.channel_analysis import extract_channel_analysis, save_channel_analysis_artifacts
 from utils.evaluation import (
     build_evaluation_output_dir,
     checkpoint_label,
@@ -29,7 +30,8 @@ from utils.evaluation import (
     sanitize_tag,
     save_evaluation_artifacts,
 )
-from utils.model_output import extract_logits
+from utils.experiment import ensure_run_layout, write_model_config
+from utils.model_output import extract_logits, extract_model_info
 from utils.profiling import benchmark_inference, count_parameters, maybe_compute_flops
 from utils.reporting import save_loss_pdf, save_performance_pdf, save_visualization_pdf, write_metrics_rows
 from utils.visualization import save_triplet_visualization
@@ -146,13 +148,17 @@ def _best_checkpoint_manifest_path(snapshot_path: Path) -> Path:
     return snapshot_path / "best_checkpoint.json"
 
 
-def _build_checkpoint_manifest(checkpoint_path: Path, alias_path: Path, legacy_path: Path, metric_prefix: str, metric_value: float) -> dict:
+def _build_checkpoint_manifest(checkpoint_path: Path, alias_path: Path, legacy_path: Path, metric_prefix: str, metric_value: float, model_info: dict | None = None) -> dict:
+    resolved_model_info = dict(model_info or get_model_metadata(args.model))
     return {
         "experiment": args.exp,
         "dataset": args.dataset,
         "dataset_root": str(Path(args.root_path).expanduser().resolve()),
         "model": args.model,
         "architecture": args.model,
+        "backbone_name": resolved_model_info.get("backbone_name"),
+        "student_name": resolved_model_info.get("student_name"),
+        "model_info": resolved_model_info,
         "train_split": args.train_split,
         "val_split": args.val_split,
         "metric_name": "val_macro_dice",
@@ -166,7 +172,8 @@ def _build_checkpoint_manifest(checkpoint_path: Path, alias_path: Path, legacy_p
     }
 
 
-def _build_evaluation_metadata(split: str, checkpoint_path: Path) -> dict:
+def _build_evaluation_metadata(split: str, checkpoint_path: Path, model_info: dict | None = None) -> dict:
+    resolved_model_info = dict(model_info or get_model_metadata(args.model))
     return {
         "experiment": args.exp,
         "dataset": args.dataset,
@@ -174,7 +181,9 @@ def _build_evaluation_metadata(split: str, checkpoint_path: Path) -> dict:
         "split": split,
         "model": args.model,
         "architecture": args.model,
-        "backbone_name": get_model_metadata(args.model)["backbone_name"],
+        "backbone_name": resolved_model_info.get("backbone_name"),
+        "student_name": resolved_model_info.get("student_name"),
+        "model_info": resolved_model_info,
         "num_classes": args.num_classes,
         "in_channels": args.in_channels,
         "patch_size": list(args.patch_size),
@@ -184,7 +193,7 @@ def _build_evaluation_metadata(split: str, checkpoint_path: Path) -> dict:
     }
 
 
-def _write_evaluation_overview(snapshot_path: Path, checkpoint_path: Path, split_summaries: dict) -> None:
+def _write_evaluation_overview(snapshot_path: Path, checkpoint_path: Path, split_summaries: dict, model_info: dict | None = None) -> None:
     if not split_summaries:
         return
 
@@ -194,6 +203,7 @@ def _write_evaluation_overview(snapshot_path: Path, checkpoint_path: Path, split
         "dataset": args.dataset,
         "dataset_root": str(Path(args.root_path).expanduser().resolve()),
         "model": args.model,
+        "model_info": model_info or get_model_metadata(args.model),
         "checkpoint_name": checkpoint_path.name,
         "checkpoint_path": str(checkpoint_path.resolve()),
         "splits": split_summaries,
@@ -276,7 +286,7 @@ def run_validation(args, model, valloader, device, ce_loss):
     return performance, float(np.mean(val_losses)) if val_losses else 0.0, vis_samples
 
 
-def _run_final_evaluations(snapshot_path: Path, checkpoint_path: Path, model, device, image_mode: str, profile: dict) -> None:
+def _run_final_evaluations(snapshot_path: Path, checkpoint_path: Path, model, device, image_mode: str, profile: dict, model_info: dict) -> None:
     logging.info("Running final evaluation with best checkpoint: %s", checkpoint_path)
     load_checkpoint_into_model(checkpoint_path, model, device=device)
     model.eval()
@@ -315,7 +325,7 @@ def _run_final_evaluations(snapshot_path: Path, checkpoint_path: Path, model, de
         elapsed = time.perf_counter() - start_time
         summary = save_evaluation_artifacts(
             output_dir,
-            _build_evaluation_metadata(split, checkpoint_path),
+            _build_evaluation_metadata(split, checkpoint_path, model_info=model_info),
             result["average_metric"],
             result["case_metrics"],
         )
@@ -358,10 +368,25 @@ def _run_final_evaluations(snapshot_path: Path, checkpoint_path: Path, model, de
                 title=f"basic | {split}",
             )
 
-    _write_evaluation_overview(snapshot_path, checkpoint_path, split_summaries)
+    _write_evaluation_overview(snapshot_path, checkpoint_path, split_summaries, model_info)
     if metrics_rows:
         write_metrics_rows(metrics_rows, snapshot_path / "metrics" / "basic_metrics.csv")
         save_performance_pdf(metrics_rows, snapshot_path / "reports" / "basic_performance.pdf", title="Basic model performance")
+
+
+def _export_basic_channel_analysis(snapshot_path: Path, checkpoint_path: Path, model, device) -> None:
+    load_checkpoint_into_model(checkpoint_path, model, device=device)
+    analysis = extract_channel_analysis(model, importance_name="filter_l1")
+    save_channel_analysis_artifacts(
+        snapshot_path / "artifacts" / "channel_analysis",
+        analysis,
+        title=f"Basic Channel Analysis | {args.model}",
+    )
+    logging.info(
+        "Basic channel analysis saved | layers=%d | total_channels=%d",
+        analysis["global_summary"]["num_channel_layers"],
+        analysis["global_summary"]["total_output_channels"],
+    )
 
 
 def train(args, snapshot_path):
@@ -403,6 +428,16 @@ def train(args, snapshot_path):
         class_num=args.num_classes,
         **model_kwargs,
     ).to(device)
+    model_metadata = get_model_metadata(args.model)
+    model_info = dict(model_metadata)
+    model_info.update(extract_model_info(model))
+    model_info["build_kwargs"] = {
+        "net_type": args.model,
+        "in_channels": db_train.in_channels,
+        "num_classes": args.num_classes,
+        **{key: value for key, value in model_kwargs.items() if key != "mode"},
+    }
+    write_model_config(snapshot_path, model_info)
 
     def worker_init_fn(worker_id):
         random.seed(args.seed + worker_id)
@@ -447,7 +482,6 @@ def train(args, snapshot_path):
     best_performance = float("-inf")
     best_checkpoint_path = None
     history = {"train_total_loss": [], "val_total_loss": [], "val_macro_dice": []}
-    model_metadata = get_model_metadata(args.model)
 
     def evaluate_and_checkpoint(metric_prefix, log_prefix):
         nonlocal best_performance, best_checkpoint_path
@@ -469,7 +503,7 @@ def train(args, snapshot_path):
                 best_metric=best_performance,
                 metrics={"val_macro_dice": performance, "val_total_loss": val_loss},
                 config=vars(args),
-                model_info=model_metadata,
+                model_info=model_info,
                 phase="basic",
                 extra_state={"history": history},
                 is_best=True,
@@ -484,6 +518,7 @@ def train(args, snapshot_path):
                 legacy_checkpoint_path,
                 metric_prefix=metric_prefix,
                 metric_value=best_performance,
+                model_info=model_info,
             )
             _write_json(_best_checkpoint_manifest_path(Path(snapshot_path)), manifest)
             logging.info("Saved best model to %s", unique_checkpoint_path)
@@ -596,7 +631,7 @@ def train(args, snapshot_path):
             best_metric=-1.0,
             metrics={"val_macro_dice": -1.0},
             config=vars(args),
-            model_info=model_metadata,
+            model_info=model_info,
             phase="basic",
             extra_state={"history": history},
             is_best=True,
@@ -610,12 +645,14 @@ def train(args, snapshot_path):
             legacy_checkpoint_path,
             metric_prefix="last",
             metric_value=-1.0,
+            model_info=model_info,
         )
         _write_json(_best_checkpoint_manifest_path(Path(snapshot_path)), manifest)
         logging.warning("No validation checkpoint was selected; using the last model state at %s", fallback_checkpoint_path)
 
     save_loss_pdf(history, Path(snapshot_path) / "reports" / "basic_loss.pdf", title="Basic model loss")
-    _run_final_evaluations(Path(snapshot_path), best_checkpoint_path, model, device, image_mode, _compute_model_profile(model, device))
+    _run_final_evaluations(Path(snapshot_path), best_checkpoint_path, model, device, image_mode, _compute_model_profile(model, device), model_info)
+    _export_basic_channel_analysis(Path(snapshot_path), best_checkpoint_path, model, device)
 
 
 if __name__ == "__main__":
@@ -630,6 +667,7 @@ if __name__ == "__main__":
 
     snapshot_path = PROJECT_ROOT / "logs" / "model" / "supervised" / args.exp
     snapshot_path.mkdir(parents=True, exist_ok=True)
+    ensure_run_layout(snapshot_path)
 
     shutil.copy(Path(__file__).resolve(), snapshot_path / "train_basic_model.py")
     _write_json(snapshot_path / "run_config.json", vars(args))
