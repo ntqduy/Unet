@@ -324,6 +324,33 @@ def _student_epoch_policy(epoch: int, schedule: dict, variant_policy: dict) -> d
     }
 
 
+def _build_student_pruning_epoch_config(total_epochs: int, pruning_schedule: dict) -> dict:
+    total_epochs = max(1, int(total_epochs))
+    hard_pruning_start_epoch = pruning_schedule.get("hard_pruning_start_epoch")
+    if hard_pruning_start_epoch is not None:
+        hard_pruning_start_epoch = int(hard_pruning_start_epoch)
+
+    if hard_pruning_start_epoch is None:
+        late_window_epochs: list[int] = []
+        gate_search_epochs = list(range(1, total_epochs + 1))
+    else:
+        late_window_epochs = list(range(hard_pruning_start_epoch, total_epochs + 1))
+        gate_search_epochs = list(range(1, hard_pruning_start_epoch))
+
+    return {
+        "total_student_epochs": int(total_epochs),
+        "requested_late_pruning_epochs": int(pruning_schedule.get("requested_warmup_pruning_epochs", 0) or 0),
+        "effective_late_pruning_epochs": int(pruning_schedule.get("effective_warmup_pruning_epochs", 0) or 0),
+        "active_soft_pruning_epochs": int(pruning_schedule.get("active_soft_pruning_epochs", 0) or 0),
+        "hard_pruning_enabled": bool(pruning_schedule.get("hard_pruning_enabled", False)),
+        "hard_pruning_threshold": pruning_schedule.get("hard_pruning_threshold"),
+        "hard_pruning_start_epoch": hard_pruning_start_epoch,
+        "hard_pruning_apply_epoch": hard_pruning_start_epoch,
+        "late_pruning_epoch_window": late_window_epochs,
+        "gate_search_epoch_window": gate_search_epochs,
+    }
+
+
 def _freeze_teacher_model(teacher_model) -> None:
     teacher_model.eval()
     for parameter in teacher_model.parameters():
@@ -883,6 +910,33 @@ def _build_hard_pruned_student_from_plan(source_student: PDGUNet, db_train, hard
         stage0,
     )
     return target_student
+
+
+def _summarize_hard_pruning_weight_transfer(hard_pruning_plan: dict) -> dict:
+    rows = list(hard_pruning_plan.get("rows", []))
+    total_before = int(sum(int(row.get("original_out_channels", 0) or 0) for row in rows))
+    total_after = int(sum(int(row.get("pruned_out_channels", 0) or 0) for row in rows))
+    total_pruned = int(sum(int(row.get("channels_pruned", 0) or 0) for row in rows))
+    return {
+        "strategy": "subset_weight_reuse_from_pre_pruning_student",
+        "source": "step3_student_before_late_hard_pruning",
+        "num_stages": int(len(rows)),
+        "total_channels_before": total_before,
+        "total_channels_after": total_after,
+        "total_channels_pruned": total_pruned,
+        "channel_reuse_ratio": float(total_after / max(1, total_before)),
+        "per_stage": [
+            {
+                "layer_name": row.get("layer_name"),
+                "original_out_channels": row.get("original_out_channels"),
+                "pruned_out_channels": row.get("pruned_out_channels"),
+                "channels_pruned": row.get("channels_pruned"),
+                "kept_channel_indices": row.get("kept_channel_indices", []),
+                "selection_policy": row.get("selection_policy"),
+            }
+            for row in rows
+        ],
+    }
 
 
 def _aggregate_phase_metrics(*phase_exports: dict) -> list[dict]:
@@ -1565,6 +1619,9 @@ def _run_pruning(device: torch.device, image_mode: str, db_train, teacher_artifa
             "blueprint_path": project_relative_path(blueprint_path, PROJECT_ROOT),
             "blueprint": blueprint,
             "weight_transfer": weight_transfer,
+            "checkpoint_is_random_init": False,
+            "checkpoint_weight_status": "teacher_subset_reuse_then_saved",
+            "checkpoint_weight_source": "teacher_kept_channels + exact_match_fallback",
             "evaluation_note": (
                 "This phase evaluates the pruned student immediately after structural pruning. "
                 "The student is initialized with the teacher weights of the kept channels whenever the stage-wise mapping is compatible, "
@@ -1670,6 +1727,7 @@ def _run_student(device: torch.device, image_mode: str, db_train, trainloader, v
         args.warmup_pruning_epochs,
         variant_policy,
     )
+    student_pruning_epoch_config = _build_student_pruning_epoch_config(args.max_epochs_student, pruning_schedule)
 
     student = _build_student_from_blueprint(db_train, pruning_artifact).to(device)
     _configure_student_variant(student, variant_policy)
@@ -1697,10 +1755,14 @@ def _run_student(device: torch.device, image_mode: str, db_train, trainloader, v
                 "The final pruning window controls when structural hard pruning happens."
             ),
             "pruning_schedule": pruning_schedule,
+            "student_pruning_epoch_config": student_pruning_epoch_config,
             "student_initialization": {
                 "source_phase": "2_pruning",
                 "source_checkpoint_path": project_relative_path(pruning_initialization["checkpoint_path"], PROJECT_ROOT),
             },
+            "checkpoint_is_random_init": False,
+            "checkpoint_weight_status": "loaded_from_pruning_checkpoint_then_trained",
+            "checkpoint_weight_source": project_relative_path(pruning_initialization["checkpoint_path"], PROJECT_ROOT),
             "build_kwargs": {
                 "in_channels": db_train.in_channels,
                 "num_classes": args.num_classes,
@@ -1708,6 +1770,7 @@ def _run_student(device: torch.device, image_mode: str, db_train, trainloader, v
             },
         }
     )
+    _write_json(layout["configs_dir"] / "student_pruning_config.json", student_pruning_epoch_config)
     write_model_config(run_dir, student_model_info)
     logging.info(
         "Student step-3 setup | variant=%s | use_distill=%s | use_gating=%s | use_sparsity=%s | gate_search_epochs=%s | hard_pruning_start_epoch=%s | hard_pruning_threshold=%s",
@@ -1738,6 +1801,7 @@ def _run_student(device: torch.device, image_mode: str, db_train, trainloader, v
     diagnostics_rows = []
     hard_pruning_plan = None
     hard_pruning_applied = False
+    hard_pruning_weight_transfer = None
     if not bool(args.force_retrain_student):
         reusable_signature = build_expected_signature(
             dataset=args.dataset,
@@ -1770,6 +1834,7 @@ def _run_student(device: torch.device, image_mode: str, db_train, trainloader, v
         diagnostics_rows = list(payload.get("extra_state", {}).get("epoch_diagnostics", []))
         hard_pruning_plan = payload.get("extra_state", {}).get("hard_pruning_plan")
         hard_pruning_applied = bool(payload.get("extra_state", {}).get("hard_pruning_applied", False))
+        hard_pruning_weight_transfer = payload.get("extra_state", {}).get("hard_pruning_weight_transfer")
         student_model_info.update(payload.get("model_info", {}))
         logging.info("Loaded student checkpoint: %s", project_relative_path(best_path, PROJECT_ROOT))
         _restore_loss_pdf_if_possible(history, layout["reports_dir"] / "student_loss.pdf", "Student loss")
@@ -1798,6 +1863,7 @@ def _run_student(device: torch.device, image_mode: str, db_train, trainloader, v
             if epoch_policy["hard_pruning_active"] and not hard_pruning_applied:
                 hard_pruning_plan = _build_late_hard_pruning_plan(student, float(pruning_schedule["hard_pruning_threshold"]))
                 if hard_pruning_plan["hard_pruning_applied"]:
+                    hard_pruning_weight_transfer = _summarize_hard_pruning_weight_transfer(hard_pruning_plan)
                     student = _build_hard_pruned_student_from_plan(student, db_train, hard_pruning_plan)
                     _configure_student_variant(student, variant_policy)
                     optimizer = optim.AdamW(student.parameters(), lr=args.student_lr, weight_decay=1e-4)
@@ -1825,12 +1891,17 @@ def _run_student(device: torch.device, image_mode: str, db_train, trainloader, v
                                 "including the post-hard-pruning epochs."
                             ),
                             "pruning_schedule": pruning_schedule,
+                            "student_pruning_epoch_config": student_pruning_epoch_config,
                             "student_initialization": {
                                 "source_phase": "2_pruning",
                                 "source_checkpoint_path": project_relative_path(pruning_initialization["checkpoint_path"], PROJECT_ROOT),
                             },
                             "hard_pruning_applied": True,
                             "hard_pruning_plan": hard_pruning_plan,
+                            "hard_pruning_weight_transfer": hard_pruning_weight_transfer,
+                            "checkpoint_is_random_init": False,
+                            "checkpoint_weight_status": "subset_reused_from_pre_pruning_student_then_trained",
+                            "checkpoint_weight_source": "step3_pre_hard_pruning_student",
                             "build_kwargs": {
                                 "in_channels": db_train.in_channels,
                                 "num_classes": args.num_classes,
@@ -1840,11 +1911,13 @@ def _run_student(device: torch.device, image_mode: str, db_train, trainloader, v
                     )
                     write_model_config(run_dir, student_model_info)
                     logging.info(
-                        "Applied late hard pruning at epoch %d | threshold=%.4f | channel_config=%s | global_prune_ratio=%.4f",
+                        "Applied late hard pruning at epoch %d | threshold=%.4f | channel_config=%s | global_prune_ratio=%.4f | weight_init=%s | channel_reuse_ratio=%.4f",
                         epoch,
                         hard_pruning_plan["threshold"],
                         list(hard_pruning_plan["channel_config"]),
                         hard_pruning_plan["global_summary"]["global_prune_ratio"],
+                        hard_pruning_weight_transfer["strategy"],
+                        hard_pruning_weight_transfer["channel_reuse_ratio"],
                     )
                 else:
                     logging.info(
@@ -1955,6 +2028,7 @@ def _run_student(device: torch.device, image_mode: str, db_train, trainloader, v
                     "pruning_schedule": pruning_schedule,
                     "hard_pruning_plan": hard_pruning_plan,
                     "hard_pruning_applied": hard_pruning_applied,
+                    "hard_pruning_weight_transfer": hard_pruning_weight_transfer,
                 },
                 is_best=is_best,
                 save_tagged_checkpoint=bool(args.save_history_checkpoints),
@@ -2054,6 +2128,16 @@ def _run_student(device: torch.device, image_mode: str, db_train, trainloader, v
             "hard_pruning_threshold": pruning_schedule.get("hard_pruning_threshold"),
             "hard_pruning_applied": bool(hard_pruning_applied),
             "hard_pruning_stage": "late_structural_pruning" if hard_pruning_applied else "not_triggered",
+            "hard_pruning_weight_init": (
+                hard_pruning_weight_transfer.get("strategy")
+                if isinstance(hard_pruning_weight_transfer, dict)
+                else "not_applied"
+            ),
+            "hard_pruning_channel_reuse_ratio": (
+                hard_pruning_weight_transfer.get("channel_reuse_ratio")
+                if isinstance(hard_pruning_weight_transfer, dict)
+                else None
+            ),
             "requested_warmup_pruning_epochs": pruning_schedule["requested_warmup_pruning_epochs"],
             "effective_warmup_pruning_epochs": pruning_schedule["effective_warmup_pruning_epochs"],
             "active_soft_pruning_epochs": pruning_schedule["active_soft_pruning_epochs"],
@@ -2087,6 +2171,7 @@ def _run_student(device: torch.device, image_mode: str, db_train, trainloader, v
         "student_variant": variant_policy,
         "hard_pruning_plan": hard_pruning_plan,
         "hard_pruning_applied": hard_pruning_applied,
+        "hard_pruning_weight_transfer": hard_pruning_weight_transfer,
         "student_initialization": {
             "source_checkpoint_path": project_relative_path(pruning_initialization["checkpoint_path"], PROJECT_ROOT),
             "source_phase": "2_pruning",
