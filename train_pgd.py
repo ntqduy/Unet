@@ -454,21 +454,29 @@ def _safe_copy_norm_state(source_norm, target_norm, out_indices: list[int]) -> b
     return True
 
 
-def _safe_copy_conv2d_state(source_conv, target_conv, out_indices: list[int], in_indices: list[int]) -> bool:
+def _safe_copy_conv2d_state(source_conv, target_conv, out_indices: list[int], in_indices: list[int]) -> dict:
     if source_conv is None or target_conv is None or not out_indices or not in_indices:
-        return False
+        return {"copied": False, "copy_mode": "unmapped", "reason": "missing_source_or_target"}
     if not isinstance(source_conv, nn.Conv2d) or not isinstance(target_conv, nn.Conv2d):
-        return False
+        return {"copied": False, "copy_mode": "unmapped", "reason": "unsupported_conv_type"}
     if max(out_indices) >= int(source_conv.weight.shape[0]):
-        return False
+        return {"copied": False, "copy_mode": "unmapped", "reason": "out_indices_exceed_source_channels"}
     if max(in_indices) >= int(source_conv.weight.shape[1]):
-        return False
+        return {"copied": False, "copy_mode": "unmapped", "reason": "in_indices_exceed_source_channels"}
     if int(target_conv.weight.shape[0]) != len(out_indices):
-        return False
+        return {"copied": False, "copy_mode": "unmapped", "reason": "target_out_channels_mismatch"}
     if int(target_conv.weight.shape[1]) != len(in_indices):
-        return False
+        return {"copied": False, "copy_mode": "unmapped", "reason": "target_in_channels_mismatch"}
+    source_kernel = tuple(int(value) for value in source_conv.weight.shape[-2:])
+    target_kernel = tuple(int(value) for value in target_conv.weight.shape[-2:])
     _copy_conv2d_state(source_conv, target_conv, out_indices, in_indices)
-    return True
+    return {
+        "copied": True,
+        "copy_mode": "resized_kernel" if source_kernel != target_kernel else "direct",
+        "reason": "",
+        "source_kernel_size": list(source_kernel),
+        "target_kernel_size": list(target_kernel),
+    }
 
 
 def _collect_conv2d_layers(module: nn.Module) -> list[nn.Conv2d]:
@@ -479,38 +487,85 @@ def _collect_norm_layers(module: nn.Module) -> list[nn.Module]:
     return [child for child in module.modules() if isinstance(child, NORM_LAYER_TYPES)]
 
 
-def _copy_source_convnorm_to_target(source_conv, source_norm, target_convnormact, out_indices: list[int], in_indices: list[int]) -> list[str]:
+def _copy_source_convnorm_to_target(component_prefix: str, source_conv, source_norm, target_convnormact, out_indices: list[int], in_indices: list[int]) -> dict:
     copied_components = []
+    direct_components = []
+    resized_components = []
+    unmapped_components = []
     target_conv = target_convnormact.block[0]
     target_norm = target_convnormact.block[1] if len(target_convnormact.block) > 1 else None
-    if _safe_copy_conv2d_state(source_conv, target_conv, out_indices, in_indices):
-        copied_components.append("conv")
+    conv_result = _safe_copy_conv2d_state(source_conv, target_conv, out_indices, in_indices)
+    if conv_result["copied"]:
+        conv_label = f"{component_prefix}_conv"
+        copied_components.append(conv_label)
+        if conv_result["copy_mode"] == "resized_kernel":
+            resized_components.append(conv_label)
+        else:
+            direct_components.append(conv_label)
+    else:
+        unmapped_components.append(f"{component_prefix}_conv")
     if _safe_copy_norm_state(source_norm, target_norm, out_indices):
-        copied_components.append("norm")
-    return copied_components
+        norm_label = f"{component_prefix}_norm"
+        copied_components.append(norm_label)
+        direct_components.append(norm_label)
+    else:
+        unmapped_components.append(f"{component_prefix}_norm")
+    return {
+        "copied_components": copied_components,
+        "direct_components": direct_components,
+        "resized_components": resized_components,
+        "unmapped_components": unmapped_components,
+        "conv_result": conv_result,
+    }
 
 
 def _transfer_teacher_stage_to_student_block(source_module: nn.Module, target_block, out_indices: list[int], in_indices: list[int]) -> dict:
     copied_components: list[str] = []
+    direct_components: list[str] = []
+    resized_components: list[str] = []
+    unmapped_components: list[str] = []
 
     if hasattr(source_module, "conv") and hasattr(source_module.conv, "block"):
         source_module = source_module.conv
 
     if hasattr(source_module, "block") and isinstance(source_module.block, nn.Sequential) and len(source_module.block) >= 2:
-        try:
-            _copy_double_conv_state(source_module, target_block.conv, out_indices, in_indices)
-            copied_components.extend(["double_conv_1", "double_conv_2", "norm_1", "norm_2"])
-        except Exception:
-            pass
+        first_result = _copy_source_convnorm_to_target(
+            "first",
+            source_module.block[0].block[0] if len(source_module.block[0].block) > 0 else None,
+            source_module.block[0].block[1] if len(source_module.block[0].block) > 1 else None,
+            target_block.conv.block[0],
+            out_indices,
+            in_indices,
+        )
+        copied_components.extend(first_result["copied_components"])
+        direct_components.extend(first_result["direct_components"])
+        resized_components.extend(first_result["resized_components"])
+        unmapped_components.extend(first_result["unmapped_components"])
+        second_result = _copy_source_convnorm_to_target(
+            "second",
+            source_module.block[1].block[0] if len(source_module.block[1].block) > 0 else None,
+            source_module.block[1].block[1] if len(source_module.block[1].block) > 1 else None,
+            target_block.conv.block[1],
+            out_indices,
+            out_indices,
+        )
+        copied_components.extend(second_result["copied_components"])
+        direct_components.extend(second_result["direct_components"])
+        resized_components.extend(second_result["resized_components"])
+        unmapped_components.extend(second_result["unmapped_components"])
     elif hasattr(source_module, "conv1") and hasattr(source_module, "conv2"):
         first_components = _copy_source_convnorm_to_target(
+            "first",
             getattr(source_module, "conv1", None),
             getattr(source_module, "bn1", None),
             target_block.conv.block[0],
             out_indices,
             in_indices,
         )
-        copied_components.extend(f"first_{name}" for name in first_components)
+        copied_components.extend(first_components["copied_components"])
+        direct_components.extend(first_components["direct_components"])
+        resized_components.extend(first_components["resized_components"])
+        unmapped_components.extend(first_components["unmapped_components"])
         source_conv2 = None
         source_norm2 = None
         if isinstance(getattr(source_module, "conv2", None), nn.Sequential):
@@ -520,55 +575,69 @@ def _transfer_teacher_stage_to_student_block(source_module: nn.Module, target_bl
             source_conv2 = source_module.conv2
             source_norm2 = getattr(source_module, "bn2", None)
         second_components = _copy_source_convnorm_to_target(
+            "second",
             source_conv2,
             source_norm2,
             target_block.conv.block[1],
             out_indices,
             out_indices,
         )
-        copied_components.extend(f"second_{name}" for name in second_components)
+        copied_components.extend(second_components["copied_components"])
+        direct_components.extend(second_components["direct_components"])
+        resized_components.extend(second_components["resized_components"])
+        unmapped_components.extend(second_components["unmapped_components"])
     else:
         source_convs = _collect_conv2d_layers(source_module)
         source_norms = _collect_norm_layers(source_module)
         first_components = _copy_source_convnorm_to_target(
+            "first",
             source_convs[0] if len(source_convs) >= 1 else None,
             source_norms[0] if len(source_norms) >= 1 else None,
             target_block.conv.block[0],
             out_indices,
             in_indices,
         )
-        copied_components.extend(f"first_{name}" for name in first_components)
+        copied_components.extend(first_components["copied_components"])
+        direct_components.extend(first_components["direct_components"])
+        resized_components.extend(first_components["resized_components"])
+        unmapped_components.extend(first_components["unmapped_components"])
         second_components = _copy_source_convnorm_to_target(
+            "second",
             source_convs[1] if len(source_convs) >= 2 else None,
             source_norms[1] if len(source_norms) >= 2 else None,
             target_block.conv.block[1],
             out_indices,
             out_indices,
         )
-        copied_components.extend(f"second_{name}" for name in second_components)
+        copied_components.extend(second_components["copied_components"])
+        direct_components.extend(second_components["direct_components"])
+        resized_components.extend(second_components["resized_components"])
+        unmapped_components.extend(second_components["unmapped_components"])
 
     return {
         "copied_components": copied_components,
+        "direct_components": direct_components,
+        "resized_components": resized_components,
+        "unmapped_components": unmapped_components,
         "copied": bool(copied_components),
     }
 
 
-def _copy_teacher_head_to_student_head(teacher_model, student_model: PDGUNet, stem_indices: list[int]) -> bool:
+def _copy_teacher_head_to_student_head(teacher_model, student_model: PDGUNet, stem_indices: list[int]) -> dict:
     source_head = getattr(teacher_model, "head", None)
     target_head = getattr(student_model, "head", None)
     if not isinstance(source_head, nn.Conv2d) or not isinstance(target_head, nn.Conv2d):
-        return False
+        return {"copied": False, "copy_mode": "unmapped", "reason": "missing_teacher_or_student_head"}
     out_indices = list(range(int(target_head.out_channels)))
     if int(source_head.out_channels) != int(target_head.out_channels):
-        return False
+        return {"copied": False, "copy_mode": "unmapped", "reason": "head_out_channels_mismatch"}
     if not stem_indices:
-        return False
+        return {"copied": False, "copy_mode": "unmapped", "reason": "empty_stem_indices"}
     if max(stem_indices) >= int(source_head.in_channels):
-        return False
+        return {"copied": False, "copy_mode": "unmapped", "reason": "stem_indices_exceed_teacher_head_channels"}
     if len(stem_indices) != int(target_head.in_channels):
-        return False
-    _copy_conv2d_state(source_head, target_head, out_indices, stem_indices)
-    return True
+        return {"copied": False, "copy_mode": "unmapped", "reason": "student_head_in_channels_mismatch"}
+    return _safe_copy_conv2d_state(source_head, target_head, out_indices, stem_indices)
 
 
 def _initialize_pruned_student_from_teacher(teacher_model, student_model: PDGUNet, blueprint: dict, *, input_channels: int) -> dict:
@@ -604,12 +673,18 @@ def _initialize_pruned_student_from_teacher(teacher_model, student_model: PDGUNe
             "teacher_kept_channels": int(len(kept_indices)),
             "student_out_channels": int(target_channels),
             "copied_components": [],
+            "direct_components": [],
+            "resized_components": [],
+            "unmapped_components": [],
             "status": "skipped",
         }
         source_module = teacher_modules.get(teacher_module_name) if teacher_module_name else None
         if source_module is not None:
             transfer_result = _transfer_teacher_stage_to_student_block(source_module, target_block, kept_indices, previous_indices)
             row["copied_components"] = list(transfer_result["copied_components"])
+            row["direct_components"] = list(transfer_result["direct_components"])
+            row["resized_components"] = list(transfer_result["resized_components"])
+            row["unmapped_components"] = list(transfer_result["unmapped_components"])
             if transfer_result["copied"]:
                 row["status"] = "channel_subset_reused"
                 transferred_stages += 1
@@ -636,7 +711,8 @@ def _initialize_pruned_student_from_teacher(teacher_model, student_model: PDGUNe
         "requested_stages": int(len(stage_names)),
         "stage_transfer_ratio": float(transferred_stages / max(1, len(stage_names))),
         "stage_transfer_rows": stage_transfer_rows,
-        "head_transfer_applied": bool(head_transfer),
+        "head_transfer_applied": bool(head_transfer.get("copied")),
+        "head_transfer": head_transfer,
         "gate_initialization": {
             "strategy": "force_open_after_teacher_subset_transfer",
             "open_probability": float(args.student_gate_open_value),
@@ -658,10 +734,25 @@ def _copy_norm_state(source_norm, target_norm, out_indices: list[int]) -> None:
         target_norm.running_var.data.copy_(source_norm.running_var.data.index_select(0, index).to(target_norm.running_var.device))
 
 
+def _resize_conv_weight_spatial(weight: torch.Tensor, target_hw: tuple[int, int]) -> torch.Tensor:
+    if tuple(int(value) for value in weight.shape[-2:]) == tuple(int(value) for value in target_hw):
+        return weight
+    out_channels, in_channels, kernel_h, kernel_w = weight.shape
+    resized = F.interpolate(
+        weight.reshape(out_channels * in_channels, 1, kernel_h, kernel_w),
+        size=tuple(int(value) for value in target_hw),
+        mode="bilinear",
+        align_corners=False,
+    )
+    return resized.reshape(out_channels, in_channels, int(target_hw[0]), int(target_hw[1]))
+
+
 def _copy_conv2d_state(source_conv, target_conv, out_indices: list[int], in_indices: list[int]) -> None:
     out_index = torch.as_tensor(out_indices, dtype=torch.long, device=source_conv.weight.device)
     in_index = torch.as_tensor(in_indices, dtype=torch.long, device=source_conv.weight.device)
     weight = source_conv.weight.data.index_select(0, out_index).index_select(1, in_index)
+    if tuple(int(value) for value in weight.shape[-2:]) != tuple(int(value) for value in target_conv.weight.shape[-2:]):
+        weight = _resize_conv_weight_spatial(weight, tuple(int(value) for value in target_conv.weight.shape[-2:]))
     target_conv.weight.data.copy_(weight.to(target_conv.weight.device))
     if source_conv.bias is not None and target_conv.bias is not None:
         target_conv.bias.data.copy_(source_conv.bias.data.index_select(0, out_index).to(target_conv.bias.device))
@@ -1448,12 +1539,21 @@ def _run_pruning(device: torch.device, image_mode: str, db_train, teacher_artifa
     )
     for row in weight_transfer.get("stage_transfer_rows", []):
         logging.info(
-            "Step-2 stage reuse | student_stage=%s | teacher_module=%s | status=%s | copied=%s",
+            "Step-2 stage reuse | student_stage=%s | teacher_module=%s | status=%s | direct=%s | resized=%s | unmapped=%s",
             row.get("student_stage"),
             row.get("teacher_module"),
             row.get("status"),
-            ",".join(row.get("copied_components", [])) if row.get("copied_components") else "none",
+            ",".join(row.get("direct_components", [])) if row.get("direct_components") else "none",
+            ",".join(row.get("resized_components", [])) if row.get("resized_components") else "none",
+            ",".join(row.get("unmapped_components", [])) if row.get("unmapped_components") else "none",
         )
+    head_transfer = weight_transfer.get("head_transfer", {})
+    logging.info(
+        "Step-2 head reuse | status=%s | mode=%s | reason=%s",
+        "copied" if head_transfer.get("copied") else "unmapped",
+        head_transfer.get("copy_mode", "unmapped"),
+        head_transfer.get("reason", ""),
+    )
     pruning_model_info = extract_model_info(pruned_student)
     pruning_model_info.update(
         {
