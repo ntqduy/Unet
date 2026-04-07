@@ -1367,62 +1367,92 @@ def _run_teacher(device: torch.device, image_mode: str, db_train, trainloader, v
     if not bool(args.force_retrain_teacher):
         explicit_match = None
         if args.teacher_checkpoint:
-            explicit_match = find_compatible_checkpoint(
-                [Path(args.teacher_checkpoint).expanduser().resolve()],
-                expected_signature=teacher_signature,
-            )
-            if explicit_match is None:
-                logging.warning("Ignore explicit teacher checkpoint because it is not compatible: %s", args.teacher_checkpoint)
+            explicit_checkpoint_path = Path(args.teacher_checkpoint).expanduser()
+            if not explicit_checkpoint_path.is_absolute():
+                explicit_checkpoint_path = (PROJECT_ROOT / explicit_checkpoint_path).resolve()
+            else:
+                explicit_checkpoint_path = explicit_checkpoint_path.resolve()
 
-        proposal_match = explicit_match or resolve_run_checkpoint(run_dir, expected_signature=teacher_signature)
-        if proposal_match is not None:
-            proposal_checkpoint_path = Path(proposal_match["checkpoint_path"])
+            if not explicit_checkpoint_path.is_file():
+                logging.warning("Ignore explicit teacher checkpoint because the file does not exist: %s", args.teacher_checkpoint)
+            else:
+                explicit_match = find_compatible_checkpoint(
+                    [explicit_checkpoint_path],
+                    expected_signature=teacher_signature,
+                )
+                if explicit_match is None:
+                    logging.warning("Ignore explicit teacher checkpoint because it is not compatible: %s", args.teacher_checkpoint)
+
+        if explicit_match is not None:
+            explicit_checkpoint_path = Path(explicit_match["checkpoint_path"])
             try:
-                proposal_checkpoint_path.resolve().relative_to(run_dir.resolve())
-                best_path = proposal_checkpoint_path
+                explicit_checkpoint_path.resolve().relative_to(run_dir.resolve())
+                best_path = explicit_checkpoint_path
             except ValueError:
                 copied = register_reused_checkpoint(
-                    source_checkpoint_path=proposal_checkpoint_path,
+                    source_checkpoint_path=explicit_checkpoint_path,
                     target_run_dir=run_dir,
                     project_root=PROJECT_ROOT,
-                    source_branch="external",
-                    source_run_dir=proposal_checkpoint_path.parent.parent if proposal_checkpoint_path.parent.name == "checkpoints" else proposal_checkpoint_path.parent,
+                    source_branch="explicit",
+                    source_run_dir=explicit_checkpoint_path.parent.parent if explicit_checkpoint_path.parent.name == "checkpoints" else explicit_checkpoint_path.parent,
                     payload_updates={"phase": "teacher"},
                 )
                 best_path = Path(copied["best"]["checkpoint_path"])
-                reused_from = "external"
             payload = load_checkpoint_into_model(best_path, model, device=device)
             history = payload.get("extra_state", {}).get("history", {})
             model_info.update(payload.get("model_info", {}))
-            reused_from = reused_from or "proposal"
-            logging.info("Loaded teacher checkpoint from %s: %s", reused_from, project_relative_path(best_path, PROJECT_ROOT))
+            reused_from = "explicit"
+            logging.info("Loaded teacher checkpoint from explicit --teacher_checkpoint: %s", project_relative_path(best_path, PROJECT_ROOT))
         else:
-            basic_match = resolve_basic_checkpoint(
-                project_root=PROJECT_ROOT,
-                output_root=args.output_root or None,
-                model_name=args.teacher_model,
-                dataset=args.dataset,
-                expected_signature=teacher_signature,
-            )
-            if basic_match is not None:
-                source_checkpoint_path = Path(basic_match["checkpoint_path"])
-                copied = register_reused_checkpoint(
-                    source_checkpoint_path=source_checkpoint_path,
-                    target_run_dir=run_dir,
-                    project_root=PROJECT_ROOT,
-                    source_branch="basic",
-                    source_run_dir=basic_match.get("run_dir"),
-                    payload_updates={"phase": "teacher"},
-                )
-                best_path = Path(copied["best"]["checkpoint_path"])
+            proposal_match = resolve_run_checkpoint(run_dir, expected_signature=teacher_signature)
+            if proposal_match is not None:
+                proposal_checkpoint_path = Path(proposal_match["checkpoint_path"])
+                try:
+                    proposal_checkpoint_path.resolve().relative_to(run_dir.resolve())
+                    best_path = proposal_checkpoint_path
+                except ValueError:
+                    copied = register_reused_checkpoint(
+                        source_checkpoint_path=proposal_checkpoint_path,
+                        target_run_dir=run_dir,
+                        project_root=PROJECT_ROOT,
+                        source_branch="external",
+                        source_run_dir=proposal_checkpoint_path.parent.parent if proposal_checkpoint_path.parent.name == "checkpoints" else proposal_checkpoint_path.parent,
+                        payload_updates={"phase": "teacher"},
+                    )
+                    best_path = Path(copied["best"]["checkpoint_path"])
+                    reused_from = "external"
                 payload = load_checkpoint_into_model(best_path, model, device=device)
                 history = payload.get("extra_state", {}).get("history", {})
                 model_info.update(payload.get("model_info", {}))
-                reused_from = "basic"
-                logging.info(
-                    "Reused teacher checkpoint from basic branch and registered it under proposal outputs: %s",
-                    project_relative_path(source_checkpoint_path, PROJECT_ROOT),
+                reused_from = reused_from or "proposal"
+                logging.info("Loaded teacher checkpoint from %s: %s", reused_from, project_relative_path(best_path, PROJECT_ROOT))
+            else:
+                basic_match = resolve_basic_checkpoint(
+                    project_root=PROJECT_ROOT,
+                    output_root=args.output_root or None,
+                    model_name=args.teacher_model,
+                    dataset=args.dataset,
+                    expected_signature=teacher_signature,
                 )
+                if basic_match is not None:
+                    source_checkpoint_path = Path(basic_match["checkpoint_path"])
+                    copied = register_reused_checkpoint(
+                        source_checkpoint_path=source_checkpoint_path,
+                        target_run_dir=run_dir,
+                        project_root=PROJECT_ROOT,
+                        source_branch="basic",
+                        source_run_dir=basic_match.get("run_dir"),
+                        payload_updates={"phase": "teacher"},
+                    )
+                    best_path = Path(copied["best"]["checkpoint_path"])
+                    payload = load_checkpoint_into_model(best_path, model, device=device)
+                    history = payload.get("extra_state", {}).get("history", {})
+                    model_info.update(payload.get("model_info", {}))
+                    reused_from = "basic"
+                    logging.info(
+                        "Reused teacher checkpoint from basic branch and registered it under proposal outputs: %s",
+                        project_relative_path(source_checkpoint_path, PROJECT_ROOT),
+                    )
 
     if best_path is None:
         ce_loss = CrossEntropyLoss()

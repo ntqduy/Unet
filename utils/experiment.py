@@ -65,8 +65,8 @@ def build_run_dir(
     model_tag = sanitize_tag(model_name)
     variant_tag = sanitize_tag(variant) if variant else None
 
-    if model_tag == "pdg_unet" and phase_tag.startswith("_"):
-        run_dir = output_root_path / model_tag / phase_tag
+    if model_tag in {"pdg_unet", "pgd_unet"} and phase_tag.startswith("_"):
+        run_dir = output_root_path / "pgd_unet" / phase_tag
         if variant_tag:
             run_dir = run_dir / variant_tag
         run_dir = run_dir / dataset_tag
@@ -100,7 +100,7 @@ def build_pdg_root_dir(
     output_root: Path | str | None = None,
 ) -> Path:
     output_root_path = resolve_output_root(project_root, output_root)
-    return output_root_path / "pdg_unet" / sanitize_tag(dataset) / build_pdg_teacher_tag(teacher_name)
+    return output_root_path / "pgd_unet" / sanitize_tag(dataset) / build_pdg_teacher_tag(teacher_name)
 
 
 def build_pdg_phase_dir(

@@ -3,7 +3,7 @@
 Codebase PyTorch cho bài toán medical image segmentation 2D, được tổ chức theo 2 nhánh rõ ràng:
 
 - `basic branch`: train và benchmark các baseline như `unet`, `unet_resnet152`, `resunet`, `vnet`, `unetr`
-- `proposal branch`: pipeline cho `pdg_unet` gồm `teacher -> pruning -> student`
+- `proposal branch`: pipeline cho `pdg_unet` gồm `teacher -> pruning -> student`, với output chuẩn nằm dưới `outputs/pgd_unet/...`
 
 Mục tiêu của repo là chuẩn hóa:
 
@@ -171,8 +171,8 @@ Lưu ý:
 
 Khi cần teacher checkpoint, `train_pgd.py` sẽ check theo thứ tự:
 
-1. `outputs/pdg_unet/<dataset>/<teacher>_teacher/1_teacher/checkpoints/`
-2. explicit `--teacher_checkpoint` nếu có
+1. explicit `--teacher_checkpoint` nếu có truyền vào
+2. `outputs/pgd_unet/<dataset>/<teacher>_teacher/1_teacher/checkpoints/`
 3. `outputs/<teacher_model>/<dataset>/checkpoints/`
 
 Nếu reuse từ `basic branch`, checkpoint sẽ được register lại vào `1_teacher/checkpoints/` để output proposal luôn đầy đủ và dễ đọc.
@@ -203,7 +203,7 @@ Khi đó `train_pgd.py` sẽ:
 
 - tìm teacher checkpoint trong `outputs/unet_resnet152/cvc/checkpoints/`
 - load lại weight đó
-- register/copy checkpoint vào `outputs/pdg_unet/cvc/unet_resnet152_teacher/1_teacher/checkpoints/`
+- register/copy checkpoint vào `outputs/pgd_unet/cvc/unet_resnet152_teacher/1_teacher/checkpoints/`
 - skip teacher training nếu checkpoint compatible
 
 #### Cách 2: chỉ định trực tiếp teacher checkpoint
@@ -214,7 +214,7 @@ Bạn cũng có thể chỉ định thẳng một checkpoint đã có:
 python train_pgd.py --dataset cvc --root_path data/CVC-ClinicDB --teacher_model unet_resnet152 --teacher_checkpoint outputs/unet_resnet152/cvc/checkpoints/best.pth --encoder_pretrained 1 --max_epochs_student 100 --prune_ratio 0.5
 ```
 
-Repo sẽ kiểm tra compatibility của checkpoint này trước khi dùng. Nếu không tương thích, checkpoint sẽ bị bỏ qua và pipeline sẽ tiếp tục check các nguồn còn lại.
+Repo sẽ kiểm tra compatibility của checkpoint này trước khi dùng. Nếu checkpoint này tồn tại và compatible, nó sẽ được ưu tiên dùng trước proposal outputs và basic outputs. Nếu checkpoint không tồn tại hoặc không tương thích, pipeline mới tiếp tục check các nguồn còn lại.
 
 #### Khi nào proposal sẽ train lại teacher?
 
@@ -456,7 +456,7 @@ outputs/<model_name>/<dataset>/
 ### 9.2 Proposal branch
 
 ```text
-outputs/pdg_unet/<dataset>/<teacher_model>_teacher/
+outputs/pgd_unet/<dataset>/<teacher_model>_teacher/
 ├─ 1_teacher/
 ├─ 2_pruning/
 ├─ 3_student/
@@ -632,13 +632,13 @@ thành một report thống nhất.
 ### Ví dụ dùng pipeline summary
 
 ```bash
-python compare_artifacts.py --basic_run_dir outputs/<basic_model>/<dataset> --pipeline_dir outputs/pdg_unet/<dataset>/<teacher_model>_teacher/pipeline --comparison_name <report_name>
+python compare_artifacts.py --basic_run_dir outputs/<basic_model>/<dataset> --pipeline_dir outputs/pgd_unet/<dataset>/<teacher_model>_teacher/pipeline --comparison_name <report_name>
 ```
 
 ### Ví dụ chỉ định từng phase
 
 ```bash
-python compare_artifacts.py --basic_run_dir outputs/<basic_model>/<dataset> --teacher_run_dir outputs/pdg_unet/<dataset>/<teacher_model>_teacher/1_teacher --pruning_run_dir outputs/pdg_unet/<dataset>/<teacher_model>_teacher/2_pruning --student_run_dir outputs/pdg_unet/<dataset>/<teacher_model>_teacher/3_student --output_dir outputs/comparisons/<report_name>
+python compare_artifacts.py --basic_run_dir outputs/<basic_model>/<dataset> --teacher_run_dir outputs/pgd_unet/<dataset>/<teacher_model>_teacher/1_teacher --pruning_run_dir outputs/pgd_unet/<dataset>/<teacher_model>_teacher/2_pruning --student_run_dir outputs/pgd_unet/<dataset>/<teacher_model>_teacher/3_student --output_dir outputs/comparisons/<report_name>
 ```
 
 Script sẽ sinh:
