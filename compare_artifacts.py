@@ -37,6 +37,27 @@ def sanitize_tag(value: object) -> str:
     return text.strip("._-") or "unknown"
 
 
+def _project_relative_path(path_value: Path | str | None) -> str:
+    if path_value in (None, ""):
+        return ""
+    path = Path(path_value).expanduser()
+    if not path.is_absolute():
+        return path.as_posix()
+    try:
+        return path.resolve().relative_to(PROJECT_ROOT.resolve()).as_posix()
+    except ValueError:
+        return path.as_posix()
+
+
+def _resolve_from_project(path_value: Path | str | None) -> Optional[Path]:
+    if path_value in (None, ""):
+        return None
+    path = Path(path_value).expanduser()
+    if path.is_absolute():
+        return path.resolve()
+    return (PROJECT_ROOT / path).resolve()
+
+
 def _read_json(path: Path) -> Dict[str, Any]:
     with path.open("r", encoding="utf-8") as file:
         payload = json.load(file)
@@ -125,7 +146,7 @@ def _normalize_metrics_rows(stage: str, run_dir: Path, rows: Sequence[Mapping[st
         resolved["stage"] = stage
         resolved["stage_label"] = STAGE_LABELS[stage]
         resolved["stage_order"] = STAGE_ORDER[stage]
-        resolved["run_dir"] = str(run_dir.resolve())
+        resolved["run_dir"] = _project_relative_path(run_dir)
         split = str(resolved.get("split", ""))
         resolved["split_order"] = SPLIT_ORDER.get(split, 99)
         for key in (
@@ -162,7 +183,7 @@ def _stage_overview_row(
         "stage": stage,
         "stage_label": STAGE_LABELS[stage],
         "stage_order": STAGE_ORDER[stage],
-        "run_dir": str(run_dir.resolve()),
+        "run_dir": _project_relative_path(run_dir),
         "branch": model_info.get("branch"),
         "model_name": model_info.get("model_name"),
         "backbone_name": model_info.get("backbone_name"),
@@ -217,9 +238,9 @@ def _load_basic_stage(run_dir: Path) -> Dict[str, Any]:
         "overview_row": overview_row,
         "channel_analysis": channel_analysis,
         "source_files": {
-            "metrics_csv": str(metrics_path.resolve()) if metrics_path.is_file() else None,
-            "channel_analysis_json": str(channel_analysis_path.resolve()) if channel_analysis_path.is_file() else None,
-            "model_config_json": str(model_config_path.resolve()) if model_config_path.is_file() else None,
+            "metrics_csv": _project_relative_path(metrics_path) if metrics_path.is_file() else None,
+            "channel_analysis_json": _project_relative_path(channel_analysis_path) if channel_analysis_path.is_file() else None,
+            "model_config_json": _project_relative_path(model_config_path) if model_config_path.is_file() else None,
         },
     }
 
@@ -249,9 +270,9 @@ def _load_teacher_stage(run_dir: Path) -> Dict[str, Any]:
         "overview_row": overview_row,
         "channel_analysis": channel_analysis,
         "source_files": {
-            "metrics_csv": str(metrics_path.resolve()) if metrics_path.is_file() else None,
-            "channel_analysis_json": str(channel_analysis_path.resolve()) if channel_analysis_path.is_file() else None,
-            "model_config_json": str(model_config_path.resolve()) if model_config_path.is_file() else None,
+            "metrics_csv": _project_relative_path(metrics_path) if metrics_path.is_file() else None,
+            "channel_analysis_json": _project_relative_path(channel_analysis_path) if channel_analysis_path.is_file() else None,
+            "model_config_json": _project_relative_path(model_config_path) if model_config_path.is_file() else None,
         },
     }
 
@@ -302,10 +323,10 @@ def _load_pruned_stage(run_dir: Path) -> Dict[str, Any]:
         "teacher_vs_student_rows": teacher_vs_student_rows,
         "pruning_global_summary": pruning_global_summary,
         "source_files": {
-            "blueprint_json": str(blueprint_path.resolve()) if blueprint_path and blueprint_path.is_file() else None,
-            "pruning_analysis_json": str(pruning_report_path.resolve()) if pruning_report_path.is_file() else None,
-            "teacher_vs_student_csv": str(teacher_vs_student_path.resolve()) if teacher_vs_student_path.is_file() else None,
-            "global_pruning_summary_csv": str(pruning_global_summary_path.resolve()) if pruning_global_summary_path.is_file() else None,
+            "blueprint_json": _project_relative_path(blueprint_path) if blueprint_path and blueprint_path.is_file() else None,
+            "pruning_analysis_json": _project_relative_path(pruning_report_path) if pruning_report_path.is_file() else None,
+            "teacher_vs_student_csv": _project_relative_path(teacher_vs_student_path) if teacher_vs_student_path.is_file() else None,
+            "global_pruning_summary_csv": _project_relative_path(pruning_global_summary_path) if pruning_global_summary_path.is_file() else None,
         },
     }
 
@@ -347,30 +368,30 @@ def _load_tuned_student_stage(run_dir: Path) -> Dict[str, Any]:
         "final_channel_analysis": final_channel_analysis,
         "student_tuning_rows": student_tuning_rows,
         "source_files": {
-            "metrics_csv": str(metrics_path.resolve()) if metrics_path.is_file() else None,
-            "student_input_channel_analysis_json": str(input_channel_analysis_path.resolve()) if input_channel_analysis_path.is_file() else None,
-            "student_final_channel_analysis_json": str(final_channel_analysis_path.resolve()) if final_channel_analysis_path.is_file() else None,
-            "student_tuning_comparison_csv": str(student_tuning_comparison_path.resolve()) if student_tuning_comparison_path.is_file() else None,
-            "model_config_json": str(model_config_path.resolve()) if model_config_path.is_file() else None,
+            "metrics_csv": _project_relative_path(metrics_path) if metrics_path.is_file() else None,
+            "student_input_channel_analysis_json": _project_relative_path(input_channel_analysis_path) if input_channel_analysis_path.is_file() else None,
+            "student_final_channel_analysis_json": _project_relative_path(final_channel_analysis_path) if final_channel_analysis_path.is_file() else None,
+            "student_tuning_comparison_csv": _project_relative_path(student_tuning_comparison_path) if student_tuning_comparison_path.is_file() else None,
+            "model_config_json": _project_relative_path(model_config_path) if model_config_path.is_file() else None,
         },
     }
 
 
 def _resolve_dirs(args: argparse.Namespace) -> Dict[str, Optional[Path]]:
-    basic_run_dir = Path(args.basic_run_dir).expanduser().resolve() if args.basic_run_dir else None
-    teacher_run_dir = Path(args.teacher_run_dir).expanduser().resolve() if args.teacher_run_dir else None
-    pruning_run_dir = Path(args.pruning_run_dir).expanduser().resolve() if args.pruning_run_dir else None
-    student_run_dir = Path(args.student_run_dir).expanduser().resolve() if args.student_run_dir else None
-    pipeline_dir = Path(args.pipeline_dir).expanduser().resolve() if args.pipeline_dir else None
+    basic_run_dir = _resolve_from_project(args.basic_run_dir)
+    teacher_run_dir = _resolve_from_project(args.teacher_run_dir)
+    pruning_run_dir = _resolve_from_project(args.pruning_run_dir)
+    student_run_dir = _resolve_from_project(args.student_run_dir)
+    pipeline_dir = _resolve_from_project(args.pipeline_dir)
 
     if pipeline_dir:
         pipeline_summary_path = pipeline_dir / "pipeline_summary.json"
         if not pipeline_summary_path.is_file():
             raise FileNotFoundError(f"Missing pipeline summary: {pipeline_summary_path}")
         pipeline_summary = _read_json(pipeline_summary_path)
-        teacher_run_dir = teacher_run_dir or Path(pipeline_summary["teacher_run_dir"]).expanduser().resolve()
-        pruning_run_dir = pruning_run_dir or Path(pipeline_summary["pruning_run_dir"]).expanduser().resolve()
-        student_run_dir = student_run_dir or Path(pipeline_summary["student_run_dir"]).expanduser().resolve()
+        teacher_run_dir = teacher_run_dir or _resolve_from_project(pipeline_summary["teacher_run_dir"])
+        pruning_run_dir = pruning_run_dir or _resolve_from_project(pipeline_summary["pruning_run_dir"])
+        student_run_dir = student_run_dir or _resolve_from_project(pipeline_summary["student_run_dir"])
 
     return {
         "basic_run_dir": basic_run_dir,
@@ -570,7 +591,7 @@ def build_report(args: argparse.Namespace) -> Dict[str, Any]:
     resolved_inputs = [
         {
             "input_name": key,
-            "path": str(path.resolve()) if path is not None else "",
+            "path": _project_relative_path(path),
             "exists": int(path is not None and path.exists()),
         }
         for key, path in resolved_dirs.items()

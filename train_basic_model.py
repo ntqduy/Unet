@@ -27,10 +27,10 @@ from utils.evaluation import (
     evaluate_segmentation_dataset,
     save_evaluation_artifacts,
 )
-from utils.experiment import build_run_dir, ensure_run_layout, sanitize_tag, write_model_config, write_run_config
+from utils.experiment import build_run_dir, ensure_run_layout, normalize_path_string, project_relative_path, sanitize_tag, write_model_config, write_run_config
 from utils.model_output import extract_logits, extract_model_info
 from utils.profiling import benchmark_inference, count_parameters, maybe_compute_flops
-from utils.reporting import save_loss_pdf, save_performance_pdf, save_visualization_pdf, write_metrics_rows
+from utils.reporting import save_loss_pdf, save_performance_pdf, save_visualization_overview_image, save_visualization_pdf, write_metrics_rows
 from utils.visualization import save_triplet_visualization
 
 
@@ -144,7 +144,7 @@ def _build_evaluation_metadata(split: str, checkpoint_path: Path, model_info: di
     return {
         "experiment": args.exp,
         "dataset": args.dataset,
-        "dataset_root": str(Path(args.root_path).expanduser().resolve()),
+        "dataset_root": normalize_path_string(args.root_path),
         "split": split,
         "model": args.model,
         "architecture": args.model,
@@ -155,7 +155,7 @@ def _build_evaluation_metadata(split: str, checkpoint_path: Path, model_info: di
         "in_channels": args.in_channels,
         "patch_size": list(args.patch_size),
         "checkpoint_name": checkpoint_path.name,
-        "checkpoint_path": str(checkpoint_path.resolve()),
+        "checkpoint_path": project_relative_path(checkpoint_path, PROJECT_ROOT),
     }
 
 
@@ -167,11 +167,11 @@ def _write_evaluation_overview(snapshot_path: Path, checkpoint_path: Path, split
     overview = {
         "experiment": args.exp,
         "dataset": args.dataset,
-        "dataset_root": str(Path(args.root_path).expanduser().resolve()),
+        "dataset_root": normalize_path_string(args.root_path),
         "model": args.model,
         "model_info": model_info or get_model_metadata(args.model),
         "checkpoint_name": checkpoint_path.name,
-        "checkpoint_path": str(checkpoint_path.resolve()),
+        "checkpoint_path": project_relative_path(checkpoint_path, PROJECT_ROOT),
         "splits": split_summaries,
     }
     _write_json(checkpoint_root / "evaluation_overview.json", overview)
@@ -180,9 +180,9 @@ def _write_evaluation_overview(snapshot_path: Path, checkpoint_path: Path, split
         f"# Final Evaluation Overview | {args.dataset} | {args.model}",
         "",
         f"- Experiment: `{args.exp}`",
-        f"- Dataset root: `{Path(args.root_path).expanduser().resolve()}`",
+        f"- Dataset root: `{normalize_path_string(args.root_path)}`",
         f"- Checkpoint: `{checkpoint_path.name}`",
-        f"- Checkpoint path: `{checkpoint_path.resolve()}`",
+        f"- Checkpoint path: `{project_relative_path(checkpoint_path, PROJECT_ROOT)}`",
         "",
         "## Splits",
         "",
@@ -253,7 +253,7 @@ def run_validation(args, model, valloader, device, ce_loss):
 
 
 def _run_final_evaluations(snapshot_path: Path, checkpoint_path: Path, model, device, image_mode: str, profile: dict, model_info: dict) -> None:
-    logging.info("Running final evaluation with best checkpoint: %s", checkpoint_path)
+    logging.info("Running final evaluation with best checkpoint: %s", project_relative_path(checkpoint_path, PROJECT_ROOT))
     load_checkpoint_into_model(checkpoint_path, model, device=device)
     model.eval()
 
@@ -294,6 +294,7 @@ def _run_final_evaluations(snapshot_path: Path, checkpoint_path: Path, model, de
             _build_evaluation_metadata(split, checkpoint_path, model_info=model_info),
             result["average_metric"],
             result["case_metrics"],
+            project_root=PROJECT_ROOT,
         )
         split_summaries[split] = summary
         macro = summary["metrics"]["macro_mean"]
@@ -315,7 +316,7 @@ def _run_final_evaluations(snapshot_path: Path, checkpoint_path: Path, model, de
                 "fps": profile.get("fps"),
                 "inference_time_seconds": profile.get("inference_time_seconds"),
                 "evaluation_time_seconds": elapsed,
-                "checkpoint_path": str(checkpoint_path.resolve()),
+                "checkpoint_path": project_relative_path(checkpoint_path, PROJECT_ROOT),
             }
         )
         logging.info(
@@ -332,6 +333,10 @@ def _run_final_evaluations(snapshot_path: Path, checkpoint_path: Path, model, de
                 result["visualization_samples"],
                 snapshot_path / "reports" / f"basic_{split}_visualizations.pdf",
                 title=f"basic | {split}",
+            )
+            save_visualization_overview_image(
+                result["visualization_samples"],
+                snapshot_path / "artifacts" / "visualizations" / f"basic_{split}_visualizations.png",
             )
 
     _write_evaluation_overview(snapshot_path, checkpoint_path, split_summaries, model_info)
@@ -474,11 +479,12 @@ def train(args, snapshot_path):
             extra_state={"history": history},
             is_best=is_best,
             save_tagged_checkpoint=bool(args.save_history_checkpoints),
+            project_root=PROJECT_ROOT,
         )
 
         if is_best:
             best_checkpoint_path = checkpoint_path
-            logging.info("Updated best checkpoint: %s", checkpoint_path)
+            logging.info("Updated best checkpoint: %s", project_relative_path(checkpoint_path, PROJECT_ROOT))
             if args.save_visualizations and vis_samples:
                 vis_dir = build_evaluation_output_dir(snapshot_path, args.dataset, args.model, checkpoint_path, args.val_split)
                 save_validation_visualizations(vis_samples, vis_dir)
@@ -591,9 +597,10 @@ def train(args, snapshot_path):
             extra_state={"history": history},
             is_best=True,
             save_tagged_checkpoint=bool(args.save_history_checkpoints),
+            project_root=PROJECT_ROOT,
         )
         best_checkpoint_path = fallback_checkpoint_path
-        logging.warning("No validation checkpoint was selected; using the last model state at %s", fallback_checkpoint_path)
+        logging.warning("No validation checkpoint was selected; using the last model state at %s", project_relative_path(fallback_checkpoint_path, PROJECT_ROOT))
 
     save_loss_pdf(history, Path(snapshot_path) / "reports" / "basic_loss.pdf", title="Basic model loss")
     _run_final_evaluations(Path(snapshot_path), best_checkpoint_path, model, device, image_mode, _compute_model_profile(model, device), model_info)

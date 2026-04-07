@@ -17,7 +17,7 @@ from utils.evaluation import (
     sanitize_tag,
     save_evaluation_artifacts,
 )
-from utils.experiment import build_run_dir
+from utils.experiment import build_run_dir, normalize_path_string, project_relative_path
 
 
 PROJECT_ROOT = Path(__file__).resolve().parent
@@ -60,7 +60,7 @@ def _resolve_checkpoint_path(snapshot_path: Path) -> Path:
     if manifest_path.is_file():
         with manifest_path.open("r", encoding="utf-8") as file:
             manifest = json.load(file)
-        candidate = Path(manifest.get("checkpoint_path", "")).expanduser()
+        candidate = (PROJECT_ROOT / manifest.get("checkpoint_path", "")).expanduser()
         if candidate.is_file():
             return candidate.resolve()
 
@@ -68,7 +68,7 @@ def _resolve_checkpoint_path(snapshot_path: Path) -> Path:
     if legacy_manifest_path.is_file():
         with legacy_manifest_path.open("r", encoding="utf-8") as file:
             manifest = json.load(file)
-        candidate = Path(manifest.get("checkpoint_path", "")).expanduser()
+        candidate = (PROJECT_ROOT / manifest.get("checkpoint_path", "")).expanduser()
         if candidate.is_file():
             return candidate.resolve()
 
@@ -96,7 +96,7 @@ def _build_summary_metadata(split: str, checkpoint_path: Path, model_info: dict 
     return {
         "experiment": FLAGS.exp,
         "dataset": FLAGS.dataset,
-        "dataset_root": str(Path(FLAGS.root_path).expanduser().resolve()),
+        "dataset_root": normalize_path_string(FLAGS.root_path),
         "split": split,
         "model": FLAGS.model,
         "architecture": FLAGS.model,
@@ -108,7 +108,7 @@ def _build_summary_metadata(split: str, checkpoint_path: Path, model_info: dict 
         "patch_size": list(FLAGS.patch_size),
         "checkpoint_name": checkpoint_path.name,
         "checkpoint_label": checkpoint_label(checkpoint_path),
-        "checkpoint_path": str(checkpoint_path),
+        "checkpoint_path": project_relative_path(checkpoint_path, PROJECT_ROOT),
     }
 
 
@@ -116,7 +116,7 @@ def _write_overview(checkpoint_root: Path, split_summaries: dict) -> None:
     overview = {
         "experiment": FLAGS.exp,
         "dataset": FLAGS.dataset,
-        "dataset_root": str(Path(FLAGS.root_path).expanduser().resolve()),
+        "dataset_root": normalize_path_string(FLAGS.root_path),
         "model": FLAGS.model,
         "checkpoint_name": next(iter(split_summaries.values()))["checkpoint_name"],
         "checkpoint_path": next(iter(split_summaries.values()))["checkpoint_path"],
@@ -129,7 +129,7 @@ def _write_overview(checkpoint_root: Path, split_summaries: dict) -> None:
         f"# Evaluation Overview | {FLAGS.dataset} | {FLAGS.model}",
         "",
         f"- Experiment: `{FLAGS.exp}`",
-        f"- Dataset root: `{Path(FLAGS.root_path).expanduser().resolve()}`",
+        f"- Dataset root: `{normalize_path_string(FLAGS.root_path)}`",
         f"- Checkpoint: `{overview['checkpoint_name']}`",
         f"- Checkpoint path: `{overview['checkpoint_path']}`",
         "",
@@ -213,6 +213,7 @@ def test_calculate_metric():
             _build_summary_metadata(split, checkpoint_path, model_info=checkpoint_model_info),
             result["average_metric"],
             result["case_metrics"],
+            project_root=PROJECT_ROOT,
         )
         split_summaries[split] = summary
         macro_mean = summary["metrics"]["macro_mean"]

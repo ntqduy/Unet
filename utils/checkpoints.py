@@ -5,6 +5,7 @@ from pathlib import Path
 from typing import Any, Dict, Optional
 
 import torch
+from utils.experiment import project_relative_path
 from utils.model_output import extract_model_info
 
 
@@ -85,9 +86,14 @@ def build_checkpoint_payload(
     return payload
 
 
-def _write_metadata(metadata_path: Path, payload: Dict[str, Any], checkpoint_path: Path) -> Dict[str, Any]:
+def _write_metadata(metadata_path: Path, payload: Dict[str, Any], checkpoint_path: Path, project_root: Path | str | None = None) -> Dict[str, Any]:
+    checkpoint_path_value = (
+        project_relative_path(checkpoint_path, project_root)
+        if project_root is not None
+        else str(checkpoint_path)
+    )
     metadata = {
-        "checkpoint_path": str(checkpoint_path.resolve()),
+        "checkpoint_path": checkpoint_path_value,
         "checkpoint_name": checkpoint_path.name,
         "epoch": payload.get("epoch"),
         "global_step": payload.get("global_step"),
@@ -121,6 +127,7 @@ def save_checkpoint(
     extra_state: Optional[Dict[str, Any]] = None,
     is_best: bool = False,
     save_tagged_checkpoint: bool = False,
+    project_root: Path | str | None = None,
 ) -> Path:
     layout = ensure_checkpoint_layout(run_dir)
     payload = build_checkpoint_payload(
@@ -139,18 +146,18 @@ def save_checkpoint(
     )
     last_checkpoint_path = layout["checkpoint_dir"] / "last.pth"
     torch.save(payload, last_checkpoint_path)
-    _write_metadata(layout["metadata_dir"] / "last.json", payload, last_checkpoint_path)
+    _write_metadata(layout["metadata_dir"] / "last.json", payload, last_checkpoint_path, project_root=project_root)
 
     if save_tagged_checkpoint and tag not in {"last", "best"}:
         checkpoint_path = layout["checkpoint_dir"] / f"{tag}.pth"
         torch.save(payload, checkpoint_path)
-        _write_metadata(layout["metadata_dir"] / f"{tag}.json", payload, checkpoint_path)
+        _write_metadata(layout["metadata_dir"] / f"{tag}.json", payload, checkpoint_path, project_root=project_root)
 
     return_path = last_checkpoint_path
     if is_best:
         best_checkpoint_path = layout["checkpoint_dir"] / "best.pth"
         torch.save(payload, best_checkpoint_path)
-        _write_metadata(layout["metadata_dir"] / "best.json", payload, best_checkpoint_path)
+        _write_metadata(layout["metadata_dir"] / "best.json", payload, best_checkpoint_path, project_root=project_root)
         return_path = best_checkpoint_path
 
     return return_path

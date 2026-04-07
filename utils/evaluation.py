@@ -10,6 +10,7 @@ import numpy as np
 import torch
 from tqdm import tqdm
 
+from utils.experiment import project_relative_path
 from utils.val_2d import test_single_volume
 from utils.visualization import save_triplet_visualization
 
@@ -214,13 +215,29 @@ def _summary_to_markdown(summary: Dict) -> str:
     return "\n".join(lines)
 
 
-def save_evaluation_artifacts(output_dir: Path | str, metadata: Dict, average_metric: np.ndarray, case_metrics: List[Dict]) -> Dict:
+def save_evaluation_artifacts(
+    output_dir: Path | str,
+    metadata: Dict,
+    average_metric: np.ndarray,
+    case_metrics: List[Dict],
+    *,
+    project_root: Path | str | None = None,
+) -> Dict:
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
 
     csv_path = _write_case_metrics_csv(case_metrics, output_dir)
     summary = build_evaluation_summary(metadata, average_metric, case_metrics)
-    summary["case_metrics_file"] = str(csv_path)
+    summary["case_metrics_file"] = (
+        project_relative_path(csv_path, project_root)
+        if project_root is not None
+        else str(csv_path)
+    )
+    summary["evaluation_dir"] = (
+        project_relative_path(output_dir, project_root)
+        if project_root is not None
+        else str(output_dir)
+    )
 
     summary_path = output_dir / "summary.json"
     with summary_path.open("w", encoding="utf-8") as file:

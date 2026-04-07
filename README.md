@@ -175,6 +175,7 @@ python train_pgd.py --dataset kvasir --root_path data/Kvasir-SEG --teacher_model
 - Nếu `teacher checkpoint` đã tồn tại trong phase `teacher` thì sẽ load lại
 - Nếu `blueprint.json` đã tồn tại trong phase `pruning` thì sẽ load lại
 - Nếu `student checkpoint` đã tồn tại trong phase `student` thì sẽ load lại
+- Sau khi train xong, phase `teacher` và `student` sẽ tự evaluate `train / val / test`
 - Sau khi train xong, phase `teacher` và `student` sẽ tự evaluate đủ `train / val / test` để xuất trọn bộ metrics cuối
 
 ### Các flag hữu ích
@@ -238,6 +239,12 @@ Nếu muốn giữ lịch sử checkpoint theo epoch/iteration, bật:
 ```
 
 Khi đó mới có thêm các file kiểu `epoch_xxx.pth` trong `checkpoints/`.
+
+Trong `configs/` hiện có:
+
+- `run_config.json`
+- `hyperparameters.json`
+- `model_config.json`
 
 ### 9.2 Evaluation summaries
 
@@ -367,7 +374,7 @@ Lưu ý về tiêu chí:
 Basic branch hiện lưu tại:
 
 ```text
-outputs/<model_name>/<exp>/<dataset>/basic/
+outputs/<model_name>/<dataset>/basic/
 ```
 
 Trong đó sẽ có thêm:
@@ -391,11 +398,11 @@ Repo không còn copy `train_basic_model.py` vào thư mục run nữa.
 Proposal branch hiện lưu theo phase tại:
 
 ```text
-outputs/pdg_unet/<exp>/<dataset>/
-├─ pipeline/<teacher_model>/
-├─ teacher/<teacher_model>/
-├─ pruning/<teacher_model>_ratio_<ratio>/
-└─ student/<teacher_model>_ratio_<ratio>/
+outputs/pdg_unet/
+├─ _pipeline/<teacher_model>/<dataset>/
+├─ _teacher/<teacher_model>/<dataset>/
+├─ _pruning/<teacher_model>_ratio_<ratio>/<dataset>/
+└─ _student/<teacher_model>_ratio_<ratio>/<dataset>/
 ```
 
 ## 11. Metric đang dùng
@@ -447,6 +454,7 @@ Metric logic nằm trong:
 - FLOPs chỉ được ghi nếu bạn cài thêm `thop`
 - `thop` có thể gắn `total_ops/total_params` vào model; repo hiện đã tự động lọc các key này khi save/load checkpoint để tránh lỗi `load_state_dict`
 - `test2d.py` mặc định đọc từ `outputs/...`, nhưng vẫn fallback sang `logs/...` cũ nếu bạn đang evaluate run legacy
+- metadata và evaluation summary hiện ưu tiên lưu path tương đối như `outputs/...` hoặc `evaluations/...` thay vì full absolute path
 
 ## 15. Hướng phát triển tiếp theo
 
@@ -464,8 +472,8 @@ Nếu bạn chỉ muốn bắt đầu nhanh:
 
 1. Cài dependency
 2. Chuẩn bị dataset và split
-3. Train baseline bằng `train_basic_model.py`
-4. Train proposal bằng `train_pgd.py`
+3. Train baseline bằng `train_basic_model.py` rồi repo sẽ tự evaluate `train/val/test`
+4. Train proposal bằng `train_pgd.py` rồi phase `teacher` và `student` sẽ tự evaluate `train/val/test`
 5. So sánh CSV/PDF/checkpoint artifact giữa hai nhánh
 
 Repo hiện đã được tổ chức theo hướng:
@@ -490,13 +498,13 @@ thành một report duy nhất mà không cần train lại.
 ### Cách chạy nhanh với pipeline summary
 
 ```bash
-python compare_artifacts.py --basic_run_dir outputs/<basic_model>/<basic_exp>/<dataset>/basic --pipeline_dir outputs/pdg_unet/<proposal_exp>/<dataset>/pipeline/<teacher_model> --comparison_name <report_name>
+python compare_artifacts.py --basic_run_dir outputs/<basic_model>/<dataset>/basic --pipeline_dir outputs/pdg_unet/_pipeline/<teacher_model>/<dataset> --comparison_name <report_name>
 ```
 
 ### Cách chạy khi muốn chỉ định từng phase riêng
 
 ```bash
-python compare_artifacts.py --basic_run_dir outputs/<basic_model>/<basic_exp>/<dataset>/basic --teacher_run_dir outputs/pdg_unet/<proposal_exp>/<dataset>/teacher/<teacher_model> --pruning_run_dir outputs/pdg_unet/<proposal_exp>/<dataset>/pruning/<teacher_model>_ratio_<ratio> --student_run_dir outputs/pdg_unet/<proposal_exp>/<dataset>/student/<teacher_model>_ratio_<ratio> --output_dir outputs/comparisons/<report_name>
+python compare_artifacts.py --basic_run_dir outputs/<basic_model>/<dataset>/basic --teacher_run_dir outputs/pdg_unet/_teacher/<teacher_model>/<dataset> --pruning_run_dir outputs/pdg_unet/_pruning/<teacher_model>_ratio_<ratio>/<dataset> --student_run_dir outputs/pdg_unet/_student/<teacher_model>_ratio_<ratio>/<dataset> --output_dir outputs/comparisons/<report_name>
 ```
 
 ### Output của script tổng hợp
