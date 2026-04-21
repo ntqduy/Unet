@@ -43,11 +43,13 @@ from utils.checkpoint_resolver import (
 from utils.compression_loss import CompressionLoss
 from utils.evaluation import build_evaluation_output_dir, evaluate_segmentation_dataset, save_evaluation_artifacts
 from utils.experiment import (
+    PDG_PHASE_DIRS,
     build_pdg_phase_dir,
     build_pdg_root_dir,
     ensure_run_layout,
     normalize_path_string,
     project_relative_path,
+    sanitize_tag,
     write_model_config,
     write_run_config,
 )
@@ -233,6 +235,7 @@ parser.add_argument("--force_retrain_teacher", type=int, default=0)
 parser.add_argument("--force_reprune", type=int, default=0)
 parser.add_argument("--force_retrain_student", type=int, default=0)
 parser.add_argument("--output_root", type=str, default="", help="root directory for all exported outputs; defaults to PROJECT_ROOT/outputs")
+parser.add_argument("--teacher_output_root", type=str, default="", help="shared output root for the teacher phase; defaults to --output_root when omitted")
 parser.add_argument("--save_history_checkpoints", type=int, default=0, help="set to 1 to keep per-epoch checkpoint history in addition to best/last")
 args = parser.parse_args()
 args = _normalize_pruning_args(args, parser)
@@ -246,22 +249,38 @@ def _write_json(path: Path, payload: dict) -> None:
 
 
 def _proposal_root_dir() -> Path:
+    return _teacher_root_dir() / sanitize_tag(args.step3_output_dir_name)
+
+
+def _teacher_output_root() -> str | None:
+    return args.teacher_output_root or args.output_root or None
+
+
+def _teacher_root_dir() -> Path:
     return build_pdg_root_dir(
         project_root=PROJECT_ROOT,
         dataset=args.dataset,
         teacher_name=args.teacher_model,
-        output_root=args.output_root or None,
+        output_root=_teacher_output_root(),
     )
 
 
 def _phase_dir(phase: str) -> Path:
-    return build_pdg_phase_dir(
-        project_root=PROJECT_ROOT,
-        dataset=args.dataset,
-        teacher_name=args.teacher_model,
-        phase=phase,
-        output_root=args.output_root or None,
-    )
+    phase_key = sanitize_tag(phase)
+    if phase_key == "teacher":
+        return build_pdg_phase_dir(
+            project_root=PROJECT_ROOT,
+            dataset=args.dataset,
+            teacher_name=args.teacher_model,
+            phase=phase,
+            output_root=_teacher_output_root(),
+        )
+
+    phase_dir_name = PDG_PHASE_DIRS.get(phase_key)
+    if phase_dir_name is None:
+        available = ", ".join(sorted(PDG_PHASE_DIRS))
+        raise KeyError(f"Unknown PDG phase '{phase}'. Available phases: {available}.")
+    return _proposal_root_dir() / phase_dir_name
 
 
 def _pruning_metadata() -> dict:
@@ -1616,6 +1635,36 @@ def _run_teacher(device: torch.device, image_mode: str, db_train, trainloader, v
                 )
         else:
             proposal_match = resolve_run_checkpoint(run_dir, expected_signature=teacher_signature)
+            proposal_match_source = "proposal"
+            if proposal_match is None:
+                teacher_candidate_dirs = []
+                if args.teacher_output_root and args.output_root:
+                    teacher_candidate_dirs.append(
+                        build_pdg_phase_dir(
+                            project_root=PROJECT_ROOT,
+                            dataset=args.dataset,
+                            teacher_name=args.teacher_model,
+                            phase="teacher",
+                            output_root=args.output_root or None,
+                        )
+                    )
+                teacher_candidate_dirs.append(
+                    build_pdg_phase_dir(
+                        project_root=PROJECT_ROOT,
+                        dataset=args.dataset,
+                        teacher_name=args.teacher_model,
+                        phase="teacher",
+                        output_root=args.step3_output_dir_name,
+                    )
+                )
+                for variant_teacher_run_dir in dict.fromkeys(teacher_candidate_dirs):
+                    if variant_teacher_run_dir.resolve() == run_dir.resolve():
+                        continue
+                    proposal_match = resolve_run_checkpoint(variant_teacher_run_dir, expected_signature=teacher_signature)
+                    if proposal_match is not None:
+                        proposal_match["run_dir"] = variant_teacher_run_dir
+                        proposal_match_source = "proposal_variant"
+                        break
             if proposal_match is not None:
                 proposal_checkpoint_path = Path(proposal_match["checkpoint_path"])
                 source_checkpoint_path = proposal_checkpoint_path
@@ -1627,12 +1676,12 @@ def _run_teacher(device: torch.device, image_mode: str, db_train, trainloader, v
                         source_checkpoint_path=proposal_checkpoint_path,
                         target_run_dir=run_dir,
                         project_root=PROJECT_ROOT,
-                        source_branch="external",
-                        source_run_dir=proposal_checkpoint_path.parent.parent if proposal_checkpoint_path.parent.name == "checkpoints" else proposal_checkpoint_path.parent,
+                        source_branch=proposal_match_source,
+                        source_run_dir=proposal_match.get("run_dir") or (proposal_checkpoint_path.parent.parent if proposal_checkpoint_path.parent.name == "checkpoints" else proposal_checkpoint_path.parent),
                         payload_updates={"phase": "teacher"},
                     )
                     best_path = Path(copied["best"]["checkpoint_path"])
-                    reused_from = "external"
+                    reused_from = proposal_match_source
                     registered_checkpoint_path = best_path
                 payload = load_checkpoint_into_model(best_path, model, device=device)
                 history = payload.get("extra_state", {}).get("history", {})
@@ -1642,7 +1691,7 @@ def _run_teacher(device: torch.device, image_mode: str, db_train, trainloader, v
             else:
                 basic_match = resolve_basic_checkpoint(
                     project_root=PROJECT_ROOT,
-                    output_root=args.output_root or None,
+                    output_root=_teacher_output_root(),
                     model_name=args.teacher_model,
                     dataset=args.dataset,
                     expected_signature=teacher_signature,
@@ -2481,7 +2530,9 @@ if __name__ == "__main__":
         logging.info("Static prune ratio: %s", _format_float_for_path(args.static_prune_ratio))
     logging.info("Step-3 pruning: %s", "enabled" if bool(args.enable_step3_pruning) else "disabled")
     logging.info("Step-3 pruning epochs: %s", int(args.step3_pruning_epochs) if bool(args.enable_step3_pruning) else "no")
-    logging.info("Output dir: %s", args.output_root or project_relative_path(proposal_root_dir, PROJECT_ROOT))
+    logging.info("Output dir: %s", project_relative_path(proposal_root_dir, PROJECT_ROOT))
+    logging.info("Teacher output root: %s", args.teacher_output_root or args.output_root or "outputs")
+    logging.info("Teacher run dir: %s", project_relative_path(_phase_dir("teacher"), PROJECT_ROOT))
 
     db_train, db_val, trainloader, valloader = _build_loaders(device, image_mode)
     logging.info("Dataset summary | train=%d | val=%d", len(db_train), len(db_val))
@@ -2495,6 +2546,7 @@ if __name__ == "__main__":
         pipeline_dir / "pipeline_summary.json",
         {
             "proposal_root_dir": project_relative_path(proposal_root_dir, PROJECT_ROOT),
+            "teacher_root_dir": project_relative_path(_teacher_root_dir(), PROJECT_ROOT),
             **_pruning_metadata(),
             "teacher_checkpoint": project_relative_path(teacher_artifact["checkpoint_path"], PROJECT_ROOT),
             "teacher_model_info": teacher_artifact["metadata"],

@@ -214,24 +214,24 @@ Khi chạy qua `run_pgd.sh`, set biến môi trường:
 
 ```bash
 # S1: static, có pruning ở step 3 trong 4 epoch cuối
-PRUNE_STRATEGY=S1 PRUNE_RATE=0.5 STEP3_PRUNING=1 STEP3_PRUNING_EPOCHS=4 bash run_pgd.sh
+PRUNE_STRATEGY=S1 PRUNE_RATE=0.5 STEP3_PRUNING=1 STEP3_PRUNING_EPOCHS=4 TEACHER_OUTPUT_ROOT=outputs bash run_pgd.sh
 
 # S1: static, không pruning ở step 3
-PRUNE_STRATEGY=S1 PRUNE_RATE=0.5 STEP3_PRUNING=0 bash run_pgd.sh
+PRUNE_STRATEGY=S1 PRUNE_RATE=0.5 STEP3_PRUNING=0 TEACHER_OUTPUT_ROOT=outputs bash run_pgd.sh
 
 # S2/S3/S4: dynamic, PRUNE_RATE không dùng
-PRUNE_STRATEGY=S2 STEP3_PRUNING=1 STEP3_PRUNING_EPOCHS=4 bash run_pgd.sh
-PRUNE_STRATEGY=S3 STEP3_PRUNING=1 STEP3_PRUNING_EPOCHS=4 bash run_pgd.sh
-PRUNE_STRATEGY=S4 STEP3_PRUNING=1 STEP3_PRUNING_EPOCHS=4 bash run_pgd.sh
+PRUNE_STRATEGY=S2 STEP3_PRUNING=1 STEP3_PRUNING_EPOCHS=4 TEACHER_OUTPUT_ROOT=outputs bash run_pgd.sh
+PRUNE_STRATEGY=S3 STEP3_PRUNING=1 STEP3_PRUNING_EPOCHS=4 TEACHER_OUTPUT_ROOT=outputs bash run_pgd.sh
+PRUNE_STRATEGY=S4 STEP3_PRUNING=1 STEP3_PRUNING_EPOCHS=4 TEACHER_OUTPUT_ROOT=outputs bash run_pgd.sh
 ```
 
-`run_pgd.sh` sẽ tự map strategy và tạo output root theo format:
+`run_pgd.sh` sẽ tự map strategy và tạo thư mục experiment con theo format:
 
 ```text
 output_<prune_method>_<rate-or-auto>_<step3-pruning-epochs-or-no>
 ```
 
-| Strategy | Output root |
+| Strategy | Experiment folder |
 |---|---|
 | `S1`, `PRUNE_RATE=0.5`, `STEP3_PRUNING=1`, `STEP3_PRUNING_EPOCHS=4` | `output_static_0.5_4` |
 | `S1`, `PRUNE_RATE=0.5`, `STEP3_PRUNING=0` | `output_static_0.5_no` |
@@ -246,7 +246,24 @@ Pruning strategy: static
 Static prune ratio: 0.5
 Step-3 pruning: enabled
 Step-3 pruning epochs: 4
-Output dir: output_static_0.5_4
+Experiment folder: output_static_0.5_4
+Teacher output root: outputs
+```
+
+`TEACHER_OUTPUT_ROOT` dùng để cố định nơi lưu `1_teacher`. Mặc định `run_pgd.sh` dùng `outputs`, nên teacher chỉ cần train một lần tại:
+
+```text
+outputs/pgd_unet/<dataset>/<teacher_model>_teacher/1_teacher/
+```
+
+Nếu trước đó teacher đã được train trong một output thử nghiệm cũ, pipeline sẽ cố gắng tìm checkpoint teacher compatible ở output hiện tại và register/copy nó sang `TEACHER_OUTPUT_ROOT` trước khi quyết định train teacher lại.
+
+Các lần thử pruning khác nhau vẫn ghi vào folder con bên trong cùng root teacher, ví dụ:
+
+```text
+outputs/pgd_unet/<dataset>/<teacher_model>_teacher/output_static_0.5_4/2_pruning/
+outputs/pgd_unet/<dataset>/<teacher_model>_teacher/output_static_0.5_no/2_pruning/
+outputs/pgd_unet/<dataset>/<teacher_model>_teacher/output_kneedle_auto_4/2_pruning/
 ```
 
 ### Teacher reuse
@@ -554,15 +571,26 @@ outputs/<model_name>/<dataset>/
 
 ### 9.2 Proposal branch
 
-Nếu không truyền `--output_root`, output mặc định nằm dưới `outputs/`. Nếu chạy qua `run_pgd.sh`, `--output_root` sẽ được set theo strategy và cấu hình step 3, ví dụ `output_static_0.5_4`, `output_static_0.5_no`, `output_kneedle_auto_4`, hoặc `output_gmm_auto_no`.
+Nếu không truyền `--output_root`, output mặc định nằm dưới `outputs/`. Nếu chạy qua `run_pgd.sh`, `--output_root` là root chung, mặc định `outputs`; cấu hình strategy và step 3 nằm ở folder con như `output_static_0.5_4`, `output_static_0.5_no`, `output_kneedle_auto_4`, hoặc `output_gmm_auto_no`.
+
+Teacher có root riêng qua `--teacher_output_root`. Khi dùng `run_pgd.sh`, giá trị mặc định là `outputs`, vì vậy:
+
+- `1_teacher` dùng chung: `outputs/pgd_unet/<dataset>/<teacher_model>_teacher/1_teacher/`
+- `2_pruning`, `3_student`, `pipeline` theo từng thử nghiệm: `<output_root>/pgd_unet/<dataset>/<teacher_model>_teacher/<experiment_folder>/...`
 
 ```text
 <output_root>/pgd_unet/<dataset>/<teacher_model>_teacher/
 ├─ 1_teacher/
-├─ 2_pruning/
-├─ 3_student/
-├─ student_final/
-└─ pipeline/
+├─ output_static_0.5_4/
+│  ├─ 2_pruning/
+│  ├─ 3_student/
+│  ├─ student_final/
+│  └─ pipeline/
+└─ output_kneedle_auto_4/
+   ├─ 2_pruning/
+   ├─ 3_student/
+   ├─ student_final/
+   └─ pipeline/
 ```
 
 #### `1_teacher`

@@ -38,6 +38,7 @@ STEP3_ARGS=()
 STEP3_PRUNING="${STEP3_PRUNING:-1}"
 STEP3_PRUNING="$(echo "$STEP3_PRUNING" | tr '[:upper:]' '[:lower:]')"
 STEP3_PRUNING_EPOCHS="${STEP3_PRUNING_EPOCHS:-4}"
+TEACHER_OUTPUT_ROOT="${TEACHER_OUTPUT_ROOT:-outputs}"
 
 case "$STEP3_PRUNING" in
   1|true|yes|y|on)
@@ -107,7 +108,8 @@ else
   echo "Step-3 pruning: disabled"
   echo "Step-3 pruning epochs: no"
 fi
-echo "Output dir: $OUTPUT_DIR"
+echo "Experiment folder: $OUTPUT_DIR"
+echo "Teacher output root: $TEACHER_OUTPUT_ROOT"
 
 # Run training
 python train_pgd.py \
@@ -117,7 +119,8 @@ python train_pgd.py \
   --exp pgd_cvc \
   --max_epochs_teacher 50 \
   --max_epochs_student 50 \
-  --output_root "$OUTPUT_DIR" \
+  --output_root "$TEACHER_OUTPUT_ROOT" \
+  --teacher_output_root "$TEACHER_OUTPUT_ROOT" \
   "${PRUNE_ARGS[@]}" \
   "${STEP3_ARGS[@]}" \
   --lambda_distill 0.3 \
