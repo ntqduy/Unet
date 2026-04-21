@@ -7,10 +7,12 @@ from typing import Dict, Iterable, List, Optional, Sequence
 import torch
 import torch.nn as nn
 
+from networks.PGD_Unet.pruning_algorithms.Kneedle_Otsu_GMM import prune_one_layer
 from utils.channel_analysis import find_primary_channel_layer
 
 
 DEFAULT_BLUEPRINT_MODULES = ("stem", "down1", "down2", "down3", "down4")
+PRUNE_METHODS = ("static", "kneedle", "otsu", "gmm")
 MODULE_GROUP_CANDIDATES = (
     ("stem", "down1", "down2", "down3", "down4"),
     ("stem", "layer1", "layer2", "layer3", "layer4"),
@@ -59,10 +61,25 @@ def extract_pruned_blueprint(
     teacher_model: nn.Module,
     *,
     prune_ratio: float = 0.5,
+    prune_method: str = "static",
+    static_prune_ratio: Optional[float] = None,
     target_modules: Optional[Sequence[str]] = None,
     minimum_channels: int = 16,
+    dynamic_min_keep_ratio: float = 0.4,
+    otsu_bins: int = 256,
+    gmm_random_state: int = 42,
 ) -> Dict[str, object]:
-    if not 0.0 <= prune_ratio < 1.0:
+    prune_method = str(prune_method).lower()
+    if prune_method not in PRUNE_METHODS:
+        raise ValueError(f"Unsupported prune_method: {prune_method}. Expected one of {PRUNE_METHODS}.")
+
+    if prune_method == "static":
+        if static_prune_ratio is None:
+            static_prune_ratio = prune_ratio
+        if not 0.0 <= float(static_prune_ratio) < 1.0:
+            raise ValueError("static_prune_ratio must be in [0, 1).")
+        prune_ratio = float(static_prune_ratio)
+    elif prune_ratio is not None and not 0.0 <= float(prune_ratio) < 1.0:
         raise ValueError("prune_ratio must be in [0, 1).")
 
     target_modules = tuple(_resolve_target_modules(teacher_model, target_modules))
@@ -83,15 +100,26 @@ def extract_pruned_blueprint(
             continue
 
         importance = _resolve_module_importance(teacher_model, module_name, conv_layer)
+        importance_np = importance.detach().cpu().numpy()
+        prune_result = prune_one_layer(
+            importance_np,
+            layer_name=module_name,
+            method=prune_method,
+            min_keep_ratio=dynamic_min_keep_ratio,
+            min_keep_channels=None if prune_method == "static" else minimum_channels,
+            static_prune_ratio=static_prune_ratio,
+            otsu_bins=otsu_bins,
+            gmm_random_state=gmm_random_state,
+        )
         ranked_indices = torch.argsort(importance, descending=True)
         rank_lookup = {int(index): rank + 1 for rank, index in enumerate(ranked_indices.tolist())}
-        keep_channels = max(int(importance.numel() * (1 - prune_ratio)), minimum_channels)
-        keep_channels = min(keep_channels, int(importance.numel()))
-        kept_indices = sorted(int(index) for index in ranked_indices[:keep_channels].tolist())
-        pruned_indices = sorted(int(index) for index in ranked_indices[keep_channels:].tolist())
+        keep_channels = int(prune_result.num_keep)
+        kept_indices = sorted(int(index) for index in prune_result.keep_indices.tolist())
+        kept_index_set = set(kept_indices)
+        pruned_indices = sorted(index for index in range(int(importance.numel())) if index not in kept_index_set)
         importance_values = [float(value) for value in importance.detach().cpu().tolist()]
         stats = _tensor_stats(importance_values)
-        actual_prune_ratio = float(len(pruned_indices) / max(1, int(importance.numel())))
+        actual_prune_ratio = float(prune_result.prune_ratio)
         blueprint_channels.append(keep_channels)
 
         teacher_channel_analysis.append(
@@ -112,6 +140,9 @@ def extract_pruned_blueprint(
                 "importance_max": stats["max"],
                 "importance_mean": stats["mean"],
                 "importance_std": stats["std"],
+                "prune_method": prune_method,
+                "pruning_threshold": float(prune_result.threshold),
+                "requested_static_prune_ratio": float(static_prune_ratio) if prune_method == "static" else None,
             }
         )
 
@@ -129,6 +160,10 @@ def extract_pruned_blueprint(
                 "pruned_channels": int(len(pruned_indices)),
                 "actual_prune_ratio": actual_prune_ratio,
                 "criterion": "bn_weight_or_l1",
+                "prune_method": prune_method,
+                "selection_policy": "topk_static_ratio" if prune_method == "static" else f"{prune_method}_threshold",
+                "pruning_threshold": float(prune_result.threshold),
+                "requested_static_prune_ratio": float(static_prune_ratio) if prune_method == "static" else None,
                 "importance_min": stats["min"],
                 "importance_max": stats["max"],
                 "importance_mean": stats["mean"],
@@ -145,6 +180,8 @@ def extract_pruned_blueprint(
                 "student_out_channels": int(keep_channels),
                 "channels_pruned": int(len(pruned_indices)),
                 "actual_prune_ratio": actual_prune_ratio,
+                "prune_method": prune_method,
+                "pruning_threshold": float(prune_result.threshold),
             }
         )
         for channel_index, importance_value in enumerate(importance_values):
@@ -155,6 +192,8 @@ def extract_pruned_blueprint(
                     "importance": float(importance_value),
                     "rank_desc": int(rank_lookup[channel_index]),
                     "decision": "keep" if channel_index in kept_indices else "prune",
+                    "prune_method": prune_method,
+                    "pruning_threshold": float(prune_result.threshold),
                 }
             )
 
@@ -162,7 +201,18 @@ def extract_pruned_blueprint(
         fallback = []
         for module in teacher_model.modules():
             if isinstance(module, nn.Conv2d) and module.out_channels > minimum_channels:
-                fallback.append(max(int(module.out_channels * (1 - prune_ratio)), minimum_channels))
+                importance = module.weight.detach().abs().sum(dim=(1, 2, 3)).cpu().numpy()
+                result = prune_one_layer(
+                    importance,
+                    layer_name=f"fallback_conv_{len(fallback)}",
+                    method=prune_method,
+                    min_keep_ratio=dynamic_min_keep_ratio,
+                    min_keep_channels=None if prune_method == "static" else minimum_channels,
+                    static_prune_ratio=static_prune_ratio,
+                    otsu_bins=otsu_bins,
+                    gmm_random_state=gmm_random_state,
+                )
+                fallback.append(int(result.num_keep))
             if len(fallback) == len(DEFAULT_BLUEPRINT_MODULES):
                 break
         blueprint_channels = fallback or blueprint_channels
@@ -189,10 +239,15 @@ def extract_pruned_blueprint(
 
     return {
         "channel_config": tuple(int(channel) for channel in blueprint_channels[: len(DEFAULT_BLUEPRINT_MODULES)]),
-        "prune_ratio": float(prune_ratio),
+        "prune_method": prune_method,
+        "prune_ratio": float(prune_ratio) if prune_method == "static" else None,
+        "static_prune_ratio": float(static_prune_ratio) if prune_method == "static" else None,
         "target_modules": list(target_modules),
         "criterion": "bn_weight_or_l1",
         "minimum_channels": int(minimum_channels),
+        "dynamic_min_keep_ratio": float(dynamic_min_keep_ratio),
+        "otsu_bins": int(otsu_bins),
+        "gmm_random_state": int(gmm_random_state),
         "modules": per_module,
         "teacher_channel_analysis": teacher_channel_analysis,
         "pruning_summary_rows": per_module,

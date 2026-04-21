@@ -22,7 +22,7 @@ from tqdm import tqdm
 
 from dataloaders.dataset import Normalize, RandomGenerator, ToTensor, build_dataset, list_available_datasets
 from networks.PGD_Unet.gated_unet import PDGUNet
-from networks.PGD_Unet.pruning import extract_pruned_blueprint, load_blueprint_artifact, save_blueprint_artifact
+from networks.PGD_Unet.pruning import PRUNE_METHODS, extract_pruned_blueprint, load_blueprint_artifact, save_blueprint_artifact
 from networks.net_factory import get_model_metadata, list_models, net_factory
 from utils.channel_analysis import (
     build_analysis_comparison,
@@ -66,6 +66,75 @@ from utils.reporting import (
 
 PROJECT_ROOT = Path(__file__).resolve().parent
 DEFAULT_DATA_ROOT = PROJECT_ROOT / "data" / "Kvasir-SEG"
+PRUNE_STRATEGY_TO_METHOD = {
+    "S1": "static",
+    "S2": "kneedle",
+    "S3": "otsu",
+    "S4": "gmm",
+}
+PRUNE_METHOD_TO_STRATEGY = {method: strategy for strategy, method in PRUNE_STRATEGY_TO_METHOD.items()}
+
+
+def _format_float_for_path(value: float) -> str:
+    text = f"{float(value):.12g}"
+    return "0" if text == "-0" else text
+
+
+def build_pruning_output_dir_name(prune_method: str, static_prune_ratio: float | None = None) -> str:
+    prune_method = str(prune_method).lower()
+    if prune_method == "static":
+        if static_prune_ratio is None:
+            raise ValueError("static_prune_ratio is required for static output directory naming.")
+        return f"output_static_{_format_float_for_path(static_prune_ratio)}"
+    if prune_method in {"kneedle", "otsu", "gmm"}:
+        return f"output_{prune_method}"
+    raise ValueError(f"Unsupported prune_method: {prune_method}")
+
+
+def _normalize_pruning_args(parsed_args: argparse.Namespace, active_parser: argparse.ArgumentParser) -> argparse.Namespace:
+    strategy = str(parsed_args.prune_strategy or "").strip().upper()
+    method_arg = str(parsed_args.prune_method or "").strip().lower()
+
+    if strategy:
+        if strategy not in PRUNE_STRATEGY_TO_METHOD:
+            active_parser.error(f"--prune_strategy must be one of {', '.join(PRUNE_STRATEGY_TO_METHOD)}")
+        mapped_method = PRUNE_STRATEGY_TO_METHOD[strategy]
+        if method_arg and method_arg != mapped_method:
+            active_parser.error(f"--prune_strategy {strategy} maps to '{mapped_method}', but --prune_method was '{method_arg}'.")
+        prune_method = mapped_method
+    else:
+        if method_arg.upper() in PRUNE_STRATEGY_TO_METHOD:
+            strategy = method_arg.upper()
+            prune_method = PRUNE_STRATEGY_TO_METHOD[strategy]
+        else:
+            prune_method = method_arg or "static"
+            strategy = PRUNE_METHOD_TO_STRATEGY.get(prune_method, "")
+
+    if prune_method not in PRUNE_METHODS:
+        active_parser.error(f"--prune_method must be one of {', '.join(PRUNE_METHODS)}")
+
+    parsed_args.prune_strategy = strategy or PRUNE_METHOD_TO_STRATEGY[prune_method]
+    parsed_args.prune_method = prune_method
+
+    if prune_method == "static":
+        ratio = parsed_args.static_prune_ratio
+        if ratio is None:
+            ratio = parsed_args.prune_ratio
+        if ratio is None:
+            active_parser.error("--static_prune_ratio or --prune_ratio is required when prune_method='static'.")
+        ratio = float(ratio)
+        if not 0.0 <= ratio < 1.0:
+            active_parser.error("--static_prune_ratio must be in [0, 1).")
+        parsed_args.static_prune_ratio = ratio
+        parsed_args.prune_ratio = ratio
+    elif parsed_args.static_prune_ratio is not None:
+        parsed_args.static_prune_ratio = float(parsed_args.static_prune_ratio)
+
+    parsed_args.pruning_output_dir_name = build_pruning_output_dir_name(
+        parsed_args.prune_method,
+        parsed_args.static_prune_ratio,
+    )
+    return parsed_args
 
 
 parser = argparse.ArgumentParser(description="Teacher -> Pruning -> Student training for PDG-UNet")
@@ -85,7 +154,10 @@ parser.add_argument("--patch_size", nargs=2, type=int, default=[256, 256])
 parser.add_argument("--num_classes", type=int, default=2)
 parser.add_argument("--in_channels", type=int, default=3)
 parser.add_argument("--encoder_pretrained", type=int, default=1, help="defaults to 1 for unet_resnet152 teacher builds")
-parser.add_argument("--prune_ratio", type=float, default=0.5)
+parser.add_argument("--prune_ratio", type=float, default=0.5, help="backward-compatible fixed ratio used by static pruning if --static_prune_ratio is omitted")
+parser.add_argument("--prune_strategy", type=str, default="", help="external pruning strategy code: S1=static, S2=kneedle, S3=otsu, S4=gmm")
+parser.add_argument("--prune_method", type=str, default="", help="internal pruning method: static, kneedle, otsu, or gmm")
+parser.add_argument("--static_prune_ratio", type=float, default=None, help="fixed channel prune ratio for prune_method=static; must be in [0, 1)")
 parser.add_argument("--lambda_distill", type=float, default=0.3)
 parser.add_argument("--lambda_sparsity", type=float, default=0.3)
 parser.add_argument(
@@ -122,6 +194,7 @@ parser.add_argument("--force_retrain_student", type=int, default=0)
 parser.add_argument("--output_root", type=str, default="", help="root directory for all exported outputs; defaults to PROJECT_ROOT/outputs")
 parser.add_argument("--save_history_checkpoints", type=int, default=0, help="set to 1 to keep per-epoch checkpoint history in addition to best/last")
 args = parser.parse_args()
+args = _normalize_pruning_args(args, parser)
 
 
 def _write_json(path: Path, payload: dict) -> None:
@@ -147,6 +220,30 @@ def _phase_dir(phase: str) -> Path:
         phase=phase,
         output_root=args.output_root or None,
     )
+
+
+def _pruning_metadata() -> dict:
+    static_ratio = args.static_prune_ratio if args.prune_method == "static" else None
+    return {
+        "prune_strategy": args.prune_strategy,
+        "prune_method": args.prune_method,
+        "static_prune_ratio": static_ratio,
+        "prune_ratio": static_ratio,
+        "pruning_output_dir_name": args.pruning_output_dir_name,
+    }
+
+
+def _blueprint_matches_current_pruning_config(candidate_blueprint: dict) -> bool:
+    candidate_method = str(candidate_blueprint.get("prune_method", "static")).lower()
+    if candidate_method != args.prune_method:
+        return False
+    if args.prune_method == "static":
+        candidate_ratio = candidate_blueprint.get("static_prune_ratio", candidate_blueprint.get("prune_ratio"))
+        try:
+            return float(candidate_ratio) == float(args.static_prune_ratio)
+        except (TypeError, ValueError):
+            return False
+    return True
 
 
 def _configure_logging(log_path: Path) -> None:
@@ -1078,7 +1175,7 @@ def _save_pipeline_outputs(pipeline_dir: Path, *phase_artifacts: dict) -> dict:
     summary = {
         "dataset": args.dataset,
         "teacher_model": args.teacher_model,
-        "prune_ratio": args.prune_ratio,
+        **_pruning_metadata(),
         "stages": {
             artifact.get("phase"): {
                 "run_dir": project_relative_path(artifact.get("run_dir"), PROJECT_ROOT),
@@ -1099,7 +1196,8 @@ def _save_pipeline_outputs(pipeline_dir: Path, *phase_artifacts: dict) -> dict:
         f"# Pipeline Evaluation Summary | {args.dataset} | {args.teacher_model}",
         "",
         f"- Teacher model: `{args.teacher_model}`",
-        f"- Prune ratio: `{args.prune_ratio}`",
+        f"- Pruning strategy: `{args.prune_method}`",
+        f"- Static prune ratio: `{args.static_prune_ratio}`" if args.prune_method == "static" else "- Static prune ratio: `not used`",
         "",
         "## Stages",
         "",
@@ -1241,7 +1339,24 @@ def _export_phase_outputs(run_dir: Path, model, checkpoint_path: Path, phase: st
     visualization_samples_by_split = {}
     eval_transform = transforms.Compose([Normalize(), ToTensor()])
     model_info = dict(extract_model_info(model))
-    model_info.update({key: value for key, value in extra.items() if key in {"model_name", "backbone_name", "student_name", "teacher_model", "prune_ratio"}})
+    model_info.update(
+        {
+            key: value
+            for key, value in extra.items()
+            if key
+            in {
+                "model_name",
+                "backbone_name",
+                "student_name",
+                "teacher_model",
+                "prune_strategy",
+                "prune_method",
+                "static_prune_ratio",
+                "prune_ratio",
+                "pruning_output_dir_name",
+            }
+        }
+    )
     for split in dict.fromkeys(args.final_eval_splits):
         try:
             dataset = build_dataset(args.dataset, args.root_path, split=split, transform=eval_transform, image_mode=image_mode)
@@ -1309,6 +1424,9 @@ def _export_phase_outputs(run_dir: Path, model, checkpoint_path: Path, phase: st
                 "inference_time_seconds": profile.get("inference_time_seconds"),
                 "evaluation_time_seconds": elapsed,
                 "teacher_model": args.teacher_model,
+                "prune_strategy": extra.get("prune_strategy"),
+                "prune_method": extra.get("prune_method"),
+                "static_prune_ratio": extra.get("static_prune_ratio"),
                 "prune_ratio": extra.get("prune_ratio"),
                 "checkpoint_path": project_relative_path(checkpoint_path, PROJECT_ROOT),
             }
@@ -1585,14 +1703,19 @@ def _run_pruning(device: torch.device, image_mode: str, db_train, teacher_artifa
         candidate_blueprint = load_blueprint_artifact(blueprint_path)
         if (
             candidate_blueprint.get("teacher_model") == args.teacher_model
-            and float(candidate_blueprint.get("prune_ratio", -1.0)) == float(args.prune_ratio)
+            and _blueprint_matches_current_pruning_config(candidate_blueprint)
         ):
             reusable_blueprint = candidate_blueprint
     if reusable_blueprint is not None:
         blueprint = reusable_blueprint
         logging.info("Loaded blueprint: %s", project_relative_path(blueprint_path, PROJECT_ROOT))
     else:
-        blueprint = extract_pruned_blueprint(teacher_artifact["model"], prune_ratio=args.prune_ratio)
+        blueprint = extract_pruned_blueprint(
+            teacher_artifact["model"],
+            prune_ratio=args.prune_ratio,
+            prune_method=args.prune_method,
+            static_prune_ratio=args.static_prune_ratio,
+        )
         blueprint.update(
             {
                 "teacher_model": args.teacher_model,
@@ -1600,6 +1723,7 @@ def _run_pruning(device: torch.device, image_mode: str, db_train, teacher_artifa
                 "teacher_run_dir": project_relative_path(teacher_artifact["run_dir"], PROJECT_ROOT),
                 "student_name": "pdg_unet",
                 "mapping_rule": "teacher_encoder -> student_channel_config",
+                **_pruning_metadata(),
             }
         )
         save_blueprint_artifact(blueprint, layout["artifacts_dir"])
@@ -1608,7 +1732,8 @@ def _run_pruning(device: torch.device, image_mode: str, db_train, teacher_artifa
     _write_json(layout["metrics_dir"] / "pruning_summary.json", blueprint)
     global_summary = blueprint.get("global_pruning_summary", {})
     logging.info(
-        "Global pruning summary | layers=%s | channels_before=%s | channels_after=%s | pruned=%s | ratio=%.4f",
+        "Global pruning summary | method=%s | layers=%s | channels_before=%s | channels_after=%s | pruned=%s | ratio=%.4f",
+        args.prune_method,
         global_summary.get("num_layers_analyzed"),
         global_summary.get("total_channels_before"),
         global_summary.get("total_channels_after"),
@@ -1679,6 +1804,7 @@ def _run_pruning(device: torch.device, image_mode: str, db_train, teacher_artifa
             "student_name": "pruned_student_init",
             "blueprint_path": project_relative_path(blueprint_path, PROJECT_ROOT),
             "blueprint": blueprint,
+            **_pruning_metadata(),
             "weight_transfer": weight_transfer,
             "checkpoint_is_random_init": False,
             "checkpoint_weight_status": "teacher_subset_reuse_then_saved",
@@ -1725,8 +1851,8 @@ def _run_pruning(device: torch.device, image_mode: str, db_train, teacher_artifa
             "model_name": "pdg_unet",
             "backbone_name": teacher_artifact["metadata"].get("backbone_name"),
             "student_name": "pruned_student_init",
-            "prune_ratio": args.prune_ratio,
             "teacher_model": args.teacher_model,
+            **_pruning_metadata(),
         },
         device,
         image_mode,
@@ -1804,6 +1930,7 @@ def _run_student(device: torch.device, image_mode: str, db_train, trainloader, v
             "student_name": f"gated_student_{variant_policy['variant_name']}",
             "blueprint_path": project_relative_path(pruning_artifact["blueprint_path"], PROJECT_ROOT),
             "blueprint": pruning_artifact["blueprint"],
+            **_pruning_metadata(),
             "student_variant": variant_policy,
             "distillation_target": "logits",
             "soft_pruning_definition": "Soft pruning is implemented through learnable channel gates plus sparsity regularization during the active pruning epochs.",
@@ -1940,6 +2067,7 @@ def _run_student(device: torch.device, image_mode: str, db_train, trainloader, v
                             "student_name": f"gated_student_{variant_policy['variant_name']}",
                             "blueprint_path": project_relative_path(pruning_artifact["blueprint_path"], PROJECT_ROOT),
                             "blueprint": pruning_artifact["blueprint"],
+                            **_pruning_metadata(),
                             "student_variant": variant_policy,
                             "distillation_target": "logits",
                             "soft_pruning_definition": "Soft pruning is implemented through learnable channel gates plus sparsity regularization during the active gate-search epochs.",
@@ -2126,8 +2254,8 @@ def _run_student(device: torch.device, image_mode: str, db_train, trainloader, v
             "model_name": "pdg_unet",
             "backbone_name": teacher_artifact["metadata"].get("backbone_name"),
             "student_name": student_model_info.get("student_name"),
-            "prune_ratio": args.prune_ratio,
             "teacher_model": args.teacher_model,
+            **_pruning_metadata(),
         },
         device,
         image_mode,
@@ -2261,6 +2389,10 @@ if __name__ == "__main__":
     write_run_config(pipeline_dir, vars(args))
     _configure_logging(pipeline_dir / "run.log")
     logging.info("PDG pipeline args: %s", args)
+    logging.info("Pruning strategy: %s", args.prune_method)
+    if args.prune_method == "static":
+        logging.info("Static prune ratio: %s", _format_float_for_path(args.static_prune_ratio))
+    logging.info("Output dir: %s", args.output_root or project_relative_path(proposal_root_dir, PROJECT_ROOT))
 
     db_train, db_val, trainloader, valloader = _build_loaders(device, image_mode)
     logging.info("Dataset summary | train=%d | val=%d", len(db_train), len(db_val))
@@ -2274,6 +2406,7 @@ if __name__ == "__main__":
         pipeline_dir / "pipeline_summary.json",
         {
             "proposal_root_dir": project_relative_path(proposal_root_dir, PROJECT_ROOT),
+            **_pruning_metadata(),
             "teacher_checkpoint": project_relative_path(teacher_artifact["checkpoint_path"], PROJECT_ROOT),
             "teacher_model_info": teacher_artifact["metadata"],
             "pruning_blueprint_path": project_relative_path(pruning_artifact["blueprint_path"], PROJECT_ROOT),
