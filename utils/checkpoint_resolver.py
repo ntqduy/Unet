@@ -20,6 +20,8 @@ COMPATIBILITY_KEYS = (
     "teacher_model",
     "channel_config",
     "student_variant",
+    "step3_pruning_enabled",
+    "step3_pruning_epochs",
 )
 
 
@@ -74,6 +76,8 @@ def extract_checkpoint_signature(payload: Dict[str, Any]) -> Dict[str, Any]:
         "teacher_model": teacher_model,
         "channel_config": _normalize_sequence(channel_config),
         "student_variant": student_variant,
+        "step3_pruning_enabled": config.get("enable_step3_pruning", model_info.get("step3_pruning_enabled")),
+        "step3_pruning_epochs": config.get("step3_pruning_epochs", model_info.get("step3_pruning_epochs")),
         "phase": payload.get("phase"),
         "branch": model_info.get("branch"),
     }
@@ -90,6 +94,8 @@ def build_expected_signature(
     teacher_model: Optional[str] = None,
     channel_config: Optional[Sequence[int]] = None,
     student_variant: Optional[str] = None,
+    step3_pruning_enabled: Optional[bool] = None,
+    step3_pruning_epochs: Optional[int] = None,
 ) -> Dict[str, Any]:
     return {
         "dataset": dataset,
@@ -101,6 +107,8 @@ def build_expected_signature(
         "teacher_model": teacher_model,
         "channel_config": tuple(channel_config) if channel_config is not None else None,
         "student_variant": student_variant,
+        "step3_pruning_enabled": step3_pruning_enabled,
+        "step3_pruning_epochs": step3_pruning_epochs,
     }
 
 

@@ -33,6 +33,32 @@ nvidia-smi
 PRUNE_STRATEGY="${PRUNE_STRATEGY:-S1}"
 PRUNE_STRATEGY="$(echo "$PRUNE_STRATEGY" | tr '[:lower:]' '[:upper:]')"
 PRUNE_ARGS=()
+STEP3_ARGS=()
+
+STEP3_PRUNING="${STEP3_PRUNING:-1}"
+STEP3_PRUNING="$(echo "$STEP3_PRUNING" | tr '[:upper:]' '[:lower:]')"
+STEP3_PRUNING_EPOCHS="${STEP3_PRUNING_EPOCHS:-4}"
+
+case "$STEP3_PRUNING" in
+  1|true|yes|y|on)
+    STEP3_PRUNING_ENABLED=1
+    if ! STEP3_PRUNING_EPOCHS_TAG=$(python -c 'import sys; v = int(sys.argv[1]); sys.exit("STEP3_PRUNING_EPOCHS must be > 0 when STEP3_PRUNING is enabled.") if v <= 0 else None; print(v)' "$STEP3_PRUNING_EPOCHS"); then
+      echo "Invalid STEP3_PRUNING_EPOCHS=$STEP3_PRUNING_EPOCHS"
+      exit 1
+    fi
+    STEP3_TAG="$STEP3_PRUNING_EPOCHS_TAG"
+    STEP3_ARGS=(--enable_step3_pruning 1 --step3_pruning_epochs "$STEP3_PRUNING_EPOCHS_TAG" --warmup_pruning_epochs "$STEP3_PRUNING_EPOCHS_TAG")
+    ;;
+  0|false|no|n|off)
+    STEP3_PRUNING_ENABLED=0
+    STEP3_TAG="no"
+    STEP3_ARGS=(--enable_step3_pruning 0 --step3_pruning_epochs 0 --warmup_pruning_epochs 0)
+    ;;
+  *)
+    echo "Unsupported STEP3_PRUNING=$STEP3_PRUNING. Use 1/0, true/false, yes/no, or on/off."
+    exit 1
+    ;;
+esac
 
 case "$PRUNE_STRATEGY" in
   S1)
@@ -42,22 +68,22 @@ case "$PRUNE_STRATEGY" in
       echo "Invalid PRUNE_RATE=$PRUNE_RATE for S1 static pruning"
       exit 1
     fi
-    OUTPUT_DIR="output_static_${PRUNE_RATE_TAG}"
+    RATE_TAG="$PRUNE_RATE_TAG"
     PRUNE_ARGS=(--prune_strategy "$PRUNE_STRATEGY" --prune_method "$PRUNE_METHOD" --static_prune_ratio "$PRUNE_RATE" --prune_ratio "$PRUNE_RATE")
     ;;
   S2)
     PRUNE_METHOD="kneedle"
-    OUTPUT_DIR="output_kneedle"
+    RATE_TAG="auto"
     PRUNE_ARGS=(--prune_strategy "$PRUNE_STRATEGY" --prune_method "$PRUNE_METHOD")
     ;;
   S3)
     PRUNE_METHOD="otsu"
-    OUTPUT_DIR="output_otsu"
+    RATE_TAG="auto"
     PRUNE_ARGS=(--prune_strategy "$PRUNE_STRATEGY" --prune_method "$PRUNE_METHOD")
     ;;
   S4)
     PRUNE_METHOD="gmm"
-    OUTPUT_DIR="output_gmm"
+    RATE_TAG="auto"
     PRUNE_ARGS=(--prune_strategy "$PRUNE_STRATEGY" --prune_method "$PRUNE_METHOD")
     ;;
   *)
@@ -66,11 +92,20 @@ case "$PRUNE_STRATEGY" in
     ;;
 esac
 
+OUTPUT_DIR="output_${PRUNE_METHOD}_${RATE_TAG}_${STEP3_TAG}"
+
 echo "Pruning strategy: $PRUNE_METHOD"
 if [ "$PRUNE_METHOD" = "static" ]; then
   echo "Static prune ratio: $PRUNE_RATE_TAG"
 else
   echo "Static prune ratio: not used"
+fi
+if [ "$STEP3_PRUNING_ENABLED" = "1" ]; then
+  echo "Step-3 pruning: enabled"
+  echo "Step-3 pruning epochs: $STEP3_PRUNING_EPOCHS_TAG"
+else
+  echo "Step-3 pruning: disabled"
+  echo "Step-3 pruning epochs: no"
 fi
 echo "Output dir: $OUTPUT_DIR"
 
@@ -84,6 +119,7 @@ python train_pgd.py \
   --max_epochs_student 50 \
   --output_root "$OUTPUT_DIR" \
   "${PRUNE_ARGS[@]}" \
+  "${STEP3_ARGS[@]}" \
   --lambda_distill 0.3 \
   --lambda_sparsity 0.3 \
   --batch_size 8 \

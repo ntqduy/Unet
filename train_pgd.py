@@ -91,6 +91,18 @@ def build_pruning_output_dir_name(prune_method: str, static_prune_ratio: float |
     raise ValueError(f"Unsupported prune_method: {prune_method}")
 
 
+def build_step3_output_dir_name(
+    prune_method: str,
+    static_prune_ratio: float | None,
+    step3_pruning_enabled: bool,
+    step3_pruning_epochs: int,
+) -> str:
+    prune_method = str(prune_method).lower()
+    rate_tag = _format_float_for_path(static_prune_ratio) if prune_method == "static" else "auto"
+    step3_tag = str(int(step3_pruning_epochs)) if step3_pruning_enabled else "no"
+    return f"output_{prune_method}_{rate_tag}_{step3_tag}"
+
+
 def _normalize_pruning_args(parsed_args: argparse.Namespace, active_parser: argparse.ArgumentParser) -> argparse.Namespace:
     strategy = str(parsed_args.prune_strategy or "").strip().upper()
     method_arg = str(parsed_args.prune_method or "").strip().lower()
@@ -137,6 +149,33 @@ def _normalize_pruning_args(parsed_args: argparse.Namespace, active_parser: argp
     return parsed_args
 
 
+def _normalize_step3_pruning_args(parsed_args: argparse.Namespace, active_parser: argparse.ArgumentParser) -> argparse.Namespace:
+    if int(parsed_args.enable_step3_pruning) not in (0, 1):
+        active_parser.error("--enable_step3_pruning must be 0 or 1.")
+
+    enabled = bool(int(parsed_args.enable_step3_pruning))
+    requested_epochs = parsed_args.step3_pruning_epochs
+    if requested_epochs is None:
+        requested_epochs = parsed_args.warmup_pruning_epochs
+    requested_epochs = int(requested_epochs)
+
+    if requested_epochs < 0:
+        active_parser.error("--step3_pruning_epochs must be >= 0.")
+    if enabled and requested_epochs <= 0:
+        active_parser.error("--step3_pruning_epochs must be > 0 when --enable_step3_pruning 1.")
+
+    parsed_args.enable_step3_pruning = int(enabled)
+    parsed_args.step3_pruning_epochs = requested_epochs if enabled else 0
+    parsed_args.warmup_pruning_epochs = requested_epochs if enabled else 0
+    parsed_args.step3_output_dir_name = build_step3_output_dir_name(
+        parsed_args.prune_method,
+        parsed_args.static_prune_ratio,
+        enabled,
+        parsed_args.step3_pruning_epochs,
+    )
+    return parsed_args
+
+
 parser = argparse.ArgumentParser(description="Teacher -> Pruning -> Student training for PDG-UNet")
 parser.add_argument("--root_path", type=str, default=str(DEFAULT_DATA_ROOT))
 parser.add_argument("--dataset", type=str, default="kvasir", choices=list_available_datasets())
@@ -173,6 +212,8 @@ parser.add_argument(
     default=4,
     help="number of final step-3 epochs reserved for late hard pruning and compact-student distillation",
 )
+parser.add_argument("--enable_step3_pruning", type=int, default=1, help="set to 1 to enable step-3 soft/late hard pruning, or 0 to train without step-3 pruning")
+parser.add_argument("--step3_pruning_epochs", type=int, default=None, help="number of final student epochs reserved for step-3 late hard pruning; alias for --warmup_pruning_epochs")
 parser.add_argument("--student_gate_near_off_threshold", type=float, default=0.10, help="gate value threshold used to flag channels as nearly switched off")
 parser.add_argument("--student_gate_open_value", type=float, default=0.999, help="gate probability used when student_variant disables gating")
 parser.add_argument(
@@ -195,6 +236,7 @@ parser.add_argument("--output_root", type=str, default="", help="root directory 
 parser.add_argument("--save_history_checkpoints", type=int, default=0, help="set to 1 to keep per-epoch checkpoint history in addition to best/last")
 args = parser.parse_args()
 args = _normalize_pruning_args(args, parser)
+args = _normalize_step3_pruning_args(args, parser)
 
 
 def _write_json(path: Path, payload: dict) -> None:
@@ -230,6 +272,10 @@ def _pruning_metadata() -> dict:
         "static_prune_ratio": static_ratio,
         "prune_ratio": static_ratio,
         "pruning_output_dir_name": args.pruning_output_dir_name,
+        "step3_output_dir_name": args.step3_output_dir_name,
+        "step3_pruning_enabled": bool(args.enable_step3_pruning),
+        "step3_pruning_epochs": int(args.step3_pruning_epochs),
+        "step3_pruning_tag": str(int(args.step3_pruning_epochs)) if bool(args.enable_step3_pruning) else "no",
     }
 
 
@@ -280,6 +326,8 @@ def _student_signature(channel_config, in_channels: int) -> dict:
         teacher_model=args.teacher_model,
         channel_config=channel_config,
         student_variant=args.student_variant,
+        step3_pruning_enabled=bool(args.enable_step3_pruning),
+        step3_pruning_epochs=int(args.step3_pruning_epochs),
     )
 
 
@@ -333,8 +381,25 @@ def _build_pruning_warmup_schedule(total_epochs: int, requested_warmup_epochs: i
         else float(args.student_gate_near_off_threshold)
     )
 
+    if not bool(args.enable_step3_pruning):
+        return {
+            "step3_pruning_enabled": False,
+            "requested_warmup_pruning_epochs": 0,
+            "effective_warmup_pruning_epochs": 0,
+            "active_soft_pruning_epochs": 0,
+            "late_hard_pruning_epochs": 0,
+            "hard_pruning_start_epoch": None,
+            "hard_pruning_threshold": None,
+            "hard_pruning_enabled": False,
+            "policy_note": (
+                "Step-3 pruning is disabled for this run. The student is trained without gate sparsity pressure "
+                "and without late structural hard pruning; distillation stays active whenever the selected variant enables it."
+            ),
+        }
+
     if not variant_policy["use_gating"] or not variant_policy["use_sparsity"]:
         return {
+            "step3_pruning_enabled": bool(args.enable_step3_pruning),
             "requested_warmup_pruning_epochs": requested,
             "effective_warmup_pruning_epochs": 0,
             "active_soft_pruning_epochs": 0,
@@ -352,6 +417,7 @@ def _build_pruning_warmup_schedule(total_epochs: int, requested_warmup_epochs: i
     effective_late_pruning_epochs = min(requested, total_epochs)
     if effective_late_pruning_epochs <= 0:
         return {
+            "step3_pruning_enabled": bool(args.enable_step3_pruning),
             "requested_warmup_pruning_epochs": requested,
             "effective_warmup_pruning_epochs": 0,
             "active_soft_pruning_epochs": total_epochs,
@@ -369,6 +435,7 @@ def _build_pruning_warmup_schedule(total_epochs: int, requested_warmup_epochs: i
     active_soft_pruning_epochs = max(0, hard_pruning_start_epoch - 1)
 
     return {
+        "step3_pruning_enabled": True,
         "requested_warmup_pruning_epochs": requested,
         "effective_warmup_pruning_epochs": effective_late_pruning_epochs,
         "active_soft_pruning_epochs": active_soft_pruning_epochs,
@@ -442,6 +509,8 @@ def _build_student_pruning_epoch_config(total_epochs: int, pruning_schedule: dic
     return {
         "total_student_epochs": int(total_epochs),
         "total_student_epochs_0based_last_index": int(total_epochs - 1),
+        "step3_pruning_enabled": bool(pruning_schedule.get("step3_pruning_enabled", False)),
+        "step3_pruning_epochs": int(pruning_schedule.get("effective_warmup_pruning_epochs", 0) or 0),
         "requested_warmup_pruning_epochs": int(pruning_schedule.get("requested_warmup_pruning_epochs", 0) or 0),
         "warmup_pruning_epochs": int(pruning_schedule.get("effective_warmup_pruning_epochs", 0) or 0),
         "requested_late_pruning_epochs": int(pruning_schedule.get("requested_warmup_pruning_epochs", 0) or 0),
@@ -1198,6 +1267,8 @@ def _save_pipeline_outputs(pipeline_dir: Path, *phase_artifacts: dict) -> dict:
         f"- Teacher model: `{args.teacher_model}`",
         f"- Pruning strategy: `{args.prune_method}`",
         f"- Static prune ratio: `{args.static_prune_ratio}`" if args.prune_method == "static" else "- Static prune ratio: `not used`",
+        f"- Step-3 pruning: `{'enabled' if bool(args.enable_step3_pruning) else 'disabled'}`",
+        f"- Step-3 pruning epochs: `{int(args.step3_pruning_epochs) if bool(args.enable_step3_pruning) else 'no'}`",
         "",
         "## Stages",
         "",
@@ -1354,6 +1425,10 @@ def _export_phase_outputs(run_dir: Path, model, checkpoint_path: Path, phase: st
                 "static_prune_ratio",
                 "prune_ratio",
                 "pruning_output_dir_name",
+                "step3_output_dir_name",
+                "step3_pruning_enabled",
+                "step3_pruning_epochs",
+                "step3_pruning_tag",
             }
         }
     )
@@ -1428,6 +1503,10 @@ def _export_phase_outputs(run_dir: Path, model, checkpoint_path: Path, phase: st
                 "prune_method": extra.get("prune_method"),
                 "static_prune_ratio": extra.get("static_prune_ratio"),
                 "prune_ratio": extra.get("prune_ratio"),
+                "step3_pruning_enabled": extra.get("step3_pruning_enabled"),
+                "step3_pruning_epochs": extra.get("step3_pruning_epochs"),
+                "step3_pruning_tag": extra.get("step3_pruning_tag"),
+                "step3_output_dir_name": extra.get("step3_output_dir_name"),
                 "checkpoint_path": project_relative_path(checkpoint_path, PROJECT_ROOT),
             }
         )
@@ -1961,8 +2040,10 @@ def _run_student(device: torch.device, image_mode: str, db_train, trainloader, v
     _write_json(layout["configs_dir"] / "student_pruning_config.json", student_pruning_epoch_config)
     write_model_config(run_dir, student_model_info)
     logging.info(
-        "Student step-3 setup | variant=%s | use_distill=%s | use_gating=%s | use_sparsity=%s | gate_search_epochs=%s | hard_pruning_start_epoch=%s | hard_pruning_threshold=%s",
+        "Student step-3 setup | variant=%s | step3_pruning_enabled=%s | step3_pruning_epochs=%s | use_distill=%s | use_gating=%s | use_sparsity=%s | gate_search_epochs=%s | hard_pruning_start_epoch=%s | hard_pruning_threshold=%s",
         variant_policy["variant_name"],
+        int(bool(args.enable_step3_pruning)),
+        int(args.step3_pruning_epochs),
         int(variant_policy["use_distill"]),
         int(variant_policy["use_gating"]),
         int(variant_policy["use_sparsity"]),
@@ -1999,6 +2080,8 @@ def _run_student(device: torch.device, image_mode: str, db_train, trainloader, v
             patch_size=args.patch_size,
             teacher_model=args.teacher_model,
             student_variant=args.student_variant,
+            step3_pruning_enabled=bool(args.enable_step3_pruning),
+            step3_pruning_epochs=int(args.step3_pruning_epochs),
         )
         reusable_match = resolve_run_checkpoint(
             run_dir,
@@ -2293,6 +2376,8 @@ def _run_student(device: torch.device, image_mode: str, db_train, trainloader, v
                 "final_total_channels": student_final_analysis["global_summary"]["total_output_channels"],
                 "input_gate_layers": student_input_analysis["global_summary"]["num_gate_layers"],
                 "final_gate_layers": student_final_analysis["global_summary"]["num_gate_layers"],
+                "step3_pruning_enabled": bool(args.enable_step3_pruning),
+                "step3_pruning_epochs": int(args.step3_pruning_epochs),
                 "soft_pruning_threshold": args.student_gate_near_off_threshold,
                 "hard_pruning_threshold": pruning_schedule.get("hard_pruning_threshold"),
                 "requested_warmup_pruning_epochs": pruning_schedule["requested_warmup_pruning_epochs"],
@@ -2313,6 +2398,8 @@ def _run_student(device: torch.device, image_mode: str, db_train, trainloader, v
         "global_summary": {
             "student_variant": variant_policy["variant_name"],
             "student_variant_description": variant_policy["description"],
+            "step3_pruning_enabled": bool(args.enable_step3_pruning),
+            "step3_pruning_epochs": int(args.step3_pruning_epochs),
             "soft_pruning_threshold": args.student_gate_near_off_threshold,
             "hard_pruning_threshold": pruning_schedule.get("hard_pruning_threshold"),
             "hard_pruning_applied": bool(hard_pruning_applied),
@@ -2392,6 +2479,8 @@ if __name__ == "__main__":
     logging.info("Pruning strategy: %s", args.prune_method)
     if args.prune_method == "static":
         logging.info("Static prune ratio: %s", _format_float_for_path(args.static_prune_ratio))
+    logging.info("Step-3 pruning: %s", "enabled" if bool(args.enable_step3_pruning) else "disabled")
+    logging.info("Step-3 pruning epochs: %s", int(args.step3_pruning_epochs) if bool(args.enable_step3_pruning) else "no")
     logging.info("Output dir: %s", args.output_root or project_relative_path(proposal_root_dir, PROJECT_ROOT))
 
     db_train, db_val, trainloader, valloader = _build_loaders(device, image_mode)
