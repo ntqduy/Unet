@@ -22,6 +22,10 @@ from tqdm import tqdm
 
 from dataloaders.dataset import Normalize, RandomGenerator, ToTensor, build_dataset, list_available_datasets
 from networks.PGD_Unet.gated_unet import PDGUNet
+from networks.PGD_Unet.middle_pruned_resnet_unet import (
+    build_middle_pruned_resnet_unet,
+    build_middle_pruned_resnet_unet_from_teacher,
+)
 from networks.PGD_Unet.pruning import PRUNE_METHODS, extract_pruned_blueprint, load_blueprint_artifact, save_blueprint_artifact
 from networks.PGD_Unet.pruning_algorithms.pruning_smart import uses_static_prune_ratio
 from networks.net_factory import get_model_metadata, list_models, net_factory
@@ -105,6 +109,14 @@ def build_step3_output_dir_name(
     rate_tag = _format_float_for_path(static_prune_ratio) if uses_static_prune_ratio(prune_method) else "auto"
     step3_tag = str(int(step3_pruning_epochs)) if step3_pruning_enabled else "no"
     return f"output_{prune_method}_{rate_tag}_{step3_tag}"
+
+
+def _uses_middle_static_student() -> bool:
+    return str(args.prune_method).lower() == "middle_static"
+
+
+def _student_model_name() -> str:
+    return "middle_pruned_resnet_unet" if _uses_middle_static_student() else "pdg_unet"
 
 
 def _normalize_pruning_args(parsed_args: argparse.Namespace, active_parser: argparse.ArgumentParser) -> argparse.Namespace:
@@ -304,6 +316,8 @@ def _blueprint_matches_current_pruning_config(candidate_blueprint: dict) -> bool
     candidate_method = str(candidate_blueprint.get("prune_method", "static")).lower()
     if candidate_method != args.prune_method:
         return False
+    if args.prune_method == "middle_static" and str(candidate_blueprint.get("student_architecture", "")).lower() != "middle_pruned_resnet_unet":
+        return False
     if uses_static_prune_ratio(args.prune_method):
         candidate_ratio = candidate_blueprint.get("static_prune_ratio", candidate_blueprint.get("prune_ratio"))
         try:
@@ -340,7 +354,7 @@ def _teacher_signature(in_channels: int) -> dict:
 def _student_signature(channel_config, in_channels: int) -> dict:
     return build_expected_signature(
         dataset=args.dataset,
-        model_name="pdg_unet",
+        model_name=_student_model_name(),
         num_classes=args.num_classes,
         in_channels=in_channels,
         patch_size=args.patch_size,
@@ -390,7 +404,15 @@ def _student_variant_policy() -> dict:
             "description": "Full proposal step 3: blueprint initialization + teacher distillation + gating + sparsity.",
         },
     }
-    return dict(policies[args.student_variant])
+    policy = dict(policies[args.student_variant])
+    if _uses_middle_static_student():
+        policy["use_gating"] = False
+        policy["use_sparsity"] = False
+        policy["description"] = (
+            "S5 uses structural middle-channel pruning inside ResNet bottlenecks. "
+            "The ResNet boundary layers stay full, so PDG gate-based late pruning is disabled for this student."
+        )
+    return policy
 
 
 def _build_pruning_warmup_schedule(total_epochs: int, requested_warmup_epochs: int, variant_policy: dict) -> dict:
@@ -556,11 +578,18 @@ def _freeze_teacher_model(teacher_model) -> None:
         parameter.requires_grad = False
 
 
-def _build_student_from_blueprint(db_train, pruning_artifact: dict) -> PDGUNet:
+def _build_student_from_blueprint(db_train, pruning_artifact: dict) -> nn.Module:
+    blueprint = pruning_artifact["blueprint"]
+    if str(blueprint.get("student_architecture", "")).lower() == "middle_pruned_resnet_unet":
+        return build_middle_pruned_resnet_unet(
+            in_channels=db_train.in_channels,
+            num_classes=args.num_classes,
+            blueprint=blueprint,
+        )
     return PDGUNet(
         in_channels=db_train.in_channels,
         num_classes=args.num_classes,
-        channel_config=tuple(pruning_artifact["blueprint"]["channel_config"]),
+        channel_config=tuple(blueprint["channel_config"]),
     )
 
 
@@ -1851,8 +1880,12 @@ def _run_pruning(device: torch.device, image_mode: str, db_train, teacher_artifa
                 "teacher_model": args.teacher_model,
                 "teacher_checkpoint_path": project_relative_path(teacher_artifact["checkpoint_path"], PROJECT_ROOT),
                 "teacher_run_dir": project_relative_path(teacher_artifact["run_dir"], PROJECT_ROOT),
-                "student_name": "pdg_unet",
-                "mapping_rule": "teacher_encoder -> student_channel_config",
+                "student_name": _student_model_name(),
+                "mapping_rule": (
+                    "teacher_resnet_bottleneck_conv2 -> middle_pruned_resnet_unet"
+                    if _uses_middle_static_student()
+                    else "teacher_encoder -> student_channel_config"
+                ),
                 **_pruning_metadata(),
             }
         )
@@ -1882,50 +1915,83 @@ def _run_pruning(device: torch.device, image_mode: str, db_train, teacher_artifa
             row["actual_prune_ratio"],
         )
 
-    pruned_student = PDGUNet(
-        in_channels=db_train.in_channels,
-        num_classes=args.num_classes,
-        channel_config=tuple(blueprint["channel_config"]),
-    ).to(device)
-    weight_transfer = _initialize_pruned_student_from_teacher(
-        teacher_artifact["model"],
-        pruned_student,
-        blueprint,
-        input_channels=db_train.in_channels,
-    )
-    exact_match_fallback = _copy_exact_matching_weights(teacher_artifact["model"], pruned_student)
-    pruned_student.force_gates_open(args.student_gate_open_value)
-    weight_transfer["exact_match_fallback"] = exact_match_fallback
-    weight_transfer["copy_ratio"] = weight_transfer.get("stage_transfer_ratio")
-    weight_transfer["exact_match_copy_ratio"] = exact_match_fallback.get("copy_ratio")
-    weight_transfer["effective_note"] = (
-        "Step-2 pruned student is initialized from teacher channels kept by the pruning blueprint. "
-        "Remaining compatible tensors are then copied via exact-key fallback, and gates are forced open for fair baseline evaluation."
-    )
-    logging.info(
-        "Step-2 teacher reuse | transferred_stages=%s/%s | head_transfer=%s | exact_match_copy_ratio=%.4f",
-        weight_transfer.get("transferred_stages"),
-        weight_transfer.get("requested_stages"),
-        int(bool(weight_transfer.get("head_transfer_applied"))),
-        float(exact_match_fallback.get("copy_ratio", 0.0)),
-    )
-    for row in weight_transfer.get("stage_transfer_rows", []):
-        logging.info(
-            "Step-2 stage reuse | student_stage=%s | teacher_module=%s | status=%s | direct=%s | resized=%s | unmapped=%s",
-            row.get("student_stage"),
-            row.get("teacher_module"),
-            row.get("status"),
-            ",".join(row.get("direct_components", [])) if row.get("direct_components") else "none",
-            ",".join(row.get("resized_components", [])) if row.get("resized_components") else "none",
-            ",".join(row.get("unmapped_components", [])) if row.get("unmapped_components") else "none",
+    if str(blueprint.get("student_architecture", "")).lower() == "middle_pruned_resnet_unet":
+        pruned_student, weight_transfer = build_middle_pruned_resnet_unet_from_teacher(
+            teacher_artifact["model"],
+            in_channels=db_train.in_channels,
+            num_classes=args.num_classes,
+            blueprint=blueprint,
         )
-    head_transfer = weight_transfer.get("head_transfer", {})
-    logging.info(
-        "Step-2 head reuse | status=%s | mode=%s | reason=%s",
-        "copied" if head_transfer.get("copied") else "unmapped",
-        head_transfer.get("copy_mode", "unmapped"),
-        head_transfer.get("reason", ""),
-    )
+        pruned_student = pruned_student.to(device)
+        weight_transfer["copy_ratio"] = weight_transfer.get("block_transfer_ratio")
+        weight_transfer["exact_match_copy_ratio"] = weight_transfer.get("exact_matching_full_weight_copy", {}).get("copy_ratio")
+        weight_transfer["effective_note"] = (
+            "S5 initializes a middle-pruned ResNet-UNet from the teacher. In every ResNet bottleneck, conv1 output and conv3 output stay full; "
+            "only conv2 output, bn2, and conv3 input are subset-copied by the static top-k mask."
+        )
+        logging.info(
+            "Step-2 S5 middle reuse | copied_blocks=%s/%s | exact_match_copy_ratio=%.4f",
+            weight_transfer.get("copied_blocks"),
+            weight_transfer.get("requested_blocks"),
+            float(weight_transfer.get("exact_match_copy_ratio", 0.0) or 0.0),
+        )
+        for row in weight_transfer.get("rows", [])[:20]:
+            logging.info(
+                "Step-2 S5 block reuse | block=%s | middle=%s | status=%s | kept=%s/%s | protected=%s | pruned=%s",
+                row.get("block_name"),
+                row.get("middle_layer_name"),
+                row.get("status"),
+                row.get("kept_middle_channels"),
+                row.get("original_middle_channels"),
+                ",".join(row.get("protected_components", [])) if row.get("protected_components") else "none",
+                ",".join(row.get("pruned_components", [])) if row.get("pruned_components") else "none",
+            )
+    else:
+        pruned_student = PDGUNet(
+            in_channels=db_train.in_channels,
+            num_classes=args.num_classes,
+            channel_config=tuple(blueprint["channel_config"]),
+        ).to(device)
+        weight_transfer = _initialize_pruned_student_from_teacher(
+            teacher_artifact["model"],
+            pruned_student,
+            blueprint,
+            input_channels=db_train.in_channels,
+        )
+        exact_match_fallback = _copy_exact_matching_weights(teacher_artifact["model"], pruned_student)
+        pruned_student.force_gates_open(args.student_gate_open_value)
+        weight_transfer["exact_match_fallback"] = exact_match_fallback
+        weight_transfer["copy_ratio"] = weight_transfer.get("stage_transfer_ratio")
+        weight_transfer["exact_match_copy_ratio"] = exact_match_fallback.get("copy_ratio")
+        weight_transfer["effective_note"] = (
+            "Step-2 pruned student is initialized from teacher channels kept by the pruning blueprint. "
+            "Remaining compatible tensors are then copied via exact-key fallback, and gates are forced open for fair baseline evaluation."
+        )
+        logging.info(
+            "Step-2 teacher reuse | transferred_stages=%s/%s | head_transfer=%s | exact_match_copy_ratio=%.4f",
+            weight_transfer.get("transferred_stages"),
+            weight_transfer.get("requested_stages"),
+            int(bool(weight_transfer.get("head_transfer_applied"))),
+            float(exact_match_fallback.get("copy_ratio", 0.0)),
+        )
+        for row in weight_transfer.get("stage_transfer_rows", []):
+            logging.info(
+                "Step-2 stage reuse | student_stage=%s | teacher_module=%s | status=%s | direct=%s | resized=%s | unmapped=%s",
+                row.get("student_stage"),
+                row.get("teacher_module"),
+                row.get("status"),
+                ",".join(row.get("direct_components", [])) if row.get("direct_components") else "none",
+                ",".join(row.get("resized_components", [])) if row.get("resized_components") else "none",
+                ",".join(row.get("unmapped_components", [])) if row.get("unmapped_components") else "none",
+            )
+        head_transfer = weight_transfer.get("head_transfer", {})
+        logging.info(
+            "Step-2 head reuse | status=%s | mode=%s | reason=%s",
+            "copied" if head_transfer.get("copied") else "unmapped",
+            head_transfer.get("copy_mode", "unmapped"),
+            head_transfer.get("reason", ""),
+        )
+    middle_static_student = str(blueprint.get("student_architecture", "")).lower() == "middle_pruned_resnet_unet"
     pruning_model_info = extract_model_info(pruned_student)
     pruning_model_info.update(
         {
@@ -1933,23 +1999,29 @@ def _run_pruning(device: torch.device, image_mode: str, db_train, teacher_artifa
             "phase_name": "pruning",
             "teacher_model": args.teacher_model,
             "teacher_backbone_name": teacher_artifact["metadata"].get("backbone_name"),
-            "student_name": "pruned_student_init",
+            "student_name": "middle_static_student_init" if middle_static_student else "pruned_student_init",
             "blueprint_path": project_relative_path(blueprint_path, PROJECT_ROOT),
             "blueprint": blueprint,
             **_pruning_metadata(),
             "weight_transfer": weight_transfer,
             "checkpoint_is_random_init": False,
-            "checkpoint_weight_status": "teacher_subset_reuse_then_saved",
-            "checkpoint_weight_source": "teacher_kept_channels + exact_match_fallback",
+            "checkpoint_weight_status": "teacher_middle_subset_reuse_then_saved" if middle_static_student else "teacher_subset_reuse_then_saved",
+            "checkpoint_weight_source": "teacher_full_boundary_weights + middle_conv2_subset" if middle_static_student else "teacher_kept_channels + exact_match_fallback",
             "evaluation_note": (
-                "This phase evaluates the pruned student immediately after structural pruning. "
-                "The student is initialized with the teacher weights of the kept channels whenever the stage-wise mapping is compatible, "
-                "instead of starting from a fresh random initialization."
+                "This phase evaluates the S5 middle-pruned ResNet-UNet immediately after structural pruning. "
+                "Inside each ResNet bottleneck, conv1 output and conv3 output remain full; only conv2 output, bn2, and conv3 input are pruned."
+                if middle_static_student
+                else (
+                    "This phase evaluates the pruned student immediately after structural pruning. "
+                    "The student is initialized with the teacher weights of the kept channels whenever the stage-wise mapping is compatible, "
+                    "instead of starting from a fresh random initialization."
+                )
             ),
             "build_kwargs": {
                 "in_channels": db_train.in_channels,
                 "num_classes": args.num_classes,
                 "channel_config": list(blueprint["channel_config"]),
+                "stage_middle_channel_config": blueprint.get("stage_middle_channel_config"),
             },
         }
     )
@@ -1980,9 +2052,9 @@ def _run_pruning(device: torch.device, image_mode: str, db_train, teacher_artifa
         "pruning",
         profile,
         {
-            "model_name": "pdg_unet",
+            "model_name": _student_model_name(),
             "backbone_name": teacher_artifact["metadata"].get("backbone_name"),
-            "student_name": "pruned_student_init",
+            "student_name": pruning_model_info.get("student_name"),
             "teacher_model": args.teacher_model,
             **_pruning_metadata(),
         },
@@ -2059,16 +2131,28 @@ def _run_student(device: torch.device, image_mode: str, db_train, trainloader, v
             "branch": "proposal",
             "teacher_model": args.teacher_model,
             "teacher_backbone_name": teacher_artifact["metadata"].get("backbone_name"),
-            "student_name": f"gated_student_{variant_policy['variant_name']}",
+            "student_name": (
+                f"middle_static_student_{variant_policy['variant_name']}"
+                if _uses_middle_static_student()
+                else f"gated_student_{variant_policy['variant_name']}"
+            ),
             "blueprint_path": project_relative_path(pruning_artifact["blueprint_path"], PROJECT_ROOT),
             "blueprint": pruning_artifact["blueprint"],
             **_pruning_metadata(),
             "student_variant": variant_policy,
             "distillation_target": "logits",
-            "soft_pruning_definition": "Soft pruning is implemented through learnable channel gates plus sparsity regularization during the active pruning epochs.",
+            "soft_pruning_definition": (
+                "S5 already applies structural middle-channel pruning inside ResNet bottlenecks; gate-based soft pruning is disabled."
+                if _uses_middle_static_student()
+                else "Soft pruning is implemented through learnable channel gates plus sparsity regularization during the active pruning epochs."
+            ),
             "hard_pruning_definition": (
-                "Late hard pruning is applied at the beginning of the final pruning window. The student is rebuilt with fewer channels based on gate values, "
-                "then the compact student continues distillation for the remaining epochs."
+                "S5 keeps ResNet bottleneck boundary outputs full, so late PDG hard pruning is disabled for this architecture."
+                if _uses_middle_static_student()
+                else (
+                    "Late hard pruning is applied at the beginning of the final pruning window. The student is rebuilt with fewer channels based on gate values, "
+                    "then the compact student continues distillation for the remaining epochs."
+                )
             ),
             "step3_distillation_definition": (
                 "When the selected student variant enables distillation, the frozen teacher supervises the student across the whole step-3 run. "
@@ -2087,6 +2171,7 @@ def _run_student(device: torch.device, image_mode: str, db_train, trainloader, v
                 "in_channels": db_train.in_channels,
                 "num_classes": args.num_classes,
                 "channel_config": list(pruning_artifact["blueprint"]["channel_config"]),
+                "stage_middle_channel_config": pruning_artifact["blueprint"].get("stage_middle_channel_config"),
             },
         }
     )
@@ -2127,7 +2212,7 @@ def _run_student(device: torch.device, image_mode: str, db_train, trainloader, v
     if not bool(args.force_retrain_student):
         reusable_signature = build_expected_signature(
             dataset=args.dataset,
-            model_name="pdg_unet",
+            model_name=_student_model_name(),
             num_classes=args.num_classes,
             in_channels=db_train.in_channels,
             patch_size=args.patch_size,
@@ -2145,7 +2230,7 @@ def _run_student(device: torch.device, image_mode: str, db_train, trainloader, v
         reusable_channel_config = reusable_signature.get("channel_config")
         if reusable_channel_config:
             reusable_channel_config = tuple(int(channel) for channel in reusable_channel_config)
-            if reusable_channel_config != tuple(student.channel_config):
+            if reusable_channel_config != tuple(student.channel_config) and not _uses_middle_static_student():
                 student = PDGUNet(
                     in_channels=db_train.in_channels,
                     num_classes=args.num_classes,
@@ -2387,7 +2472,7 @@ def _run_student(device: torch.device, image_mode: str, db_train, trainloader, v
         "student",
         profile,
         {
-            "model_name": "pdg_unet",
+            "model_name": _student_model_name(),
             "backbone_name": teacher_artifact["metadata"].get("backbone_name"),
             "student_name": student_model_info.get("student_name"),
             "teacher_model": args.teacher_model,

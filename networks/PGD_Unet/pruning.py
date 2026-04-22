@@ -2,16 +2,15 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
-from typing import Dict, Iterable, List, Optional, Sequence
+from typing import Dict, List, Optional, Sequence
 
 import numpy as np
 import torch
 import torch.nn as nn
 
-from networks.PGD_Unet.pruning_algorithms.Kneedle_Otsu_GMM import build_prune_result_from_mask, prune_one_layer
+from networks.PGD_Unet.pruning_algorithms.Kneedle_Otsu_GMM import prune_one_layer
 from networks.PGD_Unet.pruning_algorithms.pruning_smart import (
     is_middle_static_pruning,
-    select_block_middle_channel_layer,
     uses_static_prune_ratio,
 )
 from utils.channel_analysis import find_primary_channel_layer
@@ -25,6 +24,7 @@ MODULE_GROUP_CANDIDATES = (
     ("enc1", "enc2", "enc3", "enc4", "bottleneck"),
     ("encoder.block_one", "encoder.block_two", "encoder.block_three", "encoder.block_four", "encoder.block_five"),
 )
+RESNET_STAGE_MODULES = ("layer1", "layer2", "layer3", "layer4")
 
 
 def _resolve_module_importance(model: nn.Module, module_name: str, module: nn.Module) -> torch.Tensor:
@@ -63,6 +63,211 @@ def _tensor_stats(values: Sequence[float]) -> Dict[str, float]:
     }
 
 
+def _is_resnet_bottleneck_block(module: nn.Module) -> bool:
+    return all(hasattr(module, name) for name in ("conv1", "bn1", "conv2", "bn2", "conv3", "bn3")) and isinstance(getattr(module, "conv2"), nn.Conv2d)
+
+
+def _extract_middle_static_resnet_blueprint(
+    teacher_model: nn.Module,
+    *,
+    prune_ratio: float,
+    static_prune_ratio: float,
+    target_modules: Sequence[str],
+    otsu_bins: int,
+    gmm_random_state: int,
+) -> Dict[str, object]:
+    named_modules = dict(teacher_model.named_modules())
+    stage_names = [name for name in target_modules if name in RESNET_STAGE_MODULES and name in named_modules]
+    if not stage_names:
+        raise RuntimeError("middle_static requires ResNet stage modules layer1/layer2/layer3/layer4.")
+
+    per_module: List[Dict[str, object]] = []
+    teacher_channel_analysis: List[Dict[str, object]] = []
+    teacher_vs_student_rows: List[Dict[str, object]] = []
+    channel_level_detail: List[Dict[str, object]] = []
+    middle_prune_plan: List[Dict[str, object]] = []
+    stage_middle_channel_config: Dict[str, List[int]] = {}
+
+    for stage_name in stage_names:
+        stage = named_modules[stage_name]
+        stage_middle_channel_config[stage_name] = []
+        for child_name, block in stage.named_children():
+            block_name = f"{stage_name}.{child_name}"
+            if not _is_resnet_bottleneck_block(block):
+                continue
+
+            middle_layer_name = f"{block_name}.conv2"
+            importance = _resolve_module_importance(teacher_model, middle_layer_name, block.conv2)
+            importance_np = importance.detach().cpu().numpy()
+            prune_result = prune_one_layer(
+                importance_np,
+                layer_name=middle_layer_name,
+                method="middle_static",
+                static_prune_ratio=static_prune_ratio,
+                otsu_bins=otsu_bins,
+                gmm_random_state=gmm_random_state,
+            )
+            ranked_indices = torch.argsort(importance, descending=True)
+            rank_lookup = {int(index): rank + 1 for rank, index in enumerate(ranked_indices.tolist())}
+            kept_indices = sorted(int(index) for index in prune_result.keep_indices.tolist())
+            kept_index_set = set(kept_indices)
+            pruned_indices = sorted(index for index in range(int(importance.numel())) if index not in kept_index_set)
+            importance_values = [float(value) for value in importance.detach().cpu().tolist()]
+            stats = _tensor_stats(importance_values)
+            keep_channels = int(prune_result.num_keep)
+            original_middle_channels = int(block.conv2.out_channels)
+            actual_prune_ratio = float(prune_result.prune_ratio)
+            selection_policy = "topk_static_ratio_on_resnet_bottleneck_middle_conv"
+
+            stage_middle_channel_config[stage_name].append(keep_channels)
+            middle_prune_plan.append(
+                {
+                    "stage_name": stage_name,
+                    "block_name": block_name,
+                    "middle_layer_name": middle_layer_name,
+                    "first_layer_name": f"{block_name}.conv1",
+                    "last_layer_name": f"{block_name}.conv3",
+                    "original_middle_channels": original_middle_channels,
+                    "kept_middle_channels": keep_channels,
+                    "kept_channel_indices": kept_indices,
+                    "pruned_channel_indices": pruned_indices,
+                    "selection_policy": selection_policy,
+                    "pruning_threshold": float(prune_result.threshold),
+                    "protected_boundary_layers": [f"{block_name}.conv1", f"{block_name}.conv3"],
+                }
+            )
+
+            teacher_channel_analysis.append(
+                {
+                    "layer_name": block_name,
+                    "pruning_layer_name": middle_layer_name,
+                    "module_type": type(block).__name__,
+                    "channel_layer_type": type(block.conv2).__name__,
+                    "in_channels": int(block.conv2.in_channels),
+                    "teacher_out_channels": original_middle_channels,
+                    "kernel_size": list(block.conv2.kernel_size),
+                    "weight_shape": [int(value) for value in block.conv2.weight.shape],
+                    "importance_source": "bn2_weight_or_conv2_l1",
+                    "importance_values": importance_values,
+                    "ranked_channel_indices_desc": [int(index) for index in ranked_indices.tolist()],
+                    "kept_channel_indices": kept_indices,
+                    "pruned_channel_indices": pruned_indices,
+                    "importance_min": stats["min"],
+                    "importance_max": stats["max"],
+                    "importance_mean": stats["mean"],
+                    "importance_std": stats["std"],
+                    "prune_method": "middle_static",
+                    "selection_policy": selection_policy,
+                    "pruning_threshold": float(prune_result.threshold),
+                    "requested_static_prune_ratio": float(static_prune_ratio),
+                    "block_middle_pruning": True,
+                    "block_middle_layer_found": True,
+                    "protected_boundary_layers": [f"{block_name}.conv1", f"{block_name}.conv3"],
+                    "candidate_channel_layers": [f"{block_name}.conv1", middle_layer_name, f"{block_name}.conv3"],
+                }
+            )
+
+            row = {
+                "layer_name": block_name,
+                "module_name": block_name,
+                "pruning_layer_name": middle_layer_name,
+                "module_type": type(block).__name__,
+                "channel_layer_type": type(block.conv2).__name__,
+                "in_channels": int(block.conv2.in_channels),
+                "source_out_channels": original_middle_channels,
+                "teacher_out_channels": original_middle_channels,
+                "student_out_channels": keep_channels,
+                "kept_channels": keep_channels,
+                "pruned_channels": int(len(pruned_indices)),
+                "actual_prune_ratio": actual_prune_ratio,
+                "criterion": "bn2_weight_or_conv2_l1",
+                "prune_method": "middle_static",
+                "selection_policy": selection_policy,
+                "pruning_threshold": float(prune_result.threshold),
+                "requested_static_prune_ratio": float(static_prune_ratio),
+                "block_middle_pruning": True,
+                "block_middle_layer_found": True,
+                "protected_boundary_layers": [f"{block_name}.conv1", f"{block_name}.conv3"],
+                "candidate_channel_layers": [f"{block_name}.conv1", middle_layer_name, f"{block_name}.conv3"],
+                "importance_min": stats["min"],
+                "importance_max": stats["max"],
+                "importance_mean": stats["mean"],
+                "importance_std": stats["std"],
+                "kept_channel_indices": kept_indices,
+                "pruned_channel_indices": pruned_indices,
+                "ranked_channel_indices_desc": [int(index) for index in ranked_indices.tolist()],
+            }
+            per_module.append(row)
+            teacher_vs_student_rows.append(
+                {
+                    "layer_name": block_name,
+                    "pruning_layer_name": middle_layer_name,
+                    "teacher_out_channels": original_middle_channels,
+                    "student_out_channels": keep_channels,
+                    "channels_pruned": int(len(pruned_indices)),
+                    "actual_prune_ratio": actual_prune_ratio,
+                    "prune_method": "middle_static",
+                    "selection_policy": selection_policy,
+                    "pruning_threshold": float(prune_result.threshold),
+                }
+            )
+            for channel_index, importance_value in enumerate(importance_values):
+                channel_level_detail.append(
+                    {
+                        "layer_name": block_name,
+                        "pruning_layer_name": middle_layer_name,
+                        "channel_index": int(channel_index),
+                        "importance": float(importance_value),
+                        "rank_desc": int(rank_lookup[channel_index]),
+                        "decision": "keep" if channel_index in kept_index_set else "prune",
+                        "prune_method": "middle_static",
+                        "selection_policy": selection_policy,
+                        "pruning_threshold": float(prune_result.threshold),
+                    }
+                )
+
+    if not middle_prune_plan:
+        raise RuntimeError("Could not find ResNet bottleneck blocks for middle_static pruning.")
+
+    total_before = int(sum(row["teacher_out_channels"] for row in teacher_vs_student_rows))
+    total_after = int(sum(row["student_out_channels"] for row in teacher_vs_student_rows))
+    total_pruned = int(total_before - total_after)
+    changed_layers = int(sum(1 for row in teacher_vs_student_rows if row["channels_pruned"] > 0))
+    global_pruning_summary = {
+        "num_layers_analyzed": int(len(teacher_vs_student_rows)),
+        "total_channels_before": total_before,
+        "total_channels_after": total_after,
+        "total_channels_pruned": total_pruned,
+        "global_prune_ratio": float(total_pruned / max(1, total_before)),
+        "num_layers_changed": changed_layers,
+        "num_layers_unchanged": int(len(teacher_vs_student_rows) - changed_layers),
+        "protected_boundary_policy": "conv1_out_and_conv3_out_are_kept_full; only conv2_out/bn2 and conv3_in are pruned",
+    }
+
+    return {
+        "channel_config": tuple(int(row["kept_middle_channels"]) for row in middle_prune_plan),
+        "stage_middle_channel_config": {stage: list(values) for stage, values in stage_middle_channel_config.items()},
+        "middle_prune_plan": middle_prune_plan,
+        "student_architecture": "middle_pruned_resnet_unet",
+        "prune_method": "middle_static",
+        "prune_ratio": float(prune_ratio),
+        "static_prune_ratio": float(static_prune_ratio),
+        "block_middle_pruning": True,
+        "target_modules": list(target_modules),
+        "criterion": "bn2_weight_or_conv2_l1",
+        "minimum_channels": 1,
+        "dynamic_min_keep_ratio": 0.0,
+        "otsu_bins": int(otsu_bins),
+        "gmm_random_state": int(gmm_random_state),
+        "modules": per_module,
+        "teacher_channel_analysis": teacher_channel_analysis,
+        "pruning_summary_rows": per_module,
+        "teacher_vs_student_rows": teacher_vs_student_rows,
+        "channel_level_detail": channel_level_detail,
+        "global_pruning_summary": global_pruning_summary,
+    }
+
+
 def extract_pruned_blueprint(
     teacher_model: nn.Module,
     *,
@@ -91,6 +296,16 @@ def extract_pruned_blueprint(
         raise ValueError("prune_ratio must be in [0, 1).")
 
     target_modules = tuple(_resolve_target_modules(teacher_model, target_modules))
+    if is_middle_static_pruning(prune_method):
+        return _extract_middle_static_resnet_blueprint(
+            teacher_model,
+            prune_ratio=prune_ratio,
+            static_prune_ratio=float(static_prune_ratio),
+            target_modules=target_modules,
+            otsu_bins=otsu_bins,
+            gmm_random_state=gmm_random_state,
+        )
+
     blueprint_channels: List[int] = []
     per_module: List[Dict[str, object]] = []
     teacher_channel_analysis: List[Dict[str, object]] = []
@@ -109,34 +324,18 @@ def extract_pruned_blueprint(
 
         pruning_layer = conv_layer
         pruning_layer_name = module_name
-        smart_selection = None
-        should_apply_pruning = True
-        if is_middle_static_pruning(prune_method):
-            smart_selection = select_block_middle_channel_layer(module_name, module, conv_layer)
-            pruning_layer = smart_selection.layer
-            pruning_layer_name = smart_selection.layer_name
-            should_apply_pruning = smart_selection.has_middle_layer
-
         importance = _resolve_module_importance(teacher_model, pruning_layer_name, pruning_layer)
         importance_np = importance.detach().cpu().numpy()
-        if should_apply_pruning:
-            prune_result = prune_one_layer(
-                importance_np,
-                layer_name=pruning_layer_name,
-                method=prune_method,
-                min_keep_ratio=dynamic_min_keep_ratio,
-                min_keep_channels=None if ratio_based_static else minimum_channels,
-                static_prune_ratio=static_prune_ratio,
-                otsu_bins=otsu_bins,
-                gmm_random_state=gmm_random_state,
-            )
-        else:
-            prune_result = build_prune_result_from_mask(
-                layer_name=pruning_layer_name,
-                method=prune_method,
-                scores=importance_np,
-                keep_mask=np.ones_like(importance_np, dtype=bool),
-            )
+        prune_result = prune_one_layer(
+            importance_np,
+            layer_name=pruning_layer_name,
+            method=prune_method,
+            min_keep_ratio=dynamic_min_keep_ratio,
+            min_keep_channels=None if ratio_based_static else minimum_channels,
+            static_prune_ratio=static_prune_ratio,
+            otsu_bins=otsu_bins,
+            gmm_random_state=gmm_random_state,
+        )
         ranked_indices = torch.argsort(importance, descending=True)
         rank_lookup = {int(index): rank + 1 for rank, index in enumerate(ranked_indices.tolist())}
         keep_channels = int(prune_result.num_keep)
@@ -147,12 +346,8 @@ def extract_pruned_blueprint(
         stats = _tensor_stats(importance_values)
         actual_prune_ratio = float(prune_result.prune_ratio)
         blueprint_channels.append(keep_channels)
-        selection_policy = (
-            smart_selection.selection_policy
-            if smart_selection is not None
-            else ("topk_static_ratio" if prune_method == "static" else f"{prune_method}_threshold")
-        )
-        importance_source = "bn_weight_or_l1_on_block_middle_layer" if smart_selection and smart_selection.has_middle_layer else "bn_weight_or_l1"
+        selection_policy = "topk_static_ratio" if prune_method == "static" else f"{prune_method}_threshold"
+        importance_source = "bn_weight_or_l1"
 
         teacher_channel_analysis.append(
             {
@@ -177,10 +372,10 @@ def extract_pruned_blueprint(
                 "selection_policy": selection_policy,
                 "pruning_threshold": float(prune_result.threshold),
                 "requested_static_prune_ratio": float(static_prune_ratio) if ratio_based_static else None,
-                "block_middle_pruning": bool(is_middle_static_pruning(prune_method)),
-                "block_middle_layer_found": bool(smart_selection.has_middle_layer) if smart_selection is not None else False,
-                "protected_boundary_layers": list(smart_selection.boundary_layer_names) if smart_selection is not None else [],
-                "candidate_channel_layers": list(smart_selection.candidate_layer_names) if smart_selection is not None else [],
+                "block_middle_pruning": False,
+                "block_middle_layer_found": False,
+                "protected_boundary_layers": [],
+                "candidate_channel_layers": [],
             }
         )
 
@@ -203,10 +398,10 @@ def extract_pruned_blueprint(
                 "selection_policy": selection_policy,
                 "pruning_threshold": float(prune_result.threshold),
                 "requested_static_prune_ratio": float(static_prune_ratio) if ratio_based_static else None,
-                "block_middle_pruning": bool(is_middle_static_pruning(prune_method)),
-                "block_middle_layer_found": bool(smart_selection.has_middle_layer) if smart_selection is not None else False,
-                "protected_boundary_layers": list(smart_selection.boundary_layer_names) if smart_selection is not None else [],
-                "candidate_channel_layers": list(smart_selection.candidate_layer_names) if smart_selection is not None else [],
+                "block_middle_pruning": False,
+                "block_middle_layer_found": False,
+                "protected_boundary_layers": [],
+                "candidate_channel_layers": [],
                 "importance_min": stats["min"],
                 "importance_max": stats["max"],
                 "importance_mean": stats["mean"],

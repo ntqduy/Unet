@@ -23,6 +23,7 @@ Code_main/
 │  ├─ Basic_Model/
 │  ├─ PGD_Unet/
 │  │  ├─ gated_unet.py
+│  │  ├─ middle_pruned_resnet_unet.py
 │  │  ├─ pruning.py
 │  │  ├─ pruning_algorithms/
 │  │  │  └─ Kneedle_Otsu_GMM.py
@@ -179,7 +180,7 @@ Pipeline hiện hỗ trợ 5 strategy ở step 2:
 | `S2` | `kneedle` | dynamic threshold bằng Kneedle | không |
 | `S3` | `otsu` | dynamic threshold bằng Otsu | không |
 | `S4` | `gmm` | dynamic threshold bằng Gaussian Mixture Model | không |
-| `S5` | `middle_static` | static top-k giống S1 nhưng chỉ prune layer giữa block; layer đầu/cuối block được bảo vệ | có, qua `PRUNE_RATE` hoặc `--static_prune_ratio` |
+| `S5` | `middle_static` | trong ResNet152 bottleneck, giữ boundary layer full và chỉ prune `conv2` bằng static top-k như S1 | có, qua `PRUNE_RATE` hoặc `--static_prune_ratio` |
 
 Với `S1/static` hoặc `S5/middle_static`, nếu prune rate là `r`, mỗi layer được prune sẽ giữ:
 
@@ -187,7 +188,9 @@ Với `S1/static` hoặc `S5/middle_static`, nếu prune rate là `r`, mỗi lay
 ceil((1 - r) * num_channels)
 ```
 
-channel có importance score cao nhất. `static_prune_ratio` phải nằm trong `[0, 1)` và luôn giữ ít nhất 1 channel. Riêng `S5`, nếu một block không có layer giữa rõ ràng thì stage đó được giữ nguyên để không prune nhầm layer đầu/cuối.
+channel có importance score cao nhất. `static_prune_ratio` phải nằm trong `[0, 1)` và luôn giữ ít nhất 1 channel.
+
+Riêng `S5/middle_static` hiện được thiết kế cho `teacher_model=unet_resnet152`. Với mỗi bottleneck block trong `layer1/layer2/layer3/layer4`, pipeline dùng `conv2` làm layer giữa để prune theo top-k static. `conv1`/`bn1`, output của `conv3`/`bn3`, downsample và shape residual được giữ full để đầu/cuối block không bị cắt. Vì `conv2` output bị prune thật, `conv3` sẽ chỉ copy input slice tương ứng các channel `conv2` được giữ, nhưng output channel của `conv3` vẫn giữ nguyên. S5 dùng student kiến trúc `middle_pruned_resnet_unet`, nên PDG gate, sparsity loss và late hard pruning ở step 3 được tắt cho strategy này.
 
 Interface khuyến nghị:
 
