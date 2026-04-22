@@ -23,6 +23,7 @@ from tqdm import tqdm
 from dataloaders.dataset import Normalize, RandomGenerator, ToTensor, build_dataset, list_available_datasets
 from networks.PGD_Unet.gated_unet import PDGUNet
 from networks.PGD_Unet.pruning import PRUNE_METHODS, extract_pruned_blueprint, load_blueprint_artifact, save_blueprint_artifact
+from networks.PGD_Unet.pruning_algorithms.pruning_smart import uses_static_prune_ratio
 from networks.net_factory import get_model_metadata, list_models, net_factory
 from utils.channel_analysis import (
     build_analysis_comparison,
@@ -73,6 +74,7 @@ PRUNE_STRATEGY_TO_METHOD = {
     "S2": "kneedle",
     "S3": "otsu",
     "S4": "gmm",
+    "S5": "middle_static",
 }
 PRUNE_METHOD_TO_STRATEGY = {method: strategy for strategy, method in PRUNE_STRATEGY_TO_METHOD.items()}
 
@@ -84,10 +86,10 @@ def _format_float_for_path(value: float) -> str:
 
 def build_pruning_output_dir_name(prune_method: str, static_prune_ratio: float | None = None) -> str:
     prune_method = str(prune_method).lower()
-    if prune_method == "static":
+    if uses_static_prune_ratio(prune_method):
         if static_prune_ratio is None:
-            raise ValueError("static_prune_ratio is required for static output directory naming.")
-        return f"output_static_{_format_float_for_path(static_prune_ratio)}"
+            raise ValueError(f"static_prune_ratio is required for {prune_method} output directory naming.")
+        return f"output_{prune_method}_{_format_float_for_path(static_prune_ratio)}"
     if prune_method in {"kneedle", "otsu", "gmm"}:
         return f"output_{prune_method}"
     raise ValueError(f"Unsupported prune_method: {prune_method}")
@@ -100,7 +102,7 @@ def build_step3_output_dir_name(
     step3_pruning_epochs: int,
 ) -> str:
     prune_method = str(prune_method).lower()
-    rate_tag = _format_float_for_path(static_prune_ratio) if prune_method == "static" else "auto"
+    rate_tag = _format_float_for_path(static_prune_ratio) if uses_static_prune_ratio(prune_method) else "auto"
     step3_tag = str(int(step3_pruning_epochs)) if step3_pruning_enabled else "no"
     return f"output_{prune_method}_{rate_tag}_{step3_tag}"
 
@@ -130,12 +132,12 @@ def _normalize_pruning_args(parsed_args: argparse.Namespace, active_parser: argp
     parsed_args.prune_strategy = strategy or PRUNE_METHOD_TO_STRATEGY[prune_method]
     parsed_args.prune_method = prune_method
 
-    if prune_method == "static":
+    if uses_static_prune_ratio(prune_method):
         ratio = parsed_args.static_prune_ratio
         if ratio is None:
             ratio = parsed_args.prune_ratio
         if ratio is None:
-            active_parser.error("--static_prune_ratio or --prune_ratio is required when prune_method='static'.")
+            active_parser.error("--static_prune_ratio or --prune_ratio is required for static pruning methods.")
         ratio = float(ratio)
         if not 0.0 <= ratio < 1.0:
             active_parser.error("--static_prune_ratio must be in [0, 1).")
@@ -195,10 +197,10 @@ parser.add_argument("--patch_size", nargs=2, type=int, default=[256, 256])
 parser.add_argument("--num_classes", type=int, default=2)
 parser.add_argument("--in_channels", type=int, default=3)
 parser.add_argument("--encoder_pretrained", type=int, default=1, help="defaults to 1 for unet_resnet152 teacher builds")
-parser.add_argument("--prune_ratio", type=float, default=0.5, help="backward-compatible fixed ratio used by static pruning if --static_prune_ratio is omitted")
-parser.add_argument("--prune_strategy", type=str, default="", help="external pruning strategy code: S1=static, S2=kneedle, S3=otsu, S4=gmm")
-parser.add_argument("--prune_method", type=str, default="", help="internal pruning method: static, kneedle, otsu, or gmm")
-parser.add_argument("--static_prune_ratio", type=float, default=None, help="fixed channel prune ratio for prune_method=static; must be in [0, 1)")
+parser.add_argument("--prune_ratio", type=float, default=0.5, help="backward-compatible fixed ratio used by static pruning methods if --static_prune_ratio is omitted")
+parser.add_argument("--prune_strategy", type=str, default="", help="external pruning strategy code: S1=static, S2=kneedle, S3=otsu, S4=gmm, S5=middle_static")
+parser.add_argument("--prune_method", type=str, default="", help="internal pruning method: static, kneedle, otsu, gmm, or middle_static")
+parser.add_argument("--static_prune_ratio", type=float, default=None, help="fixed channel prune ratio for static and middle_static pruning; must be in [0, 1)")
 parser.add_argument("--lambda_distill", type=float, default=0.3)
 parser.add_argument("--lambda_sparsity", type=float, default=0.3)
 parser.add_argument(
@@ -284,7 +286,7 @@ def _phase_dir(phase: str) -> Path:
 
 
 def _pruning_metadata() -> dict:
-    static_ratio = args.static_prune_ratio if args.prune_method == "static" else None
+    static_ratio = args.static_prune_ratio if uses_static_prune_ratio(args.prune_method) else None
     return {
         "prune_strategy": args.prune_strategy,
         "prune_method": args.prune_method,
@@ -302,7 +304,7 @@ def _blueprint_matches_current_pruning_config(candidate_blueprint: dict) -> bool
     candidate_method = str(candidate_blueprint.get("prune_method", "static")).lower()
     if candidate_method != args.prune_method:
         return False
-    if args.prune_method == "static":
+    if uses_static_prune_ratio(args.prune_method):
         candidate_ratio = candidate_blueprint.get("static_prune_ratio", candidate_blueprint.get("prune_ratio"))
         try:
             return float(candidate_ratio) == float(args.static_prune_ratio)
@@ -1285,7 +1287,7 @@ def _save_pipeline_outputs(pipeline_dir: Path, *phase_artifacts: dict) -> dict:
         "",
         f"- Teacher model: `{args.teacher_model}`",
         f"- Pruning strategy: `{args.prune_method}`",
-        f"- Static prune ratio: `{args.static_prune_ratio}`" if args.prune_method == "static" else "- Static prune ratio: `not used`",
+        f"- Static prune ratio: `{args.static_prune_ratio}`" if uses_static_prune_ratio(args.prune_method) else "- Static prune ratio: `not used`",
         f"- Step-3 pruning: `{'enabled' if bool(args.enable_step3_pruning) else 'disabled'}`",
         f"- Step-3 pruning epochs: `{int(args.step3_pruning_epochs) if bool(args.enable_step3_pruning) else 'no'}`",
         "",
@@ -1870,8 +1872,10 @@ def _run_pruning(device: torch.device, image_mode: str, db_train, teacher_artifa
     )
     for row in blueprint.get("teacher_vs_student_rows", []):
         logging.info(
-            "Pruning layer %s | %s -> %s | pruned=%s | ratio=%.4f",
+            "Pruning layer %s | pruning_layer=%s | policy=%s | %s -> %s | pruned=%s | ratio=%.4f",
             row["layer_name"],
+            row.get("pruning_layer_name", row["layer_name"]),
+            row.get("selection_policy", args.prune_method),
             row["teacher_out_channels"],
             row["student_out_channels"],
             row["channels_pruned"],
@@ -2526,7 +2530,7 @@ if __name__ == "__main__":
     _configure_logging(pipeline_dir / "run.log")
     logging.info("PDG pipeline args: %s", args)
     logging.info("Pruning strategy: %s", args.prune_method)
-    if args.prune_method == "static":
+    if uses_static_prune_ratio(args.prune_method):
         logging.info("Static prune ratio: %s", _format_float_for_path(args.static_prune_ratio))
     logging.info("Step-3 pruning: %s", "enabled" if bool(args.enable_step3_pruning) else "disabled")
     logging.info("Step-3 pruning epochs: %s", int(args.step3_pruning_epochs) if bool(args.enable_step3_pruning) else "no")

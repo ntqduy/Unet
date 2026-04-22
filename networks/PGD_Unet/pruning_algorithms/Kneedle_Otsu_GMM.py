@@ -265,9 +265,9 @@ def prune_one_layer(
     scores = _safe_numpy_1d(scores)
     method = method.lower()
 
-    if method == "static":
+    if method in {"static", "middle_static"}:
         if static_prune_ratio is None:
-            raise ValueError("static_prune_ratio is required when method='static'")
+            raise ValueError(f"static_prune_ratio is required when method='{method}'")
         keep_mask = static_prune_by_ratio(scores, static_prune_ratio)
         tau = float(scores[keep_mask].min())
         return build_prune_result_from_mask(
@@ -367,12 +367,12 @@ if __name__ == "__main__":
         "decoder.block3.conv": 0.6,   # deep/decoder giữ cẩn thận hơn
     }
 
-    for method in ["static", "kneedle", "otsu", "gmm"]:
+    for method in ["static", "middle_static", "kneedle", "otsu", "gmm"]:
         print(f"\nMETHOD = {method.upper()}")
         results = prune_all_layers(
             layer_scores=layer_scores,
             method=method,
-            static_prune_ratio=0.5 if method == "static" else None,
+            static_prune_ratio=0.5 if method in {"static", "middle_static"} else None,
             default_min_keep_ratio=0.4,
             layer_min_keep_ratio=layer_min_keep_ratio,
         )

@@ -87,8 +87,18 @@ case "$PRUNE_STRATEGY" in
     RATE_TAG="auto"
     PRUNE_ARGS=(--prune_strategy "$PRUNE_STRATEGY" --prune_method "$PRUNE_METHOD")
     ;;
+  S5)
+    PRUNE_METHOD="middle_static"
+    PRUNE_RATE="${PRUNE_RATE:-0.5}"
+    if ! PRUNE_RATE_TAG=$(python -c 'import sys; v = float(sys.argv[1]); sys.exit("PRUNE_RATE must be in [0, 1).") if not (0.0 <= v < 1.0) else None; print(f"{v:.12g}")' "$PRUNE_RATE"); then
+      echo "Invalid PRUNE_RATE=$PRUNE_RATE for S5 middle-static pruning"
+      exit 1
+    fi
+    RATE_TAG="$PRUNE_RATE_TAG"
+    PRUNE_ARGS=(--prune_strategy "$PRUNE_STRATEGY" --prune_method "$PRUNE_METHOD" --static_prune_ratio "$PRUNE_RATE" --prune_ratio "$PRUNE_RATE")
+    ;;
   *)
-    echo "Unsupported PRUNE_STRATEGY=$PRUNE_STRATEGY. Use S1, S2, S3, or S4."
+    echo "Unsupported PRUNE_STRATEGY=$PRUNE_STRATEGY. Use S1, S2, S3, S4, or S5."
     exit 1
     ;;
 esac
@@ -96,7 +106,7 @@ esac
 OUTPUT_DIR="output_${PRUNE_METHOD}_${RATE_TAG}_${STEP3_TAG}"
 
 echo "Pruning strategy: $PRUNE_METHOD"
-if [ "$PRUNE_METHOD" = "static" ]; then
+if [ "$PRUNE_METHOD" = "static" ] || [ "$PRUNE_METHOD" = "middle_static" ]; then
   echo "Static prune ratio: $PRUNE_RATE_TAG"
 else
   echo "Static prune ratio: not used"

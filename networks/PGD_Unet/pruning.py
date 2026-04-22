@@ -4,15 +4,21 @@ import json
 from pathlib import Path
 from typing import Dict, Iterable, List, Optional, Sequence
 
+import numpy as np
 import torch
 import torch.nn as nn
 
-from networks.PGD_Unet.pruning_algorithms.Kneedle_Otsu_GMM import prune_one_layer
+from networks.PGD_Unet.pruning_algorithms.Kneedle_Otsu_GMM import build_prune_result_from_mask, prune_one_layer
+from networks.PGD_Unet.pruning_algorithms.pruning_smart import (
+    is_middle_static_pruning,
+    select_block_middle_channel_layer,
+    uses_static_prune_ratio,
+)
 from utils.channel_analysis import find_primary_channel_layer
 
 
 DEFAULT_BLUEPRINT_MODULES = ("stem", "down1", "down2", "down3", "down4")
-PRUNE_METHODS = ("static", "kneedle", "otsu", "gmm")
+PRUNE_METHODS = ("static", "kneedle", "otsu", "gmm", "middle_static")
 MODULE_GROUP_CANDIDATES = (
     ("stem", "down1", "down2", "down3", "down4"),
     ("stem", "layer1", "layer2", "layer3", "layer4"),
@@ -73,7 +79,9 @@ def extract_pruned_blueprint(
     if prune_method not in PRUNE_METHODS:
         raise ValueError(f"Unsupported prune_method: {prune_method}. Expected one of {PRUNE_METHODS}.")
 
-    if prune_method == "static":
+    ratio_based_static = uses_static_prune_ratio(prune_method)
+
+    if ratio_based_static:
         if static_prune_ratio is None:
             static_prune_ratio = prune_ratio
         if not 0.0 <= float(static_prune_ratio) < 1.0:
@@ -99,18 +107,36 @@ def extract_pruned_blueprint(
         if conv_layer is None or conv_layer.out_channels <= minimum_channels:
             continue
 
-        importance = _resolve_module_importance(teacher_model, module_name, conv_layer)
+        pruning_layer = conv_layer
+        pruning_layer_name = module_name
+        smart_selection = None
+        should_apply_pruning = True
+        if is_middle_static_pruning(prune_method):
+            smart_selection = select_block_middle_channel_layer(module_name, module, conv_layer)
+            pruning_layer = smart_selection.layer
+            pruning_layer_name = smart_selection.layer_name
+            should_apply_pruning = smart_selection.has_middle_layer
+
+        importance = _resolve_module_importance(teacher_model, pruning_layer_name, pruning_layer)
         importance_np = importance.detach().cpu().numpy()
-        prune_result = prune_one_layer(
-            importance_np,
-            layer_name=module_name,
-            method=prune_method,
-            min_keep_ratio=dynamic_min_keep_ratio,
-            min_keep_channels=None if prune_method == "static" else minimum_channels,
-            static_prune_ratio=static_prune_ratio,
-            otsu_bins=otsu_bins,
-            gmm_random_state=gmm_random_state,
-        )
+        if should_apply_pruning:
+            prune_result = prune_one_layer(
+                importance_np,
+                layer_name=pruning_layer_name,
+                method=prune_method,
+                min_keep_ratio=dynamic_min_keep_ratio,
+                min_keep_channels=None if ratio_based_static else minimum_channels,
+                static_prune_ratio=static_prune_ratio,
+                otsu_bins=otsu_bins,
+                gmm_random_state=gmm_random_state,
+            )
+        else:
+            prune_result = build_prune_result_from_mask(
+                layer_name=pruning_layer_name,
+                method=prune_method,
+                scores=importance_np,
+                keep_mask=np.ones_like(importance_np, dtype=bool),
+            )
         ranked_indices = torch.argsort(importance, descending=True)
         rank_lookup = {int(index): rank + 1 for rank, index in enumerate(ranked_indices.tolist())}
         keep_channels = int(prune_result.num_keep)
@@ -121,17 +147,24 @@ def extract_pruned_blueprint(
         stats = _tensor_stats(importance_values)
         actual_prune_ratio = float(prune_result.prune_ratio)
         blueprint_channels.append(keep_channels)
+        selection_policy = (
+            smart_selection.selection_policy
+            if smart_selection is not None
+            else ("topk_static_ratio" if prune_method == "static" else f"{prune_method}_threshold")
+        )
+        importance_source = "bn_weight_or_l1_on_block_middle_layer" if smart_selection and smart_selection.has_middle_layer else "bn_weight_or_l1"
 
         teacher_channel_analysis.append(
             {
                 "layer_name": module_name,
+                "pruning_layer_name": pruning_layer_name,
                 "module_type": type(module).__name__,
-                "channel_layer_type": type(conv_layer).__name__,
-                "in_channels": int(getattr(conv_layer, "in_channels", 0)),
-                "teacher_out_channels": int(conv_layer.out_channels),
-                "kernel_size": list(conv_layer.kernel_size) if hasattr(conv_layer, "kernel_size") else None,
-                "weight_shape": [int(value) for value in conv_layer.weight.shape],
-                "importance_source": "bn_weight_or_l1",
+                "channel_layer_type": type(pruning_layer).__name__,
+                "in_channels": int(getattr(pruning_layer, "in_channels", 0)),
+                "teacher_out_channels": int(pruning_layer.out_channels),
+                "kernel_size": list(pruning_layer.kernel_size) if hasattr(pruning_layer, "kernel_size") else None,
+                "weight_shape": [int(value) for value in pruning_layer.weight.shape],
+                "importance_source": importance_source,
                 "importance_values": importance_values,
                 "ranked_channel_indices_desc": [int(index) for index in ranked_indices.tolist()],
                 "kept_channel_indices": kept_indices,
@@ -141,8 +174,13 @@ def extract_pruned_blueprint(
                 "importance_mean": stats["mean"],
                 "importance_std": stats["std"],
                 "prune_method": prune_method,
+                "selection_policy": selection_policy,
                 "pruning_threshold": float(prune_result.threshold),
-                "requested_static_prune_ratio": float(static_prune_ratio) if prune_method == "static" else None,
+                "requested_static_prune_ratio": float(static_prune_ratio) if ratio_based_static else None,
+                "block_middle_pruning": bool(is_middle_static_pruning(prune_method)),
+                "block_middle_layer_found": bool(smart_selection.has_middle_layer) if smart_selection is not None else False,
+                "protected_boundary_layers": list(smart_selection.boundary_layer_names) if smart_selection is not None else [],
+                "candidate_channel_layers": list(smart_selection.candidate_layer_names) if smart_selection is not None else [],
             }
         )
 
@@ -150,20 +188,25 @@ def extract_pruned_blueprint(
             {
                 "layer_name": module_name,
                 "module_name": module_name,
+                "pruning_layer_name": pruning_layer_name,
                 "module_type": type(module).__name__,
-                "channel_layer_type": type(conv_layer).__name__,
-                "in_channels": int(getattr(conv_layer, "in_channels", 0)),
-                "source_out_channels": int(conv_layer.out_channels),
-                "teacher_out_channels": int(conv_layer.out_channels),
+                "channel_layer_type": type(pruning_layer).__name__,
+                "in_channels": int(getattr(pruning_layer, "in_channels", 0)),
+                "source_out_channels": int(pruning_layer.out_channels),
+                "teacher_out_channels": int(pruning_layer.out_channels),
                 "student_out_channels": int(keep_channels),
                 "kept_channels": int(keep_channels),
                 "pruned_channels": int(len(pruned_indices)),
                 "actual_prune_ratio": actual_prune_ratio,
-                "criterion": "bn_weight_or_l1",
+                "criterion": importance_source,
                 "prune_method": prune_method,
-                "selection_policy": "topk_static_ratio" if prune_method == "static" else f"{prune_method}_threshold",
+                "selection_policy": selection_policy,
                 "pruning_threshold": float(prune_result.threshold),
-                "requested_static_prune_ratio": float(static_prune_ratio) if prune_method == "static" else None,
+                "requested_static_prune_ratio": float(static_prune_ratio) if ratio_based_static else None,
+                "block_middle_pruning": bool(is_middle_static_pruning(prune_method)),
+                "block_middle_layer_found": bool(smart_selection.has_middle_layer) if smart_selection is not None else False,
+                "protected_boundary_layers": list(smart_selection.boundary_layer_names) if smart_selection is not None else [],
+                "candidate_channel_layers": list(smart_selection.candidate_layer_names) if smart_selection is not None else [],
                 "importance_min": stats["min"],
                 "importance_max": stats["max"],
                 "importance_mean": stats["mean"],
@@ -176,11 +219,13 @@ def extract_pruned_blueprint(
         teacher_vs_student_rows.append(
             {
                 "layer_name": module_name,
-                "teacher_out_channels": int(conv_layer.out_channels),
+                "pruning_layer_name": pruning_layer_name,
+                "teacher_out_channels": int(pruning_layer.out_channels),
                 "student_out_channels": int(keep_channels),
                 "channels_pruned": int(len(pruned_indices)),
                 "actual_prune_ratio": actual_prune_ratio,
                 "prune_method": prune_method,
+                "selection_policy": selection_policy,
                 "pruning_threshold": float(prune_result.threshold),
             }
         )
@@ -188,11 +233,13 @@ def extract_pruned_blueprint(
             channel_level_detail.append(
                 {
                     "layer_name": module_name,
+                    "pruning_layer_name": pruning_layer_name,
                     "channel_index": int(channel_index),
                     "importance": float(importance_value),
                     "rank_desc": int(rank_lookup[channel_index]),
                     "decision": "keep" if channel_index in kept_indices else "prune",
                     "prune_method": prune_method,
+                    "selection_policy": selection_policy,
                     "pruning_threshold": float(prune_result.threshold),
                 }
             )
@@ -207,7 +254,7 @@ def extract_pruned_blueprint(
                     layer_name=f"fallback_conv_{len(fallback)}",
                     method=prune_method,
                     min_keep_ratio=dynamic_min_keep_ratio,
-                    min_keep_channels=None if prune_method == "static" else minimum_channels,
+                    min_keep_channels=None if ratio_based_static else minimum_channels,
                     static_prune_ratio=static_prune_ratio,
                     otsu_bins=otsu_bins,
                     gmm_random_state=gmm_random_state,
@@ -240,8 +287,9 @@ def extract_pruned_blueprint(
     return {
         "channel_config": tuple(int(channel) for channel in blueprint_channels[: len(DEFAULT_BLUEPRINT_MODULES)]),
         "prune_method": prune_method,
-        "prune_ratio": float(prune_ratio) if prune_method == "static" else None,
-        "static_prune_ratio": float(static_prune_ratio) if prune_method == "static" else None,
+        "prune_ratio": float(prune_ratio) if ratio_based_static else None,
+        "static_prune_ratio": float(static_prune_ratio) if ratio_based_static else None,
+        "block_middle_pruning": bool(is_middle_static_pruning(prune_method)),
         "target_modules": list(target_modules),
         "criterion": "bn_weight_or_l1",
         "minimum_channels": int(minimum_channels),
