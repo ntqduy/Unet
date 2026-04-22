@@ -74,7 +74,7 @@ def _get_module(root: nn.Module, module_name: str) -> nn.Module:
 def _iter_middle_prune_plan(blueprint: Mapping[str, object]) -> List[dict]:
     plan = list(blueprint.get("middle_prune_plan", []) or [])
     if not plan:
-        raise ValueError("middle_static blueprint must contain a non-empty middle_prune_plan.")
+        raise ValueError("Middle-pruned ResNet blueprint must contain a non-empty middle_prune_plan.")
     return [dict(row) for row in plan]
 
 
@@ -138,6 +138,7 @@ class MiddlePrunedResNetUNet(BaseSegmentationModel):
             num_classes=num_classes,
             encoder_pretrained=False,
         )
+        self.prune_method = str(blueprint.get("prune_method", "middle_static"))
         self.middle_prune_plan = _iter_middle_prune_plan(blueprint)
         self.channel_config = tuple(int(row["kept_middle_channels"]) for row in self.middle_prune_plan)
         self.stage_middle_channel_config = {
@@ -151,13 +152,13 @@ class MiddlePrunedResNetUNet(BaseSegmentationModel):
 
         self.model_name = "middle_pruned_resnet_unet"
         self.backbone_name = "resnet152_middle_pruned"
-        self.student_name = "middle_static_student"
+        self.student_name = f"{self.prune_method}_student"
         self.set_architecture_config(
             in_channels=in_channels,
             num_classes=num_classes,
             channel_config=list(self.channel_config),
             stage_middle_channel_config=self.stage_middle_channel_config,
-            pruning_method="middle_static",
+            pruning_method=self.prune_method,
             protected_boundary_layers=True,
         )
 
@@ -242,7 +243,7 @@ def build_middle_pruned_resnet_unet_from_teacher(
         rows.append(transfer_row)
 
     return student, {
-        "strategy": "resnet_bottleneck_middle_static_pruning",
+        "strategy": f"resnet_bottleneck_{student.prune_method}_pruning",
         "source": "teacher_unet_resnet152",
         "copied_blocks": int(copied_blocks),
         "requested_blocks": int(len(rows)),

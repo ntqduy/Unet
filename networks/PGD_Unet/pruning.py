@@ -11,13 +11,14 @@ import torch.nn as nn
 from networks.PGD_Unet.pruning_algorithms.Kneedle_Otsu_GMM import prune_one_layer
 from networks.PGD_Unet.pruning_algorithms.pruning_smart import (
     is_middle_static_pruning,
+    is_middle_resnet_pruning,
     uses_static_prune_ratio,
 )
 from utils.channel_analysis import find_primary_channel_layer
 
 
 DEFAULT_BLUEPRINT_MODULES = ("stem", "down1", "down2", "down3", "down4")
-PRUNE_METHODS = ("static", "kneedle", "otsu", "gmm", "middle_static")
+PRUNE_METHODS = ("static", "kneedle", "otsu", "gmm", "middle_static", "middle_kneedle")
 MODULE_GROUP_CANDIDATES = (
     ("stem", "down1", "down2", "down3", "down4"),
     ("stem", "layer1", "layer2", "layer3", "layer4"),
@@ -67,19 +68,31 @@ def _is_resnet_bottleneck_block(module: nn.Module) -> bool:
     return all(hasattr(module, name) for name in ("conv1", "bn1", "conv2", "bn2", "conv3", "bn3")) and isinstance(getattr(module, "conv2"), nn.Conv2d)
 
 
-def _extract_middle_static_resnet_blueprint(
+def _extract_middle_resnet_blueprint(
     teacher_model: nn.Module,
     *,
+    prune_method: str,
     prune_ratio: float,
-    static_prune_ratio: float,
+    static_prune_ratio: Optional[float],
     target_modules: Sequence[str],
+    minimum_channels: int,
+    dynamic_min_keep_ratio: float,
     otsu_bins: int,
     gmm_random_state: int,
 ) -> Dict[str, object]:
     named_modules = dict(teacher_model.named_modules())
     stage_names = [name for name in target_modules if name in RESNET_STAGE_MODULES and name in named_modules]
     if not stage_names:
-        raise RuntimeError("middle_static requires ResNet stage modules layer1/layer2/layer3/layer4.")
+        raise RuntimeError(f"{prune_method} requires ResNet stage modules layer1/layer2/layer3/layer4.")
+
+    ratio_based_static = uses_static_prune_ratio(prune_method)
+    selection_policy = (
+        "topk_static_ratio_on_resnet_bottleneck_middle_conv"
+        if ratio_based_static
+        else f"{prune_method}_threshold_on_resnet_bottleneck_middle_conv"
+    )
+    effective_minimum_channels = 1 if ratio_based_static else int(minimum_channels)
+    effective_min_keep_ratio = 0.0 if ratio_based_static else float(dynamic_min_keep_ratio)
 
     per_module: List[Dict[str, object]] = []
     teacher_channel_analysis: List[Dict[str, object]] = []
@@ -99,13 +112,20 @@ def _extract_middle_static_resnet_blueprint(
             middle_layer_name = f"{block_name}.conv2"
             importance = _resolve_module_importance(teacher_model, middle_layer_name, block.conv2)
             importance_np = importance.detach().cpu().numpy()
+            prune_kwargs = {
+                "scores": importance_np,
+                "layer_name": middle_layer_name,
+                "method": prune_method,
+                "otsu_bins": otsu_bins,
+                "gmm_random_state": gmm_random_state,
+            }
+            if ratio_based_static:
+                prune_kwargs["static_prune_ratio"] = static_prune_ratio
+            else:
+                prune_kwargs["min_keep_ratio"] = dynamic_min_keep_ratio
+                prune_kwargs["min_keep_channels"] = minimum_channels
             prune_result = prune_one_layer(
-                importance_np,
-                layer_name=middle_layer_name,
-                method="middle_static",
-                static_prune_ratio=static_prune_ratio,
-                otsu_bins=otsu_bins,
-                gmm_random_state=gmm_random_state,
+                **prune_kwargs,
             )
             ranked_indices = torch.argsort(importance, descending=True)
             rank_lookup = {int(index): rank + 1 for rank, index in enumerate(ranked_indices.tolist())}
@@ -117,7 +137,6 @@ def _extract_middle_static_resnet_blueprint(
             keep_channels = int(prune_result.num_keep)
             original_middle_channels = int(block.conv2.out_channels)
             actual_prune_ratio = float(prune_result.prune_ratio)
-            selection_policy = "topk_static_ratio_on_resnet_bottleneck_middle_conv"
 
             stage_middle_channel_config[stage_name].append(keep_channels)
             middle_prune_plan.append(
@@ -133,6 +152,7 @@ def _extract_middle_static_resnet_blueprint(
                     "pruned_channel_indices": pruned_indices,
                     "selection_policy": selection_policy,
                     "pruning_threshold": float(prune_result.threshold),
+                    "prune_method": prune_method,
                     "protected_boundary_layers": [f"{block_name}.conv1", f"{block_name}.conv3"],
                 }
             )
@@ -156,10 +176,10 @@ def _extract_middle_static_resnet_blueprint(
                     "importance_max": stats["max"],
                     "importance_mean": stats["mean"],
                     "importance_std": stats["std"],
-                    "prune_method": "middle_static",
+                    "prune_method": prune_method,
                     "selection_policy": selection_policy,
                     "pruning_threshold": float(prune_result.threshold),
-                    "requested_static_prune_ratio": float(static_prune_ratio),
+                    "requested_static_prune_ratio": float(static_prune_ratio) if ratio_based_static else None,
                     "block_middle_pruning": True,
                     "block_middle_layer_found": True,
                     "protected_boundary_layers": [f"{block_name}.conv1", f"{block_name}.conv3"],
@@ -181,10 +201,10 @@ def _extract_middle_static_resnet_blueprint(
                 "pruned_channels": int(len(pruned_indices)),
                 "actual_prune_ratio": actual_prune_ratio,
                 "criterion": "bn2_weight_or_conv2_l1",
-                "prune_method": "middle_static",
+                "prune_method": prune_method,
                 "selection_policy": selection_policy,
                 "pruning_threshold": float(prune_result.threshold),
-                "requested_static_prune_ratio": float(static_prune_ratio),
+                "requested_static_prune_ratio": float(static_prune_ratio) if ratio_based_static else None,
                 "block_middle_pruning": True,
                 "block_middle_layer_found": True,
                 "protected_boundary_layers": [f"{block_name}.conv1", f"{block_name}.conv3"],
@@ -206,7 +226,7 @@ def _extract_middle_static_resnet_blueprint(
                     "student_out_channels": keep_channels,
                     "channels_pruned": int(len(pruned_indices)),
                     "actual_prune_ratio": actual_prune_ratio,
-                    "prune_method": "middle_static",
+                    "prune_method": prune_method,
                     "selection_policy": selection_policy,
                     "pruning_threshold": float(prune_result.threshold),
                 }
@@ -220,14 +240,14 @@ def _extract_middle_static_resnet_blueprint(
                         "importance": float(importance_value),
                         "rank_desc": int(rank_lookup[channel_index]),
                         "decision": "keep" if channel_index in kept_index_set else "prune",
-                        "prune_method": "middle_static",
+                        "prune_method": prune_method,
                         "selection_policy": selection_policy,
                         "pruning_threshold": float(prune_result.threshold),
                     }
                 )
 
     if not middle_prune_plan:
-        raise RuntimeError("Could not find ResNet bottleneck blocks for middle_static pruning.")
+        raise RuntimeError(f"Could not find ResNet bottleneck blocks for {prune_method} pruning.")
 
     total_before = int(sum(row["teacher_out_channels"] for row in teacher_vs_student_rows))
     total_after = int(sum(row["student_out_channels"] for row in teacher_vs_student_rows))
@@ -249,14 +269,14 @@ def _extract_middle_static_resnet_blueprint(
         "stage_middle_channel_config": {stage: list(values) for stage, values in stage_middle_channel_config.items()},
         "middle_prune_plan": middle_prune_plan,
         "student_architecture": "middle_pruned_resnet_unet",
-        "prune_method": "middle_static",
-        "prune_ratio": float(prune_ratio),
-        "static_prune_ratio": float(static_prune_ratio),
+        "prune_method": prune_method,
+        "prune_ratio": float(prune_ratio) if ratio_based_static else None,
+        "static_prune_ratio": float(static_prune_ratio) if ratio_based_static else None,
         "block_middle_pruning": True,
         "target_modules": list(target_modules),
         "criterion": "bn2_weight_or_conv2_l1",
-        "minimum_channels": 1,
-        "dynamic_min_keep_ratio": 0.0,
+        "minimum_channels": effective_minimum_channels,
+        "dynamic_min_keep_ratio": effective_min_keep_ratio,
         "otsu_bins": int(otsu_bins),
         "gmm_random_state": int(gmm_random_state),
         "modules": per_module,
@@ -296,12 +316,15 @@ def extract_pruned_blueprint(
         raise ValueError("prune_ratio must be in [0, 1).")
 
     target_modules = tuple(_resolve_target_modules(teacher_model, target_modules))
-    if is_middle_static_pruning(prune_method):
-        return _extract_middle_static_resnet_blueprint(
+    if is_middle_resnet_pruning(prune_method):
+        return _extract_middle_resnet_blueprint(
             teacher_model,
+            prune_method=prune_method,
             prune_ratio=prune_ratio,
-            static_prune_ratio=float(static_prune_ratio),
+            static_prune_ratio=float(static_prune_ratio) if ratio_based_static else None,
             target_modules=target_modules,
+            minimum_channels=minimum_channels,
+            dynamic_min_keep_ratio=dynamic_min_keep_ratio,
             otsu_bins=otsu_bins,
             gmm_random_state=gmm_random_state,
         )

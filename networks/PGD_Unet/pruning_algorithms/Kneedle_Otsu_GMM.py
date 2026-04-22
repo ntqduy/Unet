@@ -277,7 +277,7 @@ def prune_one_layer(
             keep_mask=keep_mask,
             threshold=tau,
         )
-    elif method == "kneedle":
+    elif method in {"kneedle", "middle_kneedle"}:
         tau = kneedle_threshold(scores)
     elif method == "otsu":
         tau = otsu_threshold(scores, num_bins=otsu_bins)
@@ -367,7 +367,7 @@ if __name__ == "__main__":
         "decoder.block3.conv": 0.6,   # deep/decoder giữ cẩn thận hơn
     }
 
-    for method in ["static", "middle_static", "kneedle", "otsu", "gmm"]:
+    for method in ["static", "middle_static", "kneedle", "middle_kneedle", "otsu", "gmm"]:
         print(f"\nMETHOD = {method.upper()}")
         results = prune_all_layers(
             layer_scores=layer_scores,

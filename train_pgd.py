@@ -79,8 +79,10 @@ PRUNE_STRATEGY_TO_METHOD = {
     "S3": "otsu",
     "S4": "gmm",
     "S5": "middle_static",
+    "S6": "middle_kneedle",
 }
 PRUNE_METHOD_TO_STRATEGY = {method: strategy for strategy, method in PRUNE_STRATEGY_TO_METHOD.items()}
+MIDDLE_PRUNED_RESNET_METHODS = {"middle_static", "middle_kneedle"}
 
 
 def _format_float_for_path(value: float) -> str:
@@ -94,7 +96,7 @@ def build_pruning_output_dir_name(prune_method: str, static_prune_ratio: float |
         if static_prune_ratio is None:
             raise ValueError(f"static_prune_ratio is required for {prune_method} output directory naming.")
         return f"output_{prune_method}_{_format_float_for_path(static_prune_ratio)}"
-    if prune_method in {"kneedle", "otsu", "gmm"}:
+    if prune_method in {"kneedle", "otsu", "gmm", "middle_kneedle"}:
         return f"output_{prune_method}"
     raise ValueError(f"Unsupported prune_method: {prune_method}")
 
@@ -111,12 +113,20 @@ def build_step3_output_dir_name(
     return f"output_{prune_method}_{rate_tag}_{step3_tag}"
 
 
-def _uses_middle_static_student() -> bool:
-    return str(args.prune_method).lower() == "middle_static"
+def _uses_middle_pruned_resnet_student() -> bool:
+    return str(args.prune_method).lower() in MIDDLE_PRUNED_RESNET_METHODS
 
 
 def _student_model_name() -> str:
-    return "middle_pruned_resnet_unet" if _uses_middle_static_student() else "pdg_unet"
+    return "middle_pruned_resnet_unet" if _uses_middle_pruned_resnet_student() else "pdg_unet"
+
+
+def _middle_student_name(prefix: str = "student") -> str:
+    return f"{args.prune_method}_{prefix}"
+
+
+def _strategy_label() -> str:
+    return args.prune_strategy or PRUNE_METHOD_TO_STRATEGY.get(args.prune_method, args.prune_method)
 
 
 def _normalize_pruning_args(parsed_args: argparse.Namespace, active_parser: argparse.ArgumentParser) -> argparse.Namespace:
@@ -210,9 +220,9 @@ parser.add_argument("--num_classes", type=int, default=2)
 parser.add_argument("--in_channels", type=int, default=3)
 parser.add_argument("--encoder_pretrained", type=int, default=1, help="defaults to 1 for unet_resnet152 teacher builds")
 parser.add_argument("--prune_ratio", type=float, default=0.5, help="backward-compatible fixed ratio used by static pruning methods if --static_prune_ratio is omitted")
-parser.add_argument("--prune_strategy", type=str, default="", help="external pruning strategy code: S1=static, S2=kneedle, S3=otsu, S4=gmm, S5=middle_static")
-parser.add_argument("--prune_method", type=str, default="", help="internal pruning method: static, kneedle, otsu, gmm, or middle_static")
-parser.add_argument("--static_prune_ratio", type=float, default=None, help="fixed channel prune ratio for static and middle_static pruning; must be in [0, 1)")
+parser.add_argument("--prune_strategy", type=str, default="", help="external pruning strategy code: S1=static, S2=kneedle, S3=otsu, S4=gmm, S5=middle_static, S6=middle_kneedle")
+parser.add_argument("--prune_method", type=str, default="", help="internal pruning method: static, kneedle, otsu, gmm, middle_static, or middle_kneedle")
+parser.add_argument("--static_prune_ratio", type=float, default=None, help="fixed channel prune ratio for static and middle_static pruning; S6/middle_kneedle ignores it")
 parser.add_argument("--lambda_distill", type=float, default=0.3)
 parser.add_argument("--lambda_sparsity", type=float, default=0.3)
 parser.add_argument(
@@ -316,7 +326,7 @@ def _blueprint_matches_current_pruning_config(candidate_blueprint: dict) -> bool
     candidate_method = str(candidate_blueprint.get("prune_method", "static")).lower()
     if candidate_method != args.prune_method:
         return False
-    if args.prune_method == "middle_static" and str(candidate_blueprint.get("student_architecture", "")).lower() != "middle_pruned_resnet_unet":
+    if args.prune_method in MIDDLE_PRUNED_RESNET_METHODS and str(candidate_blueprint.get("student_architecture", "")).lower() != "middle_pruned_resnet_unet":
         return False
     if uses_static_prune_ratio(args.prune_method):
         candidate_ratio = candidate_blueprint.get("static_prune_ratio", candidate_blueprint.get("prune_ratio"))
@@ -405,11 +415,11 @@ def _student_variant_policy() -> dict:
         },
     }
     policy = dict(policies[args.student_variant])
-    if _uses_middle_static_student():
+    if _uses_middle_pruned_resnet_student():
         policy["use_gating"] = False
         policy["use_sparsity"] = False
         policy["description"] = (
-            "S5 uses structural middle-channel pruning inside ResNet bottlenecks. "
+            f"{_strategy_label()} uses structural middle-channel pruning inside ResNet bottlenecks. "
             "The ResNet boundary layers stay full, so PDG gate-based late pruning is disabled for this student."
         )
     return policy
@@ -1882,8 +1892,8 @@ def _run_pruning(device: torch.device, image_mode: str, db_train, teacher_artifa
                 "teacher_run_dir": project_relative_path(teacher_artifact["run_dir"], PROJECT_ROOT),
                 "student_name": _student_model_name(),
                 "mapping_rule": (
-                    "teacher_resnet_bottleneck_conv2 -> middle_pruned_resnet_unet"
-                    if _uses_middle_static_student()
+                    f"teacher_resnet_bottleneck_conv2 -> middle_pruned_resnet_unet ({args.prune_method})"
+                    if _uses_middle_pruned_resnet_student()
                     else "teacher_encoder -> student_channel_config"
                 ),
                 **_pruning_metadata(),
@@ -1926,18 +1936,20 @@ def _run_pruning(device: torch.device, image_mode: str, db_train, teacher_artifa
         weight_transfer["copy_ratio"] = weight_transfer.get("block_transfer_ratio")
         weight_transfer["exact_match_copy_ratio"] = weight_transfer.get("exact_matching_full_weight_copy", {}).get("copy_ratio")
         weight_transfer["effective_note"] = (
-            "S5 initializes a middle-pruned ResNet-UNet from the teacher. In every ResNet bottleneck, conv1 output and conv3 output stay full; "
-            "only conv2 output, bn2, and conv3 input are subset-copied by the static top-k mask."
+            f"{_strategy_label()} initializes a middle-pruned ResNet-UNet from the teacher. In every ResNet bottleneck, conv1 output and conv3 output stay full; "
+            "only conv2 output, bn2, and conv3 input are subset-copied by the selected pruning mask."
         )
         logging.info(
-            "Step-2 S5 middle reuse | copied_blocks=%s/%s | exact_match_copy_ratio=%.4f",
+            "Step-2 %s middle reuse | copied_blocks=%s/%s | exact_match_copy_ratio=%.4f",
+            _strategy_label(),
             weight_transfer.get("copied_blocks"),
             weight_transfer.get("requested_blocks"),
             float(weight_transfer.get("exact_match_copy_ratio", 0.0) or 0.0),
         )
         for row in weight_transfer.get("rows", [])[:20]:
             logging.info(
-                "Step-2 S5 block reuse | block=%s | middle=%s | status=%s | kept=%s/%s | protected=%s | pruned=%s",
+                "Step-2 %s block reuse | block=%s | middle=%s | status=%s | kept=%s/%s | protected=%s | pruned=%s",
+                _strategy_label(),
                 row.get("block_name"),
                 row.get("middle_layer_name"),
                 row.get("status"),
@@ -1999,7 +2011,7 @@ def _run_pruning(device: torch.device, image_mode: str, db_train, teacher_artifa
             "phase_name": "pruning",
             "teacher_model": args.teacher_model,
             "teacher_backbone_name": teacher_artifact["metadata"].get("backbone_name"),
-            "student_name": "middle_static_student_init" if middle_static_student else "pruned_student_init",
+            "student_name": _middle_student_name("student_init") if middle_static_student else "pruned_student_init",
             "blueprint_path": project_relative_path(blueprint_path, PROJECT_ROOT),
             "blueprint": blueprint,
             **_pruning_metadata(),
@@ -2008,7 +2020,7 @@ def _run_pruning(device: torch.device, image_mode: str, db_train, teacher_artifa
             "checkpoint_weight_status": "teacher_middle_subset_reuse_then_saved" if middle_static_student else "teacher_subset_reuse_then_saved",
             "checkpoint_weight_source": "teacher_full_boundary_weights + middle_conv2_subset" if middle_static_student else "teacher_kept_channels + exact_match_fallback",
             "evaluation_note": (
-                "This phase evaluates the S5 middle-pruned ResNet-UNet immediately after structural pruning. "
+                f"This phase evaluates the {_strategy_label()} middle-pruned ResNet-UNet immediately after structural pruning. "
                 "Inside each ResNet bottleneck, conv1 output and conv3 output remain full; only conv2 output, bn2, and conv3 input are pruned."
                 if middle_static_student
                 else (
@@ -2132,8 +2144,8 @@ def _run_student(device: torch.device, image_mode: str, db_train, trainloader, v
             "teacher_model": args.teacher_model,
             "teacher_backbone_name": teacher_artifact["metadata"].get("backbone_name"),
             "student_name": (
-                f"middle_static_student_{variant_policy['variant_name']}"
-                if _uses_middle_static_student()
+                _middle_student_name(f"student_{variant_policy['variant_name']}")
+                if _uses_middle_pruned_resnet_student()
                 else f"gated_student_{variant_policy['variant_name']}"
             ),
             "blueprint_path": project_relative_path(pruning_artifact["blueprint_path"], PROJECT_ROOT),
@@ -2142,13 +2154,13 @@ def _run_student(device: torch.device, image_mode: str, db_train, trainloader, v
             "student_variant": variant_policy,
             "distillation_target": "logits",
             "soft_pruning_definition": (
-                "S5 already applies structural middle-channel pruning inside ResNet bottlenecks; gate-based soft pruning is disabled."
-                if _uses_middle_static_student()
+                f"{_strategy_label()} already applies structural middle-channel pruning inside ResNet bottlenecks; gate-based soft pruning is disabled."
+                if _uses_middle_pruned_resnet_student()
                 else "Soft pruning is implemented through learnable channel gates plus sparsity regularization during the active pruning epochs."
             ),
             "hard_pruning_definition": (
-                "S5 keeps ResNet bottleneck boundary outputs full, so late PDG hard pruning is disabled for this architecture."
-                if _uses_middle_static_student()
+                f"{_strategy_label()} keeps ResNet bottleneck boundary outputs full, so late PDG hard pruning is disabled for this architecture."
+                if _uses_middle_pruned_resnet_student()
                 else (
                     "Late hard pruning is applied at the beginning of the final pruning window. The student is rebuilt with fewer channels based on gate values, "
                     "then the compact student continues distillation for the remaining epochs."
@@ -2230,7 +2242,7 @@ def _run_student(device: torch.device, image_mode: str, db_train, trainloader, v
         reusable_channel_config = reusable_signature.get("channel_config")
         if reusable_channel_config:
             reusable_channel_config = tuple(int(channel) for channel in reusable_channel_config)
-            if reusable_channel_config != tuple(student.channel_config) and not _uses_middle_static_student():
+            if reusable_channel_config != tuple(student.channel_config) and not _uses_middle_pruned_resnet_student():
                 student = PDGUNet(
                     in_channels=db_train.in_channels,
                     num_classes=args.num_classes,

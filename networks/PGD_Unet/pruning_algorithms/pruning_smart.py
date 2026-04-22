@@ -8,13 +8,14 @@ import torch.nn as nn
 
 # Small helpers for pruning method normalization.
 #
-# The production S5 path for ResNet152 bottlenecks is implemented in
+# The production S5/S6 path for ResNet152 bottlenecks is implemented in
 # `networks/PGD_Unet/pruning.py`, where every block prunes only `conv2` and keeps
 # the block boundary outputs full. The generic middle-layer selector below is kept
 # for backward-compatible imports and non-ResNet experiments.
 
 STATIC_RATIO_PRUNE_METHODS = {"static", "middle_static"}
 MIDDLE_STATIC_PRUNE_METHOD = "middle_static"
+MIDDLE_RESNET_PRUNE_METHODS = {"middle_static", "middle_kneedle"}
 CHANNEL_LAYER_TYPES = (nn.Conv2d, nn.ConvTranspose2d)
 PROJECTION_LAYER_TOKENS = ("downsample", "skip", "shortcut", "projection", "proj")
 
@@ -36,6 +37,10 @@ def uses_static_prune_ratio(prune_method: str) -> bool:
 
 def is_middle_static_pruning(prune_method: str) -> bool:
     return str(prune_method).lower() == MIDDLE_STATIC_PRUNE_METHOD
+
+
+def is_middle_resnet_pruning(prune_method: str) -> bool:
+    return str(prune_method).lower() in MIDDLE_RESNET_PRUNE_METHODS
 
 
 def _is_projection_layer(layer_name: str) -> bool:
@@ -83,7 +88,7 @@ def select_block_middle_channel_layer(
     """
     Select a generic interior channel layer.
 
-    The ResNet152 S5 implementation does not call this helper; it directly
+    The ResNet152 S5/S6 implementation does not call this helper; it directly
     targets each bottleneck `conv2` so `conv1` and `conv3` boundaries stay full.
     This helper remains available for older/custom block-style experiments.
     """
