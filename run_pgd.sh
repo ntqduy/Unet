@@ -102,8 +102,18 @@ case "$PRUNE_STRATEGY" in
     RATE_TAG="auto"
     PRUNE_ARGS=(--prune_strategy "$PRUNE_STRATEGY" --prune_method "$PRUNE_METHOD")
     ;;
+  S7)
+    PRUNE_METHOD="middle_otsu"
+    RATE_TAG="auto"
+    PRUNE_ARGS=(--prune_strategy "$PRUNE_STRATEGY" --prune_method "$PRUNE_METHOD")
+    ;;
+  S8)
+    PRUNE_METHOD="middle_gmm"
+    RATE_TAG="auto"
+    PRUNE_ARGS=(--prune_strategy "$PRUNE_STRATEGY" --prune_method "$PRUNE_METHOD")
+    ;;
   *)
-    echo "Unsupported PRUNE_STRATEGY=$PRUNE_STRATEGY. Use S1, S2, S3, S4, S5, or S6."
+    echo "Unsupported PRUNE_STRATEGY=$PRUNE_STRATEGY. Use S1, S2, S3, S4, S5, S6, S7, or S8."
     exit 1
     ;;
 esac

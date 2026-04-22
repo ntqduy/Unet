@@ -18,7 +18,7 @@ from utils.channel_analysis import find_primary_channel_layer
 
 
 DEFAULT_BLUEPRINT_MODULES = ("stem", "down1", "down2", "down3", "down4")
-PRUNE_METHODS = ("static", "kneedle", "otsu", "gmm", "middle_static", "middle_kneedle")
+PRUNE_METHODS = ("static", "kneedle", "otsu", "gmm", "middle_static", "middle_kneedle", "middle_otsu", "middle_gmm")
 MODULE_GROUP_CANDIDATES = (
     ("stem", "down1", "down2", "down3", "down4"),
     ("stem", "layer1", "layer2", "layer3", "layer4"),

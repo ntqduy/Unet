@@ -279,9 +279,9 @@ def prune_one_layer(
         )
     elif method in {"kneedle", "middle_kneedle"}:
         tau = kneedle_threshold(scores)
-    elif method == "otsu":
+    elif method in {"otsu", "middle_otsu"}:
         tau = otsu_threshold(scores, num_bins=otsu_bins)
-    elif method == "gmm":
+    elif method in {"gmm", "middle_gmm"}:
         tau = gmm_threshold(scores, random_state=gmm_random_state)
     else:
         raise ValueError(f"Unsupported method: {method}")
@@ -367,7 +367,7 @@ if __name__ == "__main__":
         "decoder.block3.conv": 0.6,   # deep/decoder giữ cẩn thận hơn
     }
 
-    for method in ["static", "middle_static", "kneedle", "middle_kneedle", "otsu", "gmm"]:
+    for method in ["static", "middle_static", "kneedle", "middle_kneedle", "otsu", "middle_otsu", "gmm", "middle_gmm"]:
         print(f"\nMETHOD = {method.upper()}")
         results = prune_all_layers(
             layer_scores=layer_scores,

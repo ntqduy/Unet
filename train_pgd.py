@@ -80,9 +80,11 @@ PRUNE_STRATEGY_TO_METHOD = {
     "S4": "gmm",
     "S5": "middle_static",
     "S6": "middle_kneedle",
+    "S7": "middle_otsu",
+    "S8": "middle_gmm",
 }
 PRUNE_METHOD_TO_STRATEGY = {method: strategy for strategy, method in PRUNE_STRATEGY_TO_METHOD.items()}
-MIDDLE_PRUNED_RESNET_METHODS = {"middle_static", "middle_kneedle"}
+MIDDLE_PRUNED_RESNET_METHODS = {"middle_static", "middle_kneedle", "middle_otsu", "middle_gmm"}
 
 
 def _format_float_for_path(value: float) -> str:
@@ -96,7 +98,7 @@ def build_pruning_output_dir_name(prune_method: str, static_prune_ratio: float |
         if static_prune_ratio is None:
             raise ValueError(f"static_prune_ratio is required for {prune_method} output directory naming.")
         return f"output_{prune_method}_{_format_float_for_path(static_prune_ratio)}"
-    if prune_method in {"kneedle", "otsu", "gmm", "middle_kneedle"}:
+    if prune_method in {"kneedle", "otsu", "gmm", "middle_kneedle", "middle_otsu", "middle_gmm"}:
         return f"output_{prune_method}"
     raise ValueError(f"Unsupported prune_method: {prune_method}")
 
@@ -220,9 +222,9 @@ parser.add_argument("--num_classes", type=int, default=2)
 parser.add_argument("--in_channels", type=int, default=3)
 parser.add_argument("--encoder_pretrained", type=int, default=1, help="defaults to 1 for unet_resnet152 teacher builds")
 parser.add_argument("--prune_ratio", type=float, default=0.5, help="backward-compatible fixed ratio used by static pruning methods if --static_prune_ratio is omitted")
-parser.add_argument("--prune_strategy", type=str, default="", help="external pruning strategy code: S1=static, S2=kneedle, S3=otsu, S4=gmm, S5=middle_static, S6=middle_kneedle")
-parser.add_argument("--prune_method", type=str, default="", help="internal pruning method: static, kneedle, otsu, gmm, middle_static, or middle_kneedle")
-parser.add_argument("--static_prune_ratio", type=float, default=None, help="fixed channel prune ratio for static and middle_static pruning; S6/middle_kneedle ignores it")
+parser.add_argument("--prune_strategy", type=str, default="", help="external pruning strategy code: S1=static, S2=kneedle, S3=otsu, S4=gmm, S5=middle_static, S6=middle_kneedle, S7=middle_otsu, S8=middle_gmm")
+parser.add_argument("--prune_method", type=str, default="", help="internal pruning method: static, kneedle, otsu, gmm, middle_static, middle_kneedle, middle_otsu, or middle_gmm")
+parser.add_argument("--static_prune_ratio", type=float, default=None, help="fixed channel prune ratio for static and middle_static pruning; dynamic strategies ignore it")
 parser.add_argument("--lambda_distill", type=float, default=0.3)
 parser.add_argument("--lambda_sparsity", type=float, default=0.3)
 parser.add_argument(
