@@ -244,7 +244,8 @@ parser.add_argument("--lambda_aux", type=float, default=0.2)
 parser.add_argument(
     "--feature_layers",
     nargs="*",
-    default=["stem", "down1", "down2", "down3", "down4", "up1", "up2", "up3", "up4"],
+    default=["bottleneck"],
+    help="feature distillation layers; default compares only the bottleneck tensor at the encoder/decoder interface",
 )
 parser.add_argument(
     "--student_variant",

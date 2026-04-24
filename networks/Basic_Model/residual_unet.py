@@ -63,23 +63,28 @@ class ResidualUNet2D(BaseSegmentationModel):
         self.dropout = nn.Dropout2d(decoder_dropout)
         self.head = nn.Conv2d(channels[0], num_classes, kernel_size=1)
 
-    def forward_features(self, x: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
+    def forward_features(self, x: torch.Tensor) -> Tuple[torch.Tensor, dict]:
         x1 = self.enc1(x)
         x2 = self.enc2(self.pool(x1))
         x3 = self.enc3(self.pool(x2))
         x4 = self.enc4(self.pool(x3))
         x5 = self.bottleneck(self.pool(x4))
 
-        x = self.dec4(x5, x4)
-        x = self.dropout(self.dec3(x, x3))
-        x = self.dropout(self.dec2(x, x2))
-        features = self.dec1(x, x1)
-        logits = self.head(features)
+        up1 = self.dec4(x5, x4)
+        up2 = self.dropout(self.dec3(up1, x3))
+        up3 = self.dropout(self.dec2(up2, x2))
+        decoder_features = self.dec1(up3, x1)
+        logits = self.head(decoder_features)
+        features = {
+            "bottleneck": x5,
+            "encoder": {"enc1": x1, "enc2": x2, "enc3": x3, "enc4": x4, "bottleneck": x5},
+            "decoder": {"up1": up1, "up2": up2, "up3": up3, "up4": decoder_features, "final": decoder_features},
+        }
         return logits, features
 
     def forward(self, x: torch.Tensor, return_features: bool = False):
         logits, features = self.forward_features(x)
-        output = self.build_output(logits, features={"decoder": features})
+        output = self.build_output(logits, features=features)
         if return_features:
             return output
         return output

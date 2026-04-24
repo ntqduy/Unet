@@ -114,6 +114,7 @@ class UNetResNet152(BaseSegmentationModel):
         final = self.final_up(up4)
         logits = self.head(final)
         features = {
+            "bottleneck": center,
             "encoder": {"stem": x0, "down1": x1, "down2": x2, "down3": x3, "down4": center},
             "decoder": {"up1": up1, "up2": up2, "up3": up3, "up4": final, "final": final},
         }

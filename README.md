@@ -297,7 +297,8 @@ Các argument chính:
 - `--use_aux_loss 1/0`, mặc định `0`
 - `--lambda_feat`, mặc định `0.1`
 - `--lambda_aux`, mặc định `0.2`
-- `--feature_layers`, mặc định `stem down1 down2 down3 down4 up1 up2 up3 up4`
+- `--feature_layers`, mặc định `bottleneck`
+- mặc định feature distillation chỉ so tensor `bottleneck` ở điểm giao giữa encoder và decoder; loss này vẫn backprop qua feature của student nên encoder student được update weight
 
 Tổng loss:
 

@@ -120,6 +120,7 @@ class PDGUNet(BaseSegmentationModel):
         decoder_features = self.up4(up3, x0)
         logits = self.head(decoder_features)
         features = {
+            "bottleneck": x4,
             "encoder": {"stem": x0, "down1": x1, "down2": x2, "down3": x3, "down4": x4},
             "decoder": {"up1": up1, "up2": up2, "up3": up3, "up4": decoder_features, "final": decoder_features},
         }

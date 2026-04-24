@@ -36,7 +36,7 @@ def _build_help_parser() -> argparse.ArgumentParser:
     parser.add_argument("--use_aux_loss", type=int, default=0)
     parser.add_argument("--lambda_feat", type=float, default=0.1)
     parser.add_argument("--lambda_aux", type=float, default=0.2)
-    parser.add_argument("--feature_layers", nargs="*", default=["stem", "down1", "down2", "down3", "down4", "up1", "up2", "up3", "up4"])
+    parser.add_argument("--feature_layers", nargs="*", default=["bottleneck"])
     parser.add_argument("--student_variant", type=str, default="full")
     parser.add_argument("--warmup_pruning_epochs", type=int, default=4)
     parser.add_argument("--enable_step3_pruning", type=int, default=1)

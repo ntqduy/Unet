@@ -85,25 +85,30 @@ class UNet2D(BaseSegmentationModel):
 
         self.head = nn.Conv2d(channels[0], num_classes, kernel_size=1)
 
-    def forward_features(self, x: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
+    def forward_features(self, x: torch.Tensor) -> Tuple[torch.Tensor, dict]:
         x0 = self.stem(x)
         x1 = self.down1(x0)
         x2 = self.down2(x1)
         x3 = self.down3(x2)
         x4 = self.down4(x3)
 
-        x = self.up1(x4, x3)
-        x = self.up2(x, x2)
-        x = self.up3(x, x1)
-        features = self.up4(x, x0)
-        logits = self.head(features)
+        up1 = self.up1(x4, x3)
+        up2 = self.up2(up1, x2)
+        up3 = self.up3(up2, x1)
+        decoder_features = self.up4(up3, x0)
+        logits = self.head(decoder_features)
+        features = {
+            "bottleneck": x4,
+            "encoder": {"stem": x0, "down1": x1, "down2": x2, "down3": x3, "down4": x4},
+            "decoder": {"up1": up1, "up2": up2, "up3": up3, "up4": decoder_features, "final": decoder_features},
+        }
         return logits, features
 
     def forward(self, x: torch.Tensor, return_features: bool = False):
         logits, features = self.forward_features(x)
         output = self.build_output(
             logits,
-            features={"decoder": features},
+            features=features,
             aux={"feature_channels": list(self.head.weight.shape[1:2])},
         )
         if return_features:
