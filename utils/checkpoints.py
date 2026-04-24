@@ -137,6 +137,19 @@ def _write_metadata(metadata_path: Path, payload: Dict[str, Any], checkpoint_pat
     return write_checkpoint_metadata(metadata_path, payload, checkpoint_path, project_root=project_root)
 
 
+def save_checkpoint_payload_atomic(payload: Any, checkpoint_path: Path | str) -> Path:
+    checkpoint_path = Path(checkpoint_path)
+    checkpoint_path.parent.mkdir(parents=True, exist_ok=True)
+    temp_checkpoint_path = checkpoint_path.with_name(f".{checkpoint_path.name}.tmp")
+    try:
+        torch.save(payload, temp_checkpoint_path)
+        temp_checkpoint_path.replace(checkpoint_path)
+    finally:
+        if temp_checkpoint_path.exists():
+            temp_checkpoint_path.unlink()
+    return checkpoint_path
+
+
 def save_checkpoint(
     run_dir: Path | str,
     tag: str,
@@ -173,18 +186,18 @@ def save_checkpoint(
         extra_state=extra_state,
     )
     last_checkpoint_path = layout["checkpoint_dir"] / "last.pth"
-    torch.save(payload, last_checkpoint_path)
+    save_checkpoint_payload_atomic(payload, last_checkpoint_path)
     _write_metadata(layout["metadata_dir"] / "last.json", payload, last_checkpoint_path, project_root=project_root)
 
     if save_tagged_checkpoint and tag not in {"last", "best"}:
         checkpoint_path = layout["checkpoint_dir"] / f"{tag}.pth"
-        torch.save(payload, checkpoint_path)
+        save_checkpoint_payload_atomic(payload, checkpoint_path)
         _write_metadata(layout["metadata_dir"] / f"{tag}.json", payload, checkpoint_path, project_root=project_root)
 
     return_path = last_checkpoint_path
     if is_best:
         best_checkpoint_path = layout["checkpoint_dir"] / "best.pth"
-        torch.save(payload, best_checkpoint_path)
+        save_checkpoint_payload_atomic(payload, best_checkpoint_path)
         _write_metadata(layout["metadata_dir"] / "best.json", payload, best_checkpoint_path, project_root=project_root)
         return_path = best_checkpoint_path
 
@@ -193,8 +206,15 @@ def save_checkpoint(
 
 def load_checkpoint(checkpoint_path: Path | str, *, device: Optional[torch.device] = None) -> Dict[str, Any]:
     checkpoint_path = Path(checkpoint_path)
+    if not checkpoint_path.is_file():
+        raise FileNotFoundError(f"Checkpoint file does not exist: {checkpoint_path}")
+    if checkpoint_path.stat().st_size == 0:
+        raise EOFError(f"Checkpoint file is empty: {checkpoint_path}")
     map_location = device if device is not None else "cpu"
-    return torch.load(checkpoint_path, map_location=map_location)
+    try:
+        return torch.load(checkpoint_path, map_location=map_location)
+    except EOFError as error:
+        raise EOFError(f"Checkpoint file is incomplete or corrupted: {checkpoint_path}") from error
 
 
 def load_checkpoint_into_model(checkpoint_path: Path | str, model, *, device: Optional[torch.device] = None, strict: bool = True) -> Dict[str, Any]:
@@ -232,7 +252,7 @@ def clone_checkpoint_file(
         if payload_overrides:
             for key, value in payload_overrides.items():
                 payload[key] = value
-        torch.save(payload, target_checkpoint_path)
+        save_checkpoint_payload_atomic(payload, target_checkpoint_path)
     else:
         shutil.copy2(source_checkpoint_path, target_checkpoint_path)
         payload = {"model_state_dict": {}}

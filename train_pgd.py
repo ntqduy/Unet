@@ -4,6 +4,7 @@ import argparse
 import json
 import logging
 import os
+import pickle
 import random
 import sys
 import time
@@ -37,7 +38,14 @@ from utils.channel_analysis import (
     save_gating_analysis_artifacts,
     save_pruning_analysis_artifacts,
 )
-from utils.checkpoints import build_checkpoint_metadata, load_checkpoint, load_checkpoint_into_model, resolve_phase_checkpoint, save_checkpoint
+from utils.checkpoints import (
+    build_checkpoint_metadata,
+    load_checkpoint,
+    load_checkpoint_into_model,
+    resolve_phase_checkpoint,
+    save_checkpoint,
+    save_checkpoint_payload_atomic,
+)
 from utils.checkpoint_resolver import (
     build_expected_signature,
     find_compatible_checkpoint,
@@ -1363,8 +1371,16 @@ def _export_student_final_shortcuts(student_run_dir: Path, proposal_root_dir: Pa
         if not source_path.is_file():
             continue
         target_path = student_final_dir / target_name
-        payload = load_checkpoint(source_path)
-        torch.save(payload, target_path)
+        try:
+            payload = load_checkpoint(source_path)
+        except (EOFError, RuntimeError, OSError, pickle.UnpicklingError) as error:
+            logging.warning(
+                "Skip exporting student final shortcut because checkpoint is not readable: %s | %s",
+                project_relative_path(source_path, PROJECT_ROOT),
+                error,
+            )
+            continue
+        save_checkpoint_payload_atomic(payload, target_path)
         metadata = build_checkpoint_metadata(
             payload,
             target_path,
