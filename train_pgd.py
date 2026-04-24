@@ -235,6 +235,17 @@ parser.add_argument("--prune_method", type=str, default="", help="internal pruni
 parser.add_argument("--static_prune_ratio", type=float, default=None, help="fixed channel prune ratio for static and middle_static pruning; dynamic strategies ignore it")
 parser.add_argument("--lambda_distill", type=float, default=0.3)
 parser.add_argument("--lambda_sparsity", type=float, default=0.3)
+parser.add_argument("--use_kd_output", type=int, default=1)
+parser.add_argument("--use_sparsity", type=int, default=1)
+parser.add_argument("--use_feature_distill", type=int, default=0)
+parser.add_argument("--use_aux_loss", type=int, default=0)
+parser.add_argument("--lambda_feat", type=float, default=0.1)
+parser.add_argument("--lambda_aux", type=float, default=0.2)
+parser.add_argument(
+    "--feature_layers",
+    nargs="*",
+    default=["stem", "down1", "down2", "down3", "down4", "up1", "up2", "up3", "up4"],
+)
 parser.add_argument(
     "--student_variant",
     type=str,
@@ -274,6 +285,12 @@ parser.add_argument("--save_history_checkpoints", type=int, default=0, help="set
 args = parser.parse_args()
 args = _normalize_pruning_args(args, parser)
 args = _normalize_step3_pruning_args(args, parser)
+for _flag_name in ("use_kd_output", "use_sparsity", "use_feature_distill", "use_aux_loss"):
+    if int(getattr(args, _flag_name)) not in (0, 1):
+        parser.error(f"--{_flag_name} must be 0 or 1.")
+    setattr(args, _flag_name, int(getattr(args, _flag_name)))
+args.lambda_sparsity = float(args.lambda_sparsity) if bool(args.use_sparsity) else 0.0
+args.loss_tag = None
 
 
 def _write_json(path: Path, payload: dict) -> None:
@@ -282,8 +299,26 @@ def _write_json(path: Path, payload: dict) -> None:
         json.dump(payload, file, indent=2)
 
 
+def _loss_tag() -> str:
+    parts = ["loss", "seg"]
+    if args.use_kd_output:
+        parts.append("kd")
+    if args.use_feature_distill:
+        parts.append("feat")
+    if args.use_aux_loss:
+        parts.append("aux")
+    if args.use_sparsity:
+        parts.append("sparsity")
+    if len(parts) == 2:
+        parts.append("only")
+    return "_".join(parts)
+
+
+args.loss_tag = _loss_tag()
+
+
 def _proposal_root_dir() -> Path:
-    return _teacher_root_dir() / sanitize_tag(args.step3_output_dir_name)
+    return _teacher_root_dir() / sanitize_tag(_loss_tag()) / sanitize_tag(args.step3_output_dir_name)
 
 
 def _teacher_output_root() -> str | None:
@@ -326,6 +361,14 @@ def _pruning_metadata() -> dict:
         "prune_ratio": static_ratio,
         "pruning_output_dir_name": args.pruning_output_dir_name,
         "step3_output_dir_name": args.step3_output_dir_name,
+        "loss_tag": args.loss_tag,
+        "use_kd_output": int(args.use_kd_output),
+        "use_sparsity": int(args.use_sparsity),
+        "use_feature_distill": int(args.use_feature_distill),
+        "use_aux_loss": int(args.use_aux_loss),
+        "lambda_feat": float(args.lambda_feat),
+        "lambda_aux": float(args.lambda_aux),
+        "feature_layers": list(args.feature_layers),
         "step3_pruning_enabled": bool(args.enable_step3_pruning),
         "step3_pruning_epochs": int(args.step3_pruning_epochs),
         "step3_pruning_tag": str(int(args.step3_pruning_epochs)) if bool(args.enable_step3_pruning) else "no",
@@ -425,6 +468,8 @@ def _student_variant_policy() -> dict:
         },
     }
     policy = dict(policies[args.student_variant])
+    policy["use_distill"] = bool(policy["use_distill"] and args.use_kd_output)
+    policy["use_sparsity"] = bool(policy["use_sparsity"] and args.use_sparsity)
     if _uses_middle_pruned_resnet_student():
         policy["use_gating"] = False
         policy["use_sparsity"] = False
@@ -521,6 +566,9 @@ def _student_epoch_policy(epoch: int, schedule: dict, variant_policy: dict) -> d
             "gate_trainable": False,
             "lambda_distill": args.lambda_distill if variant_policy["use_distill"] else 0.0,
             "lambda_sparsity": 0.0,
+            "lambda_feat": args.lambda_feat if bool(args.use_feature_distill) else 0.0,
+            "lambda_aux": args.lambda_aux if bool(args.use_aux_loss) else 0.0,
+            "needs_teacher_output": bool((args.lambda_distill if variant_policy["use_distill"] else 0.0) > 0 or (bool(args.use_feature_distill) and args.lambda_feat > 0)),
             "soft_pruning_active": False,
             "hard_pruning_active": False,
         }
@@ -541,11 +589,18 @@ def _student_epoch_policy(epoch: int, schedule: dict, variant_policy: dict) -> d
     else:
         phase_name = "gate_stabilization"
 
+    lambda_distill = args.lambda_distill if variant_policy["use_distill"] else 0.0
+    lambda_sparsity = args.lambda_sparsity if in_soft_pruning else 0.0
+    lambda_feat = args.lambda_feat if bool(args.use_feature_distill) else 0.0
+    lambda_aux = args.lambda_aux if bool(args.use_aux_loss) else 0.0
     return {
         "phase_name": phase_name,
         "gate_trainable": bool(in_soft_pruning),
-        "lambda_distill": args.lambda_distill if variant_policy["use_distill"] else 0.0,
-        "lambda_sparsity": args.lambda_sparsity if in_soft_pruning else 0.0,
+        "lambda_distill": lambda_distill,
+        "lambda_sparsity": lambda_sparsity,
+        "lambda_feat": lambda_feat,
+        "lambda_aux": lambda_aux,
+        "needs_teacher_output": bool(lambda_distill > 0 or lambda_feat > 0),
         "soft_pruning_active": bool(in_soft_pruning),
         "hard_pruning_active": hard_pruning_active,
     }
@@ -2114,13 +2169,23 @@ def _run_pruning(device: torch.device, image_mode: str, db_train, teacher_artifa
 def _compute_student_val_losses(student, teacher, valloader, device, criterion, *, epoch_policy: dict):
     student.eval()
     teacher.eval()
-    tracked = {key: [] for key in ("total_loss", "segmentation_loss", "distillation_loss", "sparsity_loss")}
+    tracked = {
+        key: []
+        for key in (
+            "total_loss",
+            "segmentation_loss",
+            "distillation_loss",
+            "sparsity_loss",
+            "feature_distill_loss",
+            "auxiliary_loss",
+        )
+    }
     with torch.no_grad():
         for batch in valloader:
             _validate_label_batch(batch["label"], args.num_classes, batch)
             image = F.interpolate(batch["image"].to(device), size=args.patch_size, mode="bilinear", align_corners=False)
             label = F.interpolate(batch["label"].unsqueeze(1).float().to(device), size=args.patch_size, mode="nearest").squeeze(1).long()
-            teacher_output = teacher(image) if epoch_policy.get("lambda_distill", 0.0) > 0 else None
+            teacher_output = teacher(image) if epoch_policy.get("needs_teacher_output", False) else None
             loss_dict = criterion(
                 student(image),
                 teacher_output,
@@ -2128,6 +2193,8 @@ def _compute_student_val_losses(student, teacher, valloader, device, criterion, 
                 label,
                 lambda_distill=epoch_policy.get("lambda_distill", 0.0),
                 lambda_sparsity=epoch_policy.get("lambda_sparsity", 0.0),
+                lambda_feat=epoch_policy.get("lambda_feat", 0.0),
+                lambda_aux=epoch_policy.get("lambda_aux", 0.0),
             )
             for key in tracked:
                 tracked[key].append(float(loss_dict[key].item()))
@@ -2278,22 +2345,39 @@ def _run_student(device: torch.device, image_mode: str, db_train, trainloader, v
         logging.info("Loaded student checkpoint: %s", project_relative_path(best_path, PROJECT_ROOT))
         _restore_loss_pdf_if_possible(history, layout["reports_dir"] / "student_loss.pdf", "Student loss")
     else:
-        criterion = CompressionLoss(args.num_classes, args.lambda_distill, args.lambda_sparsity)
+        criterion = CompressionLoss(
+            args.num_classes,
+            args.lambda_distill,
+            args.lambda_sparsity,
+            use_kd_output=args.use_kd_output,
+            use_sparsity=args.use_sparsity,
+            use_feature_distill=args.use_feature_distill,
+            use_aux_loss=args.use_aux_loss,
+            lambda_feat=args.lambda_feat,
+            lambda_aux=args.lambda_aux,
+            feature_layers=args.feature_layers,
+        )
         optimizer = optim.AdamW(student.parameters(), lr=args.student_lr, weight_decay=1e-4)
         history = {
             "train_total_loss": [],
             "train_segmentation_loss": [],
             "train_distillation_loss": [],
             "train_sparsity_loss": [],
+            "train_feature_distill_loss": [],
+            "train_auxiliary_loss": [],
             "val_total_loss": [],
             "val_segmentation_loss": [],
             "val_distillation_loss": [],
             "val_sparsity_loss": [],
+            "val_feature_distill_loss": [],
+            "val_auxiliary_loss": [],
             "val_macro_dice": [],
             "epoch_gate_mean": [],
             "epoch_gate_near_off_ratio": [],
             "epoch_lambda_distill": [],
             "epoch_lambda_sparsity": [],
+            "epoch_lambda_feat": [],
+            "epoch_lambda_aux": [],
         }
         best_metric = float("-inf")
         best_path = None
@@ -2371,13 +2455,23 @@ def _run_student(device: torch.device, image_mode: str, db_train, trainloader, v
                 student.set_gate_trainable(False)
 
             student.train()
-            tracked = {key: [] for key in ("total_loss", "segmentation_loss", "distillation_loss", "sparsity_loss")}
+            tracked = {
+                key: []
+                for key in (
+                    "total_loss",
+                    "segmentation_loss",
+                    "distillation_loss",
+                    "sparsity_loss",
+                    "feature_distill_loss",
+                    "auxiliary_loss",
+                )
+            }
             for batch in trainloader:
                 _validate_label_batch(batch["label"], args.num_classes, batch)
                 image = batch["image"].to(device)
                 label = batch["label"].to(device)
                 teacher_output = None
-                if epoch_policy["lambda_distill"] > 0:
+                if epoch_policy["needs_teacher_output"]:
                     with torch.no_grad():
                         teacher_output = teacher(image)
                 loss_dict = criterion(
@@ -2387,6 +2481,8 @@ def _run_student(device: torch.device, image_mode: str, db_train, trainloader, v
                     label,
                     lambda_distill=epoch_policy["lambda_distill"],
                     lambda_sparsity=epoch_policy["lambda_sparsity"],
+                    lambda_feat=epoch_policy["lambda_feat"],
+                    lambda_aux=epoch_policy["lambda_aux"],
                 )
                 optimizer.zero_grad()
                 loss_dict["total_loss"].backward()
@@ -2411,15 +2507,21 @@ def _run_student(device: torch.device, image_mode: str, db_train, trainloader, v
             history["train_segmentation_loss"].append(float(np.mean(tracked["segmentation_loss"])) if tracked["segmentation_loss"] else 0.0)
             history["train_distillation_loss"].append(float(np.mean(tracked["distillation_loss"])) if tracked["distillation_loss"] else 0.0)
             history["train_sparsity_loss"].append(float(np.mean(tracked["sparsity_loss"])) if tracked["sparsity_loss"] else 0.0)
+            history["train_feature_distill_loss"].append(float(np.mean(tracked["feature_distill_loss"])) if tracked["feature_distill_loss"] else 0.0)
+            history["train_auxiliary_loss"].append(float(np.mean(tracked["auxiliary_loss"])) if tracked["auxiliary_loss"] else 0.0)
             history["val_total_loss"].append(val_losses["total_loss"])
             history["val_segmentation_loss"].append(val_losses["segmentation_loss"])
             history["val_distillation_loss"].append(val_losses["distillation_loss"])
             history["val_sparsity_loss"].append(val_losses["sparsity_loss"])
+            history["val_feature_distill_loss"].append(val_losses["feature_distill_loss"])
+            history["val_auxiliary_loss"].append(val_losses["auxiliary_loss"])
             history["val_macro_dice"].append(val_dice)
             history["epoch_gate_mean"].append(gate_stats["global"]["gate_mean"])
             history["epoch_gate_near_off_ratio"].append(gate_stats["global"]["near_off_ratio"])
             history["epoch_lambda_distill"].append(epoch_policy["lambda_distill"])
             history["epoch_lambda_sparsity"].append(epoch_policy["lambda_sparsity"])
+            history["epoch_lambda_feat"].append(epoch_policy["lambda_feat"])
+            history["epoch_lambda_aux"].append(epoch_policy["lambda_aux"])
             diagnostics_rows.append(
                 {
                     "epoch": epoch,
@@ -2427,17 +2529,25 @@ def _run_student(device: torch.device, image_mode: str, db_train, trainloader, v
                     "soft_pruning_active": int(epoch_policy["soft_pruning_active"]),
                     "hard_pruning_active": int(epoch_policy["hard_pruning_active"]),
                     "distillation_active": int(epoch_policy["lambda_distill"] > 0),
+                    "feature_distill_active": int(epoch_policy["lambda_feat"] > 0),
+                    "auxiliary_loss_active": int(epoch_policy["lambda_aux"] > 0),
                     "gate_trainable": int(epoch_policy["gate_trainable"]),
                     "lambda_distill": epoch_policy["lambda_distill"],
                     "lambda_sparsity": epoch_policy["lambda_sparsity"],
+                    "lambda_feat": epoch_policy["lambda_feat"],
+                    "lambda_aux": epoch_policy["lambda_aux"],
                     "train_total_loss": history["train_total_loss"][-1],
                     "train_segmentation_loss": history["train_segmentation_loss"][-1],
                     "train_distillation_loss": history["train_distillation_loss"][-1],
                     "train_sparsity_loss": history["train_sparsity_loss"][-1],
+                    "train_feature_distill_loss": history["train_feature_distill_loss"][-1],
+                    "train_auxiliary_loss": history["train_auxiliary_loss"][-1],
                     "val_total_loss": val_losses["total_loss"],
                     "val_segmentation_loss": val_losses["segmentation_loss"],
                     "val_distillation_loss": val_losses["distillation_loss"],
                     "val_sparsity_loss": val_losses["sparsity_loss"],
+                    "val_feature_distill_loss": val_losses["feature_distill_loss"],
+                    "val_auxiliary_loss": val_losses["auxiliary_loss"],
                     "val_macro_dice": val_dice,
                     "gate_mean": gate_stats["global"]["gate_mean"],
                     "gate_std": gate_stats["global"]["gate_std"],
@@ -2456,7 +2566,15 @@ def _run_student(device: torch.device, image_mode: str, db_train, trainloader, v
                 optimizer=optimizer,
                 epoch=epoch,
                 best_metric=best_metric,
-                metrics={"val_macro_dice": val_dice, "val_total_loss": val_losses["total_loss"]},
+                metrics={
+                    "val_macro_dice": val_dice,
+                    "val_total_loss": val_losses["total_loss"],
+                    "val_segmentation_loss": val_losses["segmentation_loss"],
+                    "val_distillation_loss": val_losses["distillation_loss"],
+                    "val_sparsity_loss": val_losses["sparsity_loss"],
+                    "val_feature_distill_loss": val_losses["feature_distill_loss"],
+                    "val_auxiliary_loss": val_losses["auxiliary_loss"],
+                },
                 config=vars(args),
                 model_info=student_model_info,
                 phase="student",

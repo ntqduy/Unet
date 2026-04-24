@@ -147,6 +147,16 @@ def write_run_config(run_dir: Path | str, config: Dict) -> Path:
         json.dump(config, file, indent=2)
     with (layout["configs_dir"] / "hyperparameters.json").open("w", encoding="utf-8") as file:
         json.dump(config, file, indent=2)
+    markdown_lines = ["# Run Configuration", ""]
+    for key in sorted(config):
+        value = config[key]
+        if isinstance(value, (dict, list, tuple)):
+            value_text = json.dumps(value, ensure_ascii=False)
+        else:
+            value_text = str(value)
+        markdown_lines.append(f"- `{key}`: `{value_text}`")
+    with (layout["configs_dir"] / "run_config.md").open("w", encoding="utf-8") as file:
+        file.write("\n".join(markdown_lines) + "\n")
     return config_path
 
 

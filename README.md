@@ -161,7 +161,7 @@ python test2d.py --dataset kvasir --root_path data/Kvasir-SEG --model unet --spl
 ### Train full pipeline
 
 ```bash
-python train_pgd.py --dataset kvasir --root_path data/Kvasir-SEG --teacher_model unet_resnet152 --exp pdg_kvasir --max_epochs_teacher 50 --max_epochs_student 100 --prune_strategy S1 --prune_method static --static_prune_ratio 0.5 --lambda_distill 0.3 --lambda_sparsity 0.3 --batch_size 8 --patch_size 256 256
+python run_pgd.py --dataset kvasir --root_path data/Kvasir-SEG --teacher_model unet_resnet152 --exp pdg_kvasir --max_epochs_teacher 50 --max_epochs_student 100 --prune_strategy S1 --prune_method static --static_prune_ratio 0.5 --lambda_distill 0.3 --lambda_sparsity 0.3 --batch_size 8 --patch_size 256 256
 ```
 
 Lưu ý:
@@ -205,28 +205,28 @@ Ví dụ chạy trực tiếp Python:
 
 ```bash
 # S1: static pruning 50%
-python train_pgd.py --dataset cvc --root_path data/CVC-ClinicDB --teacher_model unet_resnet152 --prune_strategy S1 --static_prune_ratio 0.5
+python run_pgd.py --dataset cvc --root_path data/CVC-ClinicDB --teacher_model unet_resnet152 --prune_strategy S1 --static_prune_ratio 0.5
 
 # S2: Kneedle
-python train_pgd.py --dataset cvc --root_path data/CVC-ClinicDB --teacher_model unet_resnet152 --prune_strategy S2
+python run_pgd.py --dataset cvc --root_path data/CVC-ClinicDB --teacher_model unet_resnet152 --prune_strategy S2
 
 # S3: Otsu
-python train_pgd.py --dataset cvc --root_path data/CVC-ClinicDB --teacher_model unet_resnet152 --prune_strategy S3
+python run_pgd.py --dataset cvc --root_path data/CVC-ClinicDB --teacher_model unet_resnet152 --prune_strategy S3
 
 # S4: GMM
-python train_pgd.py --dataset cvc --root_path data/CVC-ClinicDB --teacher_model unet_resnet152 --prune_strategy S4
+python run_pgd.py --dataset cvc --root_path data/CVC-ClinicDB --teacher_model unet_resnet152 --prune_strategy S4
 
 # S5: middle-static pruning 50%
-python train_pgd.py --dataset cvc --root_path data/CVC-ClinicDB --teacher_model unet_resnet152 --prune_strategy S5 --static_prune_ratio 0.5
+python run_pgd.py --dataset cvc --root_path data/CVC-ClinicDB --teacher_model unet_resnet152 --prune_strategy S5 --static_prune_ratio 0.5
 
 # S6: middle-kneedle pruning
-python train_pgd.py --dataset cvc --root_path data/CVC-ClinicDB --teacher_model unet_resnet152 --prune_strategy S6
+python run_pgd.py --dataset cvc --root_path data/CVC-ClinicDB --teacher_model unet_resnet152 --prune_strategy S6
 
 # S7: middle-otsu pruning
-python train_pgd.py --dataset cvc --root_path data/CVC-ClinicDB --teacher_model unet_resnet152 --prune_strategy S7
+python run_pgd.py --dataset cvc --root_path data/CVC-ClinicDB --teacher_model unet_resnet152 --prune_strategy S7
 
 # S8: middle-gmm pruning
-python train_pgd.py --dataset cvc --root_path data/CVC-ClinicDB --teacher_model unet_resnet152 --prune_strategy S8
+python run_pgd.py --dataset cvc --root_path data/CVC-ClinicDB --teacher_model unet_resnet152 --prune_strategy S8
 ```
 
 Khi chạy qua `run_pgd.sh`, set biến môi trường:
@@ -281,6 +281,77 @@ Step-3 pruning: enabled
 Step-3 pruning epochs: 4
 Experiment folder: output_static_0.5_4
 Teacher output root: outputs
+Loss ablation: kd=1 sparsity=1 feat=0 aux=0
+Loss weights: kd=0.3 sparsity=0.3 feat=0.1 aux=0.2
+```
+
+### Loss ablation cho Step 3
+
+PDG student training có thể bật/tắt từng loss bằng argument hoặc biến môi trường trong `run_pgd.sh`.
+
+Các argument chính:
+
+- `--use_kd_output 1/0`, mặc định `1`
+- `--use_sparsity 1/0`, mặc định `1`
+- `--use_feature_distill 1/0`, mặc định `0`
+- `--use_aux_loss 1/0`, mặc định `0`
+- `--lambda_feat`, mặc định `0.1`
+- `--lambda_aux`, mặc định `0.2`
+- `--feature_layers`, mặc định `stem down1 down2 down3 down4 up1 up2 up3 up4`
+
+Tổng loss:
+
+```text
+Ltotal = Lseg
+       + lambda_distill * L_KD_output      nếu use_kd_output=1
+       + lambda_feat * L_feature_distill   nếu use_feature_distill=1
+       + lambda_aux * L_aux                nếu use_aux_loss=1
+       + lambda_sparsity * L_sparsity      nếu use_sparsity=1
+```
+
+Nếu loss nào tắt, history và metrics vẫn ghi loss đó bằng `0.0` để dễ vẽ biểu đồ.
+
+`loss_tag` được tự sinh theo loss đang bật:
+
+| Config | loss_tag |
+|---|---|
+| segmentation only | `loss_seg_only` |
+| segmentation + KD | `loss_seg_kd` |
+| segmentation + KD + sparsity | `loss_seg_kd_sparsity` |
+| segmentation + KD + feature distill | `loss_seg_kd_feat` |
+| segmentation + KD + feature distill + aux + sparsity | `loss_seg_kd_feat_aux_sparsity` |
+
+Vì có `loss_tag`, output proposal hiện có dạng:
+
+```text
+outputs/pgd_unet/<dataset>/<teacher_model>_teacher/<loss_tag>/<experiment_folder>/
+```
+
+Ví dụ:
+
+```text
+outputs/pgd_unet/cvc/unet_resnet152_teacher/loss_seg_kd_sparsity/output_gmm_auto_no/
+```
+
+Teacher vẫn dùng chung ở:
+
+```text
+outputs/pgd_unet/<dataset>/<teacher_model>_teacher/1_teacher/
+```
+
+Nghĩa là đổi ablation loss không làm đổi logic pretrain/load/reuse teacher.
+
+Ví dụ chạy ablation qua `run_pgd.sh`:
+
+```bash
+# Segmentation only
+USE_KD_OUTPUT=0 USE_SPARSITY=0 USE_FEATURE_DISTILL=0 USE_AUX_LOSS=0 bash run_pgd.sh
+
+# Segmentation + KD
+USE_KD_OUTPUT=1 USE_SPARSITY=0 USE_FEATURE_DISTILL=0 USE_AUX_LOSS=0 bash run_pgd.sh
+
+# Segmentation + KD + feature + aux + sparsity
+USE_KD_OUTPUT=1 USE_SPARSITY=1 USE_FEATURE_DISTILL=1 USE_AUX_LOSS=1 LAMBDA_FEAT=0.1 LAMBDA_AUX=0.2 bash run_pgd.sh
 ```
 
 `TEACHER_OUTPUT_ROOT` dùng để cố định nơi lưu `1_teacher`. Mặc định `run_pgd.sh` dùng `outputs`, nên teacher chỉ cần train một lần tại:

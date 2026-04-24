@@ -164,12 +164,21 @@ class MiddlePrunedResNetUNet(BaseSegmentationModel):
 
     def forward(self, x: torch.Tensor, return_features: bool = False):
         base_output = self.base_model(x, return_features=True)
+        features = extract_features(base_output)
+        decoder_features = features.get("decoder", {}) if isinstance(features, dict) else {}
+        logits = extract_logits(base_output)
+        aux_logits = {
+            name: feature.mean(dim=1, keepdim=True).repeat(1, logits.shape[1], 1, 1)
+            for name, feature in decoder_features.items()
+            if name in {"up1", "up2", "up3", "up4"} and torch.is_tensor(feature)
+        }
         output = self.build_output(
-            extract_logits(base_output),
-            features=extract_features(base_output),
+            logits,
+            features=features,
             aux={
                 "channel_config": list(self.channel_config),
                 "stage_middle_channel_config": self.stage_middle_channel_config,
+                "aux_logits": aux_logits,
             },
         )
         if return_features:

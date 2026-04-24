@@ -99,25 +99,29 @@ class UNetResNet152(BaseSegmentationModel):
         self.final_up = FinalUpBlock(64, 32, normalization=normalization)
         self.head = nn.Conv2d(32, num_classes, kernel_size=1)
 
-    def forward_features(self, x: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
+    def forward_features(self, x: torch.Tensor) -> Tuple[torch.Tensor, dict]:
         x0 = self.stem(x)
         x1 = self.layer1(self.maxpool(x0))
         x2 = self.layer2(x1)
         x3 = self.layer3(x2)
         x4 = self.layer4(x3)
 
-        x4 = self.center(x4)
-        x = self.dec4(x4, x3)
-        x = self.dec3(x, x2)
-        x = self.dec2(x, x1)
-        x = self.dec1(x, x0)
-        features = self.final_up(x)
-        logits = self.head(features)
+        center = self.center(x4)
+        up1 = self.dec4(center, x3)
+        up2 = self.dec3(up1, x2)
+        up3 = self.dec2(up2, x1)
+        up4 = self.dec1(up3, x0)
+        final = self.final_up(up4)
+        logits = self.head(final)
+        features = {
+            "encoder": {"stem": x0, "down1": x1, "down2": x2, "down3": x3, "down4": center},
+            "decoder": {"up1": up1, "up2": up2, "up3": up3, "up4": final, "final": final},
+        }
         return logits, features
 
     def forward(self, x: torch.Tensor, return_features: bool = False):
         logits, features = self.forward_features(x)
-        output = self.build_output(logits, features={"decoder": features})
+        output = self.build_output(logits, features=features)
         if return_features:
             return output
         return output

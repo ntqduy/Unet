@@ -40,6 +40,17 @@ STEP3_PRUNING="$(echo "$STEP3_PRUNING" | tr '[:upper:]' '[:lower:]')"
 STEP3_PRUNING_EPOCHS="${STEP3_PRUNING_EPOCHS:-4}"
 TEACHER_OUTPUT_ROOT="${TEACHER_OUTPUT_ROOT:-outputs}"
 
+USE_KD_OUTPUT="${USE_KD_OUTPUT:-1}"
+USE_SPARSITY="${USE_SPARSITY:-1}"
+USE_FEATURE_DISTILL="${USE_FEATURE_DISTILL:-0}"
+USE_AUX_LOSS="${USE_AUX_LOSS:-0}"
+
+LAMBDA_DISTILL="${LAMBDA_DISTILL:-0.3}"
+LAMBDA_SPARSITY="${LAMBDA_SPARSITY:-0.3}"
+LAMBDA_FEAT="${LAMBDA_FEAT:-0.1}"
+LAMBDA_AUX="${LAMBDA_AUX:-0.2}"
+FEATURE_LAYERS="${FEATURE_LAYERS:-stem down1 down2 down3 down4 up1 up2 up3 up4}"
+
 case "$STEP3_PRUNING" in
   1|true|yes|y|on)
     STEP3_PRUNING_ENABLED=1
@@ -135,9 +146,11 @@ else
 fi
 echo "Experiment folder: $OUTPUT_DIR"
 echo "Teacher output root: $TEACHER_OUTPUT_ROOT"
+echo "Loss ablation: kd=$USE_KD_OUTPUT sparsity=$USE_SPARSITY feat=$USE_FEATURE_DISTILL aux=$USE_AUX_LOSS"
+echo "Loss weights: kd=$LAMBDA_DISTILL sparsity=$LAMBDA_SPARSITY feat=$LAMBDA_FEAT aux=$LAMBDA_AUX"
 
 # Run training
-python train_pgd.py \
+python run_pgd.py \
   --dataset cvc \
   --root_path data/CVC-ClinicDB \
   --teacher_model unet_resnet152 \
@@ -148,8 +161,15 @@ python train_pgd.py \
   --teacher_output_root "$TEACHER_OUTPUT_ROOT" \
   "${PRUNE_ARGS[@]}" \
   "${STEP3_ARGS[@]}" \
-  --lambda_distill 0.3 \
-  --lambda_sparsity 0.3 \
+  --use_kd_output "$USE_KD_OUTPUT" \
+  --use_sparsity "$USE_SPARSITY" \
+  --use_feature_distill "$USE_FEATURE_DISTILL" \
+  --use_aux_loss "$USE_AUX_LOSS" \
+  --lambda_distill "$LAMBDA_DISTILL" \
+  --lambda_sparsity "$LAMBDA_SPARSITY" \
+  --lambda_feat "$LAMBDA_FEAT" \
+  --lambda_aux "$LAMBDA_AUX" \
+  --feature_layers $FEATURE_LAYERS \
   --batch_size 8 \
   --patch_size 256 256
 
