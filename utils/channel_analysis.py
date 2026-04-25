@@ -278,6 +278,10 @@ def save_channel_analysis_artifacts(
     paths["channel_analysis_tables_pdf"] = pdf_paths["tables_pdf"]
     paths["channel_analysis_charts_pdf"] = pdf_paths["charts_pdf"]
     paths["channel_analysis_pdf"] = pdf_paths["tables_pdf"]
+    if "output_channels_pdf" in pdf_paths:
+        paths["output_channels_pdf"] = pdf_paths["output_channels_pdf"]
+    if "mean_channel_importance_pdf" in pdf_paths:
+        paths["mean_channel_importance_pdf"] = pdf_paths["mean_channel_importance_pdf"]
     return paths
 
 

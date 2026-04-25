@@ -36,6 +36,10 @@ def _build_help_parser() -> argparse.ArgumentParser:
     parser.add_argument("--use_aux_loss", type=int, default=0)
     parser.add_argument("--lambda_feat", type=float, default=0.1)
     parser.add_argument("--lambda_aux", type=float, default=0.2)
+    parser.add_argument("--seg_loss_method", type=str, default="hybrid")
+    parser.add_argument("--distill_loss_method", type=str, default="mse")
+    parser.add_argument("--distill_temperature", type=float, default=1.0)
+    parser.add_argument("--loss_method", type=str, default="")
     parser.add_argument("--feature_layers", nargs="*", default=["bottleneck"])
     parser.add_argument("--student_variant", type=str, default="full")
     parser.add_argument("--warmup_pruning_epochs", type=int, default=4)
@@ -57,6 +61,8 @@ def _build_help_parser() -> argparse.ArgumentParser:
     parser.add_argument("--output_root", type=str, default="")
     parser.add_argument("--teacher_output_root", type=str, default="")
     parser.add_argument("--save_history_checkpoints", type=int, default=0)
+    parser.add_argument("--save_last_checkpoint", type=int, default=1)
+    parser.add_argument("--save_optimizer_state", type=int, default=0)
     return parser
 
 

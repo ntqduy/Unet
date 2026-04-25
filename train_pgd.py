@@ -241,6 +241,10 @@ parser.add_argument("--use_feature_distill", type=int, default=0)
 parser.add_argument("--use_aux_loss", type=int, default=0)
 parser.add_argument("--lambda_feat", type=float, default=0.1)
 parser.add_argument("--lambda_aux", type=float, default=0.2)
+parser.add_argument("--seg_loss_method", type=str, default="hybrid", choices=["ce", "dice", "hybrid"], help="student segmentation loss for loss-study runs")
+parser.add_argument("--distill_loss_method", type=str, default="mse", choices=["mse", "ce", "dice", "kl", "hybrid"], help="output distillation loss for loss-study runs; default mse is the original/old logit distillation")
+parser.add_argument("--distill_temperature", type=float, default=1.0, help="temperature for KL/soft-label distillation")
+parser.add_argument("--loss_method", type=str, default="", help="optional display label for loss-study tables")
 parser.add_argument(
     "--feature_layers",
     nargs="*",
@@ -302,10 +306,48 @@ def _write_json(path: Path, payload: dict) -> None:
         json.dump(payload, file, indent=2)
 
 
+def _write_timing_sidecars(run_dir: Path, timing_rows: list[dict]) -> None:
+    if not timing_rows:
+        return
+    layout = ensure_run_layout(run_dir)
+    write_metrics_rows(timing_rows, layout["metrics_dir"] / "timing_summary.csv")
+    write_metrics_rows(timing_rows, run_dir / "timing_summary.csv")
+    payload = {
+        "timings": timing_rows,
+        "total_time_seconds": float(sum(float(row.get("total_time_seconds") or 0.0) for row in timing_rows)),
+    }
+    _write_json(layout["metrics_dir"] / "timing_summary.json", payload)
+    _write_json(run_dir / "timing_summary.json", payload)
+
+
+def _write_inference_summary(run_dir: Path, metrics_rows: list[dict]) -> None:
+    if not metrics_rows:
+        return
+    inference_rows = [
+        {
+            "dataset": row.get("dataset"),
+            "split": row.get("split"),
+            "phase": row.get("phase"),
+            "model_name": row.get("model_name"),
+            "fps": row.get("fps"),
+            "inference_time_seconds": row.get("inference_time_seconds"),
+            "evaluation_time_seconds": row.get("evaluation_time_seconds"),
+            "checkpoint_path": row.get("checkpoint_path"),
+        }
+        for row in metrics_rows
+    ]
+    write_metrics_rows(inference_rows, run_dir / "inference_summary.csv")
+    write_metrics_rows(inference_rows, run_dir / "metrics" / "inference_summary.csv")
+
+
 def _loss_tag() -> str:
+    if args.loss_method:
+        return f"loss_{sanitize_tag(args.loss_method)}"
     parts = ["loss", "seg"]
+    if args.seg_loss_method != "hybrid":
+        parts.append(args.seg_loss_method)
     if args.use_kd_output:
-        parts.append("kd")
+        parts.append("kd" if args.distill_loss_method == "mse" else f"kd_{args.distill_loss_method}")
     if args.use_feature_distill:
         parts.append("feat")
     if args.use_aux_loss:
@@ -372,6 +414,10 @@ def _pruning_metadata() -> dict:
         "lambda_feat": float(args.lambda_feat),
         "lambda_aux": float(args.lambda_aux),
         "feature_layers": list(args.feature_layers),
+        "seg_loss_method": args.seg_loss_method,
+        "distill_loss_method": args.distill_loss_method,
+        "distill_temperature": float(args.distill_temperature),
+        "loss_method": args.loss_method or args.loss_tag,
         "step3_pruning_enabled": bool(args.enable_step3_pruning),
         "step3_pruning_epochs": int(args.step3_pruning_epochs),
         "step3_pruning_tag": str(int(args.step3_pruning_epochs)) if bool(args.enable_step3_pruning) else "no",
@@ -1272,6 +1318,8 @@ def _build_pipeline_overview_rows(*phase_artifacts: dict) -> list[dict]:
             "params": next((metric.get("params") for metric in metrics_rows if metric.get("params") is not None), None),
             "flops": next((metric.get("flops") for metric in metrics_rows if metric.get("flops") is not None), None),
             "fps": next((metric.get("fps") for metric in metrics_rows if metric.get("fps") is not None), None),
+            "search_time_seconds": next((metric.get("search_time_seconds") for metric in metrics_rows if metric.get("search_time_seconds") is not None), None),
+            "training_time_seconds": next((metric.get("training_time_seconds") for metric in metrics_rows if metric.get("training_time_seconds") is not None), None),
         }
         if phase == "pruning":
             row["evaluation_note"] = artifact.get("metadata", {}).get("evaluation_note")
@@ -1303,6 +1351,9 @@ def _build_pipeline_compression_rows(*phase_artifacts: dict) -> list[dict]:
             "params": params,
             "flops": flops,
             "fps": test_row.get("fps"),
+            "inference_time_seconds": test_row.get("inference_time_seconds"),
+            "search_time_seconds": test_row.get("search_time_seconds"),
+            "training_time_seconds": test_row.get("training_time_seconds"),
             "test_dice": dice,
             "vs_teacher_param_ratio": (float(params) / float(teacher_params)) if teacher_params not in (None, "", 0) and params is not None else None,
             "vs_teacher_flops_ratio": (float(flops) / float(teacher_flops)) if teacher_flops not in (None, "", 0) and flops is not None else None,
@@ -1564,6 +1615,18 @@ def _export_phase_outputs(run_dir: Path, model, checkpoint_path: Path, phase: st
                 "step3_pruning_enabled",
                 "step3_pruning_epochs",
                 "step3_pruning_tag",
+                "search_time_seconds",
+                "pruning_time_seconds",
+                "training_time_seconds",
+                "use_kd_output",
+                "use_sparsity",
+                "use_feature_distill",
+                "use_aux_loss",
+                "loss_tag",
+                "seg_loss_method",
+                "distill_loss_method",
+                "distill_temperature",
+                "loss_method",
             }
         }
     )
@@ -1607,6 +1670,18 @@ def _export_phase_outputs(run_dir: Path, model, checkpoint_path: Path, phase: st
                 "patch_size": list(args.patch_size),
                 "checkpoint_name": checkpoint_path.name,
                 "checkpoint_path": project_relative_path(checkpoint_path, PROJECT_ROOT),
+                "prune_method": extra.get("prune_method"),
+                "prune_ratio": extra.get("prune_ratio"),
+                "static_prune_ratio": extra.get("static_prune_ratio"),
+                "use_kd_output": int(args.use_kd_output),
+                "use_sparsity": int(args.use_sparsity),
+                "use_feature_distill": int(args.use_feature_distill),
+                "use_aux_loss": int(args.use_aux_loss),
+                "loss_tag": extra.get("loss_tag", args.loss_tag),
+                "seg_loss_method": args.seg_loss_method,
+                "distill_loss_method": args.distill_loss_method,
+                "distill_temperature": float(args.distill_temperature),
+                "loss_method": args.loss_method or args.loss_tag,
             },
             result["average_metric"],
             result["case_metrics"],
@@ -1632,6 +1707,7 @@ def _export_phase_outputs(run_dir: Path, model, checkpoint_path: Path, phase: st
                 "flops": profile.get("flops"),
                 "fps": profile.get("fps"),
                 "inference_time_seconds": profile.get("inference_time_seconds"),
+                "Inf (s)": profile.get("inference_time_seconds"),
                 "evaluation_time_seconds": elapsed,
                 "teacher_model": args.teacher_model,
                 "prune_strategy": extra.get("prune_strategy"),
@@ -1642,6 +1718,19 @@ def _export_phase_outputs(run_dir: Path, model, checkpoint_path: Path, phase: st
                 "step3_pruning_epochs": extra.get("step3_pruning_epochs"),
                 "step3_pruning_tag": extra.get("step3_pruning_tag"),
                 "step3_output_dir_name": extra.get("step3_output_dir_name"),
+                "search_time_seconds": extra.get("search_time_seconds"),
+                "Search Time (s)": extra.get("search_time_seconds"),
+                "pruning_time_seconds": extra.get("pruning_time_seconds"),
+                "training_time_seconds": extra.get("training_time_seconds"),
+                "loss_tag": extra.get("loss_tag", args.loss_tag),
+                "seg_loss_method": args.seg_loss_method,
+                "distill_loss_method": args.distill_loss_method,
+                "distill_temperature": float(args.distill_temperature),
+                "loss_method": args.loss_method or args.loss_tag,
+                "use_kd_output": int(args.use_kd_output),
+                "use_sparsity": int(args.use_sparsity),
+                "use_feature_distill": int(args.use_feature_distill),
+                "use_aux_loss": int(args.use_aux_loss),
                 "checkpoint_path": project_relative_path(checkpoint_path, PROJECT_ROOT),
             }
         )
@@ -1657,6 +1746,8 @@ def _export_phase_outputs(run_dir: Path, model, checkpoint_path: Path, phase: st
             )
     if metrics_rows:
         write_metrics_rows(metrics_rows, layout["metrics_dir"] / f"{phase}_metrics.csv")
+        write_metrics_rows(metrics_rows, run_dir / "metrics_summary.csv")
+        _write_inference_summary(run_dir, metrics_rows)
         save_performance_pdf(metrics_rows, layout["reports_dir"] / f"{phase}_performance.pdf", title=f"{phase} performance")
     return {
         "metrics_rows": metrics_rows,
@@ -1676,6 +1767,7 @@ def _build_teacher(in_channels: int):
 
 
 def _run_teacher(device: torch.device, image_mode: str, db_train, trainloader, valloader):
+    phase_start_time = time.perf_counter()
     run_dir = _phase_dir("teacher")
     layout = ensure_run_layout(run_dir)
     write_run_config(run_dir, vars(args))
@@ -1697,6 +1789,7 @@ def _run_teacher(device: torch.device, image_mode: str, db_train, trainloader, v
     reused_from = None
     source_checkpoint_path = None
     registered_checkpoint_path = None
+    training_time_seconds = 0.0
 
     if not bool(args.force_retrain_teacher):
         explicit_match = None
@@ -1834,6 +1927,7 @@ def _run_teacher(device: torch.device, image_mode: str, db_train, trainloader, v
                     )
 
     if best_path is None:
+        training_start_time = time.perf_counter()
         ce_loss = CrossEntropyLoss()
         dice_loss = DiceLoss(n_classes=args.num_classes)
         optimizer = optim.SGD(model.parameters(), lr=args.teacher_lr, momentum=0.9, weight_decay=1e-4)
@@ -1901,6 +1995,7 @@ def _run_teacher(device: torch.device, image_mode: str, db_train, trainloader, v
             )
         if best_path is None:
             best_path = resolve_phase_checkpoint(run_dir, "last")
+        training_time_seconds = time.perf_counter() - training_start_time
         save_loss_pdf(history, layout["reports_dir"] / "teacher_loss.pdf", title="Teacher loss")
     else:
         _restore_loss_pdf_if_possible(history, layout["reports_dir"] / "teacher_loss.pdf", "Teacher loss")
@@ -1913,9 +2008,35 @@ def _run_teacher(device: torch.device, image_mode: str, db_train, trainloader, v
         best_path,
         "teacher",
         profile,
-        {"model_name": metadata["model_name"], "backbone_name": metadata["backbone_name"], "student_name": None, "prune_ratio": None, "teacher_model": args.teacher_model},
+        {
+            "model_name": metadata["model_name"],
+            "backbone_name": metadata["backbone_name"],
+            "student_name": None,
+            "prune_ratio": None,
+            "teacher_model": args.teacher_model,
+            "training_time_seconds": float(training_time_seconds),
+            "loss_tag": args.loss_tag,
+        },
         device,
         image_mode,
+    )
+    total_teacher_time = time.perf_counter() - phase_start_time
+    _write_timing_sidecars(
+        run_dir,
+        [
+            {
+                "phase": "teacher",
+                "dataset": args.dataset,
+                "method": args.teacher_model,
+                "pruning_time_seconds": 0.0,
+                "search_time_seconds": 0.0,
+                "training_time_seconds": float(training_time_seconds),
+                "inference_time_seconds": profile.get("inference_time_seconds"),
+                "evaluation_time_seconds": float(sum(float(row.get("evaluation_time_seconds") or 0.0) for row in evaluation_bundle.get("metrics_rows", []))),
+                "total_time_seconds": float(total_teacher_time),
+                "reused_from": reused_from,
+            }
+        ],
     )
     _export_model_channel_analysis(
         run_dir,
@@ -1940,6 +2061,7 @@ def _run_teacher(device: torch.device, image_mode: str, db_train, trainloader, v
 
 
 def _run_pruning(device: torch.device, image_mode: str, db_train, teacher_artifact: dict):
+    phase_start_time = time.perf_counter()
     run_dir = _phase_dir("pruning")
     layout = ensure_run_layout(run_dir)
     write_run_config(run_dir, vars(args))
@@ -1954,14 +2076,18 @@ def _run_pruning(device: torch.device, image_mode: str, db_train, teacher_artifa
             reusable_blueprint = candidate_blueprint
     if reusable_blueprint is not None:
         blueprint = reusable_blueprint
+        blueprint.setdefault("search_time_seconds", 0.0)
+        blueprint.setdefault("search_time_note", "reused_existing_blueprint")
         logging.info("Loaded blueprint: %s", project_relative_path(blueprint_path, PROJECT_ROOT))
     else:
+        search_start_time = time.perf_counter()
         blueprint = extract_pruned_blueprint(
             teacher_artifact["model"],
             prune_ratio=args.prune_ratio,
             prune_method=args.prune_method,
             static_prune_ratio=args.static_prune_ratio,
         )
+        search_time_seconds = time.perf_counter() - search_start_time
         blueprint.update(
             {
                 "teacher_model": args.teacher_model,
@@ -1974,9 +2100,26 @@ def _run_pruning(device: torch.device, image_mode: str, db_train, teacher_artifa
                     else "teacher_encoder -> student_channel_config"
                 ),
                 **_pruning_metadata(),
+                "search_time_seconds": float(search_time_seconds),
+                "search_time_note": "measured_blueprint_importance_threshold_search_only",
             }
         )
         save_blueprint_artifact(blueprint, layout["artifacts_dir"])
+    search_time_seconds = float(blueprint.get("search_time_seconds") or 0.0)
+    search_payload = {
+        "dataset": args.dataset,
+        "teacher_model": args.teacher_model,
+        "prune_strategy": args.prune_strategy,
+        "prune_method": args.prune_method,
+        "static_prune_ratio": args.static_prune_ratio if uses_static_prune_ratio(args.prune_method) else None,
+        "search_time_seconds": search_time_seconds,
+        "search_time_note": blueprint.get("search_time_note", ""),
+        "reused_blueprint": bool(reusable_blueprint is not None),
+    }
+    _write_json(layout["metrics_dir"] / "pruning_search_time.json", search_payload)
+    _write_json(layout["artifacts_dir"] / "pruning_search_time.json", search_payload)
+    _write_json(run_dir / "pruning_search_time.json", search_payload)
+    logging.info("Pruning search time | method=%s | seconds=%.6f | reused=%s", args.prune_method, search_time_seconds, bool(reusable_blueprint is not None))
     save_pruning_analysis_artifacts(layout["artifacts_dir"] / "pruning_analysis", blueprint, title="Teacher -> Student Pruning Analysis")
     _write_json(layout["configs_dir"] / "pruning_config.json", blueprint)
     _write_json(layout["metrics_dir"] / "pruning_summary.json", blueprint)
@@ -2082,6 +2225,7 @@ def _run_pruning(device: torch.device, image_mode: str, db_train, teacher_artifa
         )
     middle_static_student = str(blueprint.get("student_architecture", "")).lower() == "middle_pruned_resnet_unet"
     pruning_model_info = extract_model_info(pruned_student)
+    pruning_elapsed_before_eval = time.perf_counter() - phase_start_time
     pruning_model_info.update(
         {
             "branch": "proposal",
@@ -2096,6 +2240,8 @@ def _run_pruning(device: torch.device, image_mode: str, db_train, teacher_artifa
             "checkpoint_is_random_init": False,
             "checkpoint_weight_status": "teacher_middle_subset_reuse_then_saved" if middle_static_student else "teacher_subset_reuse_then_saved",
             "checkpoint_weight_source": "teacher_full_boundary_weights + middle_conv2_subset" if middle_static_student else "teacher_kept_channels + exact_match_fallback",
+            "search_time_seconds": search_time_seconds,
+            "pruning_time_seconds": float(pruning_elapsed_before_eval),
             "evaluation_note": (
                 f"This phase evaluates the {_strategy_label()} middle-pruned ResNet-UNet immediately after structural pruning. "
                 "Inside each ResNet bottleneck, conv1 output and conv3 output remain full; only conv2 output, bn2, and conv3 input are pruned."
@@ -2148,9 +2294,29 @@ def _run_pruning(device: torch.device, image_mode: str, db_train, teacher_artifa
             "student_name": pruning_model_info.get("student_name"),
             "teacher_model": args.teacher_model,
             **_pruning_metadata(),
+            "search_time_seconds": search_time_seconds,
+            "pruning_time_seconds": float(pruning_elapsed_before_eval),
+            "loss_tag": args.loss_tag,
         },
         device,
         image_mode,
+    )
+    total_pruning_time = time.perf_counter() - phase_start_time
+    _write_timing_sidecars(
+        run_dir,
+        [
+            {
+                "phase": "pruning",
+                "dataset": args.dataset,
+                "method": args.prune_method,
+                "pruning_time_seconds": float(pruning_elapsed_before_eval),
+                "search_time_seconds": search_time_seconds,
+                "training_time_seconds": 0.0,
+                "inference_time_seconds": profile.get("inference_time_seconds"),
+                "evaluation_time_seconds": float(sum(float(row.get("evaluation_time_seconds") or 0.0) for row in evaluation_bundle.get("metrics_rows", []))),
+                "total_time_seconds": float(total_pruning_time),
+            }
+        ],
     )
     _export_model_channel_analysis(
         run_dir,
@@ -2209,6 +2375,7 @@ def _compute_student_val_losses(student, teacher, valloader, device, criterion, 
 
 
 def _run_student(device: torch.device, image_mode: str, db_train, trainloader, valloader, teacher_artifact: dict, pruning_artifact: dict):
+    phase_start_time = time.perf_counter()
     run_dir = _phase_dir("student")
     layout = ensure_run_layout(run_dir)
     write_run_config(run_dir, vars(args))
@@ -2312,6 +2479,7 @@ def _run_student(device: torch.device, image_mode: str, db_train, trainloader, v
     hard_pruning_plan = None
     hard_pruning_applied = False
     hard_pruning_weight_transfer = None
+    training_time_seconds = 0.0
     if not bool(args.force_retrain_student):
         reusable_signature = build_expected_signature(
             dataset=args.dataset,
@@ -2351,6 +2519,7 @@ def _run_student(device: torch.device, image_mode: str, db_train, trainloader, v
         logging.info("Loaded student checkpoint: %s", project_relative_path(best_path, PROJECT_ROOT))
         _restore_loss_pdf_if_possible(history, layout["reports_dir"] / "student_loss.pdf", "Student loss")
     else:
+        training_start_time = time.perf_counter()
         criterion = CompressionLoss(
             args.num_classes,
             args.lambda_distill,
@@ -2362,6 +2531,9 @@ def _run_student(device: torch.device, image_mode: str, db_train, trainloader, v
             lambda_feat=args.lambda_feat,
             lambda_aux=args.lambda_aux,
             feature_layers=args.feature_layers,
+            segmentation_loss_method=args.seg_loss_method,
+            distillation_loss_method=args.distill_loss_method,
+            distill_temperature=args.distill_temperature,
         )
         optimizer = optim.AdamW(student.parameters(), lr=args.student_lr, weight_decay=1e-4)
         history = {
@@ -2617,6 +2789,7 @@ def _run_student(device: torch.device, image_mode: str, db_train, trainloader, v
             )
         if best_path is None:
             best_path = resolve_phase_checkpoint(run_dir, "last")
+        training_time_seconds = time.perf_counter() - training_start_time
         save_loss_pdf(history, layout["reports_dir"] / "student_loss.pdf", title="Student loss")
     _save_student_epoch_diagnostics(run_dir, diagnostics_rows)
     write_model_config(run_dir, student_model_info)
@@ -2633,9 +2806,30 @@ def _run_student(device: torch.device, image_mode: str, db_train, trainloader, v
             "student_name": student_model_info.get("student_name"),
             "teacher_model": args.teacher_model,
             **_pruning_metadata(),
+            "search_time_seconds": pruning_artifact.get("blueprint", {}).get("search_time_seconds", 0.0),
+            "training_time_seconds": float(training_time_seconds),
+            "loss_tag": args.loss_tag,
         },
         device,
         image_mode,
+    )
+    total_student_time = time.perf_counter() - phase_start_time
+    _write_timing_sidecars(
+        run_dir,
+        [
+            {
+                "phase": "student",
+                "dataset": args.dataset,
+                "method": args.prune_method,
+                "pruning_time_seconds": 0.0,
+                "search_time_seconds": float(pruning_artifact.get("blueprint", {}).get("search_time_seconds", 0.0) or 0.0),
+                "training_time_seconds": float(training_time_seconds),
+                "inference_time_seconds": profile.get("inference_time_seconds"),
+                "evaluation_time_seconds": float(sum(float(row.get("evaluation_time_seconds") or 0.0) for row in evaluation_bundle.get("metrics_rows", []))),
+                "total_time_seconds": float(total_student_time),
+                "loss_tag": args.loss_tag,
+            }
+        ],
     )
     student_final_analysis = _export_model_channel_analysis(
         run_dir,

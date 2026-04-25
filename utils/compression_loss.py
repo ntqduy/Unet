@@ -34,10 +34,22 @@ class CompressionLoss(nn.Module):
         lambda_feat=0.1,
         lambda_aux=0.2,
         feature_layers=None,
+        segmentation_loss_method="hybrid",
+        distillation_loss_method="mse",
+        distill_temperature=1.0,
     ):
         super().__init__()
+        supported_segmentation = {"ce", "dice", "hybrid"}
+        supported_distillation = {"mse", "ce", "dice", "kl", "hybrid"}
+        self.segmentation_loss_method = str(segmentation_loss_method).lower()
+        self.distillation_loss_method = str(distillation_loss_method).lower()
+        if self.segmentation_loss_method not in supported_segmentation:
+            raise ValueError(f"Unsupported segmentation_loss_method={segmentation_loss_method}. Expected one of {sorted(supported_segmentation)}.")
+        if self.distillation_loss_method not in supported_distillation:
+            raise ValueError(f"Unsupported distillation_loss_method={distillation_loss_method}. Expected one of {sorted(supported_distillation)}.")
         self.dice_loss = DiceLoss(n_classes=num_classes)
         self.ce_loss = nn.CrossEntropyLoss()
+        self.num_classes = int(num_classes)
         self.lambda_distill = lambda_distill
         self.lambda_sparsity = lambda_sparsity
         self.use_kd_output = bool(int(use_kd_output))
@@ -47,6 +59,44 @@ class CompressionLoss(nn.Module):
         self.lambda_feat = float(lambda_feat)
         self.lambda_aux = float(lambda_aux)
         self.feature_layers = list(feature_layers or [])
+        self.distill_temperature = max(float(distill_temperature), 1e-6)
+
+    def _soft_dice_loss(self, student_probs, teacher_probs):
+        dims = tuple(range(2, student_probs.ndim))
+        intersection = (student_probs * teacher_probs).sum(dim=dims)
+        denominator = student_probs.sum(dim=dims) + teacher_probs.sum(dim=dims)
+        dice = (2.0 * intersection + 1e-6) / (denominator + 1e-6)
+        return 1.0 - dice.mean()
+
+    def _segmentation_loss(self, student_logits, student_probs, target):
+        if self.segmentation_loss_method == "ce":
+            return self.ce_loss(student_logits, target)
+        if self.segmentation_loss_method == "dice":
+            return self.dice_loss(student_probs, target.unsqueeze(1))
+        return 0.5 * self.ce_loss(student_logits, target) + 0.5 * self.dice_loss(student_probs, target.unsqueeze(1))
+
+    def _output_distillation_loss(self, student_logits, teacher_logits):
+        if student_logits.shape[-2:] != teacher_logits.shape[-2:]:
+            teacher_logits = F.interpolate(teacher_logits, size=student_logits.shape[-2:], mode="bilinear", align_corners=False)
+        if self.distillation_loss_method == "mse":
+            # Default path: keep the original/old distillation behavior.
+            return F.mse_loss(student_logits, teacher_logits.detach())
+
+        temperature = self.distill_temperature
+        teacher_probs = torch.softmax(teacher_logits.detach() / temperature, dim=1)
+        student_log_probs = torch.log_softmax(student_logits / temperature, dim=1)
+        if self.distillation_loss_method == "kl":
+            return F.kl_div(student_log_probs, teacher_probs, reduction="batchmean") * (temperature ** 2)
+        if self.distillation_loss_method == "ce":
+            return -(teacher_probs * torch.log_softmax(student_logits, dim=1)).sum(dim=1).mean()
+
+        student_probs = torch.softmax(student_logits, dim=1)
+        teacher_probs_plain = torch.softmax(teacher_logits.detach(), dim=1)
+        dice_kd = self._soft_dice_loss(student_probs, teacher_probs_plain)
+        if self.distillation_loss_method == "dice":
+            return dice_kd
+        kl_kd = F.kl_div(student_log_probs, teacher_probs, reduction="batchmean") * (temperature ** 2)
+        return 0.5 * kl_kd + 0.5 * dice_kd
 
     def _feature_distill_loss(self, student_output, teacher_output, reference_logits):
         if teacher_output is None or not self.use_feature_distill or self.lambda_feat <= 0:
@@ -112,13 +162,13 @@ class CompressionLoss(nn.Module):
         effective_lambda_feat = (self.lambda_feat if lambda_feat is None else float(lambda_feat)) if self.use_feature_distill else 0.0
         effective_lambda_aux = (self.lambda_aux if lambda_aux is None else float(lambda_aux)) if self.use_aux_loss else 0.0
 
-        l_seg = 0.5 * self.ce_loss(student_logits, target) + 0.5 * self.dice_loss(student_probs, target.unsqueeze(1))
+        l_seg = self._segmentation_loss(student_logits, student_probs, target)
 
         if teacher_output is None or effective_lambda_distill <= 0:
             l_distill = student_logits.new_zeros(())
         else:
             teacher_logits = extract_logits(teacher_output)
-            l_distill = F.mse_loss(student_logits, teacher_logits)
+            l_distill = self._output_distillation_loss(student_logits, teacher_logits)
 
         gate_tensors = [gate for gate in student_gates if gate is not None]
         if not gate_tensors or effective_lambda_sparsity <= 0:

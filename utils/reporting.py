@@ -237,6 +237,25 @@ def _save_empty_report_page(pdf: PdfPages, title: str, message: str) -> None:
     plt.close(fig)
 
 
+def _save_layer_bar_pdf(rows: Sequence[Mapping], pdf_path: Path, *, value_key: str, ylabel: str) -> Path:
+    pdf_path.parent.mkdir(parents=True, exist_ok=True)
+    values = [float(row.get(value_key, 0) or 0) for row in rows]
+    x = np.arange(1, len(values) + 1)
+    fig, ax = plt.subplots(figsize=(10, 4.8))
+    ax.bar(x, values)
+    ax.set_xlabel("Layer index (1, 2, 3, ...)")
+    ax.set_ylabel(ylabel)
+    ax.grid(alpha=0.25, axis="y")
+    if len(values) > 12:
+        ax.set_xticks([])
+    else:
+        ax.set_xticks(x)
+    fig.tight_layout()
+    fig.savefig(pdf_path, bbox_inches="tight")
+    plt.close(fig)
+    return pdf_path
+
+
 def save_channel_analysis_pdf(
     report: Mapping,
     pdf_path: Path | str,
@@ -247,6 +266,8 @@ def save_channel_analysis_pdf(
     pdf_path.parent.mkdir(parents=True, exist_ok=True)
     tables_pdf_path = pdf_path.with_name(f"{pdf_path.stem}_tables.pdf")
     charts_pdf_path = pdf_path.with_name(f"{pdf_path.stem}_charts.pdf")
+    output_channels_pdf_path = pdf_path.with_name("figure11_output_channels_per_layer_pruned_student.pdf")
+    importance_pdf_path = pdf_path.with_name("figure12_mean_channel_importance_per_layer_pruned_student.pdf")
 
     global_summary = dict(report.get("global_summary", {}))
     layer_summary_rows = report.get("layer_summary_rows", [])
@@ -326,7 +347,21 @@ def save_channel_analysis_pdf(
 
         if not has_chart_content:
             _save_empty_report_page(pdf, title, "No chart content available.")
-    return {
+    result = {
         "tables_pdf": tables_pdf_path,
         "charts_pdf": charts_pdf_path,
     }
+    if layer_summary_rows and "student_final" in pdf_path.stem:
+        result["output_channels_pdf"] = _save_layer_bar_pdf(
+            layer_summary_rows,
+            output_channels_pdf_path,
+            value_key="out_channels",
+            ylabel="Output channels",
+        )
+        result["mean_channel_importance_pdf"] = _save_layer_bar_pdf(
+            layer_summary_rows,
+            importance_pdf_path,
+            value_key="importance_mean",
+            ylabel="Mean channel importance",
+        )
+    return result

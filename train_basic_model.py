@@ -122,8 +122,43 @@ def validate_label_batch(label_batch, num_classes, sampled_batch):
 
 
 def _write_json(path: Path, payload: dict) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("w", encoding="utf-8") as file:
         json.dump(payload, file, indent=2)
+
+
+def _write_timing_sidecars(run_dir: Path, timing_rows: list[dict]) -> None:
+    if not timing_rows:
+        return
+    layout = ensure_run_layout(run_dir)
+    write_metrics_rows(timing_rows, layout["metrics_dir"] / "timing_summary.csv")
+    write_metrics_rows(timing_rows, run_dir / "timing_summary.csv")
+    payload = {
+        "timings": timing_rows,
+        "total_time_seconds": float(sum(float(row.get("total_time_seconds") or 0.0) for row in timing_rows)),
+    }
+    _write_json(layout["metrics_dir"] / "timing_summary.json", payload)
+    _write_json(run_dir / "timing_summary.json", payload)
+
+
+def _write_inference_summary(run_dir: Path, metrics_rows: list[dict]) -> None:
+    if not metrics_rows:
+        return
+    inference_rows = [
+        {
+            "dataset": row.get("dataset"),
+            "split": row.get("split"),
+            "phase": row.get("phase"),
+            "model_name": row.get("model_name"),
+            "fps": row.get("fps"),
+            "inference_time_seconds": row.get("inference_time_seconds"),
+            "evaluation_time_seconds": row.get("evaluation_time_seconds"),
+            "checkpoint_path": row.get("checkpoint_path"),
+        }
+        for row in metrics_rows
+    ]
+    write_metrics_rows(inference_rows, run_dir / "inference_summary.csv")
+    write_metrics_rows(inference_rows, run_dir / "metrics" / "inference_summary.csv")
 
 
 def _expected_basic_checkpoint_signature(in_channels: int) -> dict:
@@ -278,7 +313,7 @@ def run_validation(args, model, valloader, device, ce_loss):
     return performance, float(np.mean(val_losses)) if val_losses else 0.0, vis_samples
 
 
-def _run_final_evaluations(snapshot_path: Path, checkpoint_path: Path, model, device, image_mode: str, profile: dict, model_info: dict) -> None:
+def _run_final_evaluations(snapshot_path: Path, checkpoint_path: Path, model, device, image_mode: str, profile: dict, model_info: dict, training_time_seconds: float = 0.0) -> list[dict]:
     logging.info("Running final evaluation with best checkpoint: %s", project_relative_path(checkpoint_path, PROJECT_ROOT))
     load_checkpoint_into_model(checkpoint_path, model, device=device)
     model.eval()
@@ -341,7 +376,11 @@ def _run_final_evaluations(snapshot_path: Path, checkpoint_path: Path, model, de
                 "flops": profile.get("flops"),
                 "fps": profile.get("fps"),
                 "inference_time_seconds": profile.get("inference_time_seconds"),
+                "Inf (s)": profile.get("inference_time_seconds"),
                 "evaluation_time_seconds": elapsed,
+                "training_time_seconds": float(training_time_seconds),
+                "search_time_seconds": 0.0,
+                "Search Time (s)": 0.0,
                 "checkpoint_path": project_relative_path(checkpoint_path, PROJECT_ROOT),
             }
         )
@@ -368,7 +407,10 @@ def _run_final_evaluations(snapshot_path: Path, checkpoint_path: Path, model, de
     _write_evaluation_overview(snapshot_path, checkpoint_path, split_summaries, model_info)
     if metrics_rows:
         write_metrics_rows(metrics_rows, snapshot_path / "metrics" / "basic_metrics.csv")
+        write_metrics_rows(metrics_rows, snapshot_path / "metrics_summary.csv")
+        _write_inference_summary(snapshot_path, metrics_rows)
         save_performance_pdf(metrics_rows, snapshot_path / "reports" / "basic_performance.pdf", title="Basic model performance")
+    return metrics_rows
 
 
 def _export_basic_channel_analysis(snapshot_path: Path, checkpoint_path: Path, model, device) -> None:
@@ -387,6 +429,7 @@ def _export_basic_channel_analysis(snapshot_path: Path, checkpoint_path: Path, m
 
 
 def train(args, snapshot_path):
+    phase_start_time = time.perf_counter()
     snapshot_path = Path(snapshot_path)
     os.environ["CUDA_VISIBLE_DEVICES"] = args.gpu
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -467,7 +510,25 @@ def train(args, snapshot_path):
                 project_relative_path(registered_checkpoint_path, PROJECT_ROOT),
             )
             _restore_loss_report_from_history(snapshot_path, history)
-            _run_final_evaluations(snapshot_path, registered_checkpoint_path, model, device, image_mode, _compute_model_profile(model, device), model_info)
+            profile = _compute_model_profile(model, device)
+            metrics_rows = _run_final_evaluations(snapshot_path, registered_checkpoint_path, model, device, image_mode, profile, model_info, training_time_seconds=0.0)
+            _write_timing_sidecars(
+                snapshot_path,
+                [
+                    {
+                        "phase": "basic",
+                        "dataset": args.dataset,
+                        "method": args.model,
+                        "pruning_time_seconds": 0.0,
+                        "search_time_seconds": 0.0,
+                        "training_time_seconds": 0.0,
+                        "inference_time_seconds": profile.get("inference_time_seconds"),
+                        "evaluation_time_seconds": float(sum(float(row.get("evaluation_time_seconds") or 0.0) for row in metrics_rows)),
+                        "total_time_seconds": float(time.perf_counter() - phase_start_time),
+                        "reused_from": "basic",
+                    }
+                ],
+            )
             _export_basic_channel_analysis(snapshot_path, registered_checkpoint_path, model, device)
             return
 
@@ -507,6 +568,7 @@ def train(args, snapshot_path):
 
     logging.info("Start training")
     logging.info("%d iterations per epoch", iterations_per_epoch)
+    training_start_time = time.perf_counter()
     logging.info("Train split: %s | Val split: %s", args.train_split, args.val_split)
 
     model.train()
@@ -667,8 +729,26 @@ def train(args, snapshot_path):
         best_checkpoint_path = fallback_checkpoint_path
         logging.warning("No validation checkpoint was selected; using the last model state at %s", project_relative_path(fallback_checkpoint_path, PROJECT_ROOT))
 
+    training_time_seconds = time.perf_counter() - training_start_time
     save_loss_pdf(history, Path(snapshot_path) / "reports" / "basic_loss.pdf", title="Basic model loss")
-    _run_final_evaluations(Path(snapshot_path), best_checkpoint_path, model, device, image_mode, _compute_model_profile(model, device), model_info)
+    profile = _compute_model_profile(model, device)
+    metrics_rows = _run_final_evaluations(Path(snapshot_path), best_checkpoint_path, model, device, image_mode, profile, model_info, training_time_seconds=training_time_seconds)
+    _write_timing_sidecars(
+        Path(snapshot_path),
+        [
+            {
+                "phase": "basic",
+                "dataset": args.dataset,
+                "method": args.model,
+                "pruning_time_seconds": 0.0,
+                "search_time_seconds": 0.0,
+                "training_time_seconds": float(training_time_seconds),
+                "inference_time_seconds": profile.get("inference_time_seconds"),
+                "evaluation_time_seconds": float(sum(float(row.get("evaluation_time_seconds") or 0.0) for row in metrics_rows)),
+                "total_time_seconds": float(time.perf_counter() - phase_start_time),
+            }
+        ],
+    )
     _export_basic_channel_analysis(Path(snapshot_path), best_checkpoint_path, model, device)
 
 
