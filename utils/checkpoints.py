@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import shutil
+import csv
 from pathlib import Path
 from typing import Any, Dict, Optional
 
@@ -137,6 +138,128 @@ def _write_metadata(metadata_path: Path, payload: Dict[str, Any], checkpoint_pat
     return write_checkpoint_metadata(metadata_path, payload, checkpoint_path, project_root=project_root)
 
 
+def _yaml_scalar(value: Any) -> str:
+    if value is None:
+        return "null"
+    if isinstance(value, bool):
+        return "true" if value else "false"
+    if isinstance(value, (int, float)):
+        return str(value)
+    if isinstance(value, str):
+        if value == "":
+            return '""'
+        if any(char in value for char in ":#\n\r\t") or value.strip() != value:
+            return json.dumps(value, ensure_ascii=False)
+        return value
+    return json.dumps(value, ensure_ascii=False)
+
+
+def _write_yaml_value(lines: list[str], key: str, value: Any, indent: int = 0) -> None:
+    prefix = " " * indent
+    if isinstance(value, dict):
+        lines.append(f"{prefix}{key}:")
+        for child_key, child_value in value.items():
+            _write_yaml_value(lines, str(child_key), child_value, indent + 2)
+    elif isinstance(value, (list, tuple)):
+        lines.append(f"{prefix}{key}:")
+        for item in value:
+            if isinstance(item, dict):
+                lines.append(f"{prefix}  -")
+                for child_key, child_value in item.items():
+                    _write_yaml_value(lines, str(child_key), child_value, indent + 4)
+            else:
+                lines.append(f"{prefix}  - {_yaml_scalar(item)}")
+    else:
+        lines.append(f"{prefix}{key}: {_yaml_scalar(value)}")
+
+
+def _write_config_yaml(checkpoint_dir: Path, config: Dict[str, Any]) -> None:
+    lines = []
+    for key, value in sorted(dict(config or {}).items()):
+        _write_yaml_value(lines, str(key), value)
+    (checkpoint_dir / "config.yaml").write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+
+def _json_safe(value: Any) -> Any:
+    if isinstance(value, Path):
+        return str(value)
+    if isinstance(value, dict):
+        return {str(key): _json_safe(child_value) for key, child_value in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_json_safe(item) for item in value]
+    return value
+
+
+def _write_metrics_json(checkpoint_dir: Path, payload: Dict[str, Any], checkpoint_path: Path, *, project_root: Path | str | None = None) -> None:
+    metrics_payload = {
+        "checkpoint_path": project_relative_path(checkpoint_path, project_root) if project_root is not None else str(checkpoint_path),
+        "checkpoint_name": checkpoint_path.name,
+        "epoch": payload.get("epoch"),
+        "global_step": payload.get("global_step"),
+        "best_metric": payload.get("best_metric"),
+        "metrics": payload.get("metrics", {}),
+        "phase": payload.get("phase"),
+    }
+    with (checkpoint_dir / "metrics.json").open("w", encoding="utf-8") as file:
+        json.dump(_json_safe(metrics_payload), file, indent=2, ensure_ascii=False)
+
+
+def _flatten_metrics(metrics: Dict[str, Any]) -> Dict[str, Any]:
+    flattened: Dict[str, Any] = {}
+    for key, value in dict(metrics or {}).items():
+        flattened[str(key)] = value if isinstance(value, (str, int, float, bool)) or value is None else json.dumps(_json_safe(value), ensure_ascii=False)
+    return flattened
+
+
+def _append_train_log(checkpoint_dir: Path, payload: Dict[str, Any], tag: str, checkpoint_path: Path, *, is_best: bool, project_root: Path | str | None = None) -> None:
+    log_path = checkpoint_dir / "train_log.csv"
+    metric_values = _flatten_metrics(payload.get("metrics", {}))
+    row = {
+        "tag": tag,
+        "checkpoint_name": checkpoint_path.name,
+        "checkpoint_path": project_relative_path(checkpoint_path, project_root) if project_root is not None else str(checkpoint_path),
+        "phase": payload.get("phase"),
+        "epoch": payload.get("epoch"),
+        "global_step": payload.get("global_step"),
+        "is_best": int(bool(is_best)),
+        "best_metric": payload.get("best_metric"),
+        **metric_values,
+    }
+    fieldnames = list(row.keys())
+    existing_rows = []
+    if log_path.is_file():
+        with log_path.open("r", encoding="utf-8", newline="") as file:
+            reader = csv.DictReader(file)
+            existing_rows = list(reader)
+            for fieldname in reader.fieldnames or []:
+                if fieldname not in fieldnames:
+                    fieldnames.append(fieldname)
+            for existing_row in existing_rows:
+                for key in existing_row.keys():
+                    if key not in fieldnames:
+                        fieldnames.append(key)
+    with log_path.open("w", encoding="utf-8", newline="") as file:
+        writer = csv.DictWriter(file, fieldnames=fieldnames)
+        writer.writeheader()
+        for existing_row in existing_rows:
+            writer.writerow(existing_row)
+        writer.writerow(row)
+
+
+def _write_checkpoint_sidecars(
+    checkpoint_dir: Path,
+    payload: Dict[str, Any],
+    tag: str,
+    checkpoint_path: Path,
+    *,
+    is_best: bool,
+    project_root: Path | str | None = None,
+) -> None:
+    _write_config_yaml(checkpoint_dir, payload.get("config", {}))
+    _write_metrics_json(checkpoint_dir, payload, checkpoint_path, project_root=project_root)
+    _append_train_log(checkpoint_dir, payload, tag, checkpoint_path, is_best=is_best, project_root=project_root)
+
+
 def save_checkpoint_payload_atomic(payload: Any, checkpoint_path: Path | str) -> Path:
     checkpoint_path = Path(checkpoint_path)
     checkpoint_path.parent.mkdir(parents=True, exist_ok=True)
@@ -168,14 +291,16 @@ def save_checkpoint(
     extra_state: Optional[Dict[str, Any]] = None,
     is_best: bool = False,
     save_tagged_checkpoint: bool = False,
+    save_last_checkpoint: bool = True,
+    include_optimizer_state: bool = False,
     project_root: Path | str | None = None,
-) -> Path:
+) -> Optional[Path]:
     layout = ensure_checkpoint_layout(run_dir)
     payload = build_checkpoint_payload(
         model=model,
-        optimizer=optimizer,
-        scheduler=scheduler,
-        scaler=scaler,
+        optimizer=optimizer if include_optimizer_state else None,
+        scheduler=scheduler if include_optimizer_state else None,
+        scaler=scaler if include_optimizer_state else None,
         epoch=epoch,
         global_step=global_step,
         best_metric=best_metric,
@@ -185,20 +310,27 @@ def save_checkpoint(
         phase=phase,
         extra_state=extra_state,
     )
-    last_checkpoint_path = layout["checkpoint_dir"] / "last.pth"
-    save_checkpoint_payload_atomic(payload, last_checkpoint_path)
-    _write_metadata(layout["metadata_dir"] / "last.json", payload, last_checkpoint_path, project_root=project_root)
+
+    return_path = None
+    if save_last_checkpoint:
+        last_checkpoint_path = layout["checkpoint_dir"] / "last.pth"
+        save_checkpoint_payload_atomic(payload, last_checkpoint_path)
+        _write_metadata(layout["metadata_dir"] / "last.json", payload, last_checkpoint_path, project_root=project_root)
+        _write_checkpoint_sidecars(layout["checkpoint_dir"], payload, tag, last_checkpoint_path, is_best=is_best, project_root=project_root)
+        return_path = last_checkpoint_path
 
     if save_tagged_checkpoint and tag not in {"last", "best"}:
         checkpoint_path = layout["checkpoint_dir"] / f"{tag}.pth"
         save_checkpoint_payload_atomic(payload, checkpoint_path)
         _write_metadata(layout["metadata_dir"] / f"{tag}.json", payload, checkpoint_path, project_root=project_root)
+        _write_checkpoint_sidecars(layout["checkpoint_dir"], payload, tag, checkpoint_path, is_best=is_best, project_root=project_root)
+        return_path = checkpoint_path
 
-    return_path = last_checkpoint_path
     if is_best:
         best_checkpoint_path = layout["checkpoint_dir"] / "best.pth"
         save_checkpoint_payload_atomic(payload, best_checkpoint_path)
         _write_metadata(layout["metadata_dir"] / "best.json", payload, best_checkpoint_path, project_root=project_root)
+        _write_checkpoint_sidecars(layout["checkpoint_dir"], payload, tag, best_checkpoint_path, is_best=True, project_root=project_root)
         return_path = best_checkpoint_path
 
     return return_path
@@ -266,5 +398,13 @@ def clone_checkpoint_file(
         target_checkpoint_path,
         project_root=project_root,
         extra_fields=metadata_extra_fields,
+    )
+    _write_checkpoint_sidecars(
+        target_checkpoint_path.parent,
+        payload,
+        target_checkpoint_path.stem,
+        target_checkpoint_path,
+        is_best=target_checkpoint_path.stem == "best",
+        project_root=project_root,
     )
     return metadata

@@ -282,11 +282,13 @@ parser.add_argument("--force_reprune", type=int, default=0)
 parser.add_argument("--force_retrain_student", type=int, default=0)
 parser.add_argument("--output_root", type=str, default="", help="root directory for all exported outputs; defaults to PROJECT_ROOT/outputs")
 parser.add_argument("--teacher_output_root", type=str, default="", help="shared output root for the teacher phase; defaults to --output_root when omitted")
-parser.add_argument("--save_history_checkpoints", type=int, default=0, help="set to 1 to keep per-epoch checkpoint history in addition to best/last")
+parser.add_argument("--save_history_checkpoints", type=int, default=0, help="set to 1 to keep per-epoch checkpoint history in addition to best.pth")
+parser.add_argument("--save_last_checkpoint", type=int, default=1, help="set to 1 to keep an overwritten last.pth checkpoint in addition to best.pth")
+parser.add_argument("--save_optimizer_state", type=int, default=0, help="set to 1 to include optimizer/scheduler/scaler states in saved checkpoints")
 args = parser.parse_args()
 args = _normalize_pruning_args(args, parser)
 args = _normalize_step3_pruning_args(args, parser)
-for _flag_name in ("use_kd_output", "use_sparsity", "use_feature_distill", "use_aux_loss"):
+for _flag_name in ("use_kd_output", "use_sparsity", "use_feature_distill", "use_aux_loss", "save_history_checkpoints", "save_last_checkpoint", "save_optimizer_state"):
     if int(getattr(args, _flag_name)) not in (0, 1):
         parser.error(f"--{_flag_name} must be 0 or 1.")
     setattr(args, _flag_name, int(getattr(args, _flag_name)))
@@ -1419,7 +1421,6 @@ def _export_student_final_shortcuts(student_run_dir: Path, proposal_root_dir: Pa
     source_dir = student_run_dir / "checkpoints"
     mapping = {
         "best.pth": "best_student.pth",
-        "last.pth": "last_student.pth",
     }
     exported = {}
     for source_name, target_name in mapping.items():
@@ -1884,6 +1885,8 @@ def _run_teacher(device: torch.device, image_mode: str, db_train, trainloader, v
                 extra_state={"history": history},
                 is_best=is_best,
                 save_tagged_checkpoint=bool(args.save_history_checkpoints),
+                save_last_checkpoint=bool(args.save_last_checkpoint),
+                include_optimizer_state=bool(args.save_optimizer_state),
                 project_root=PROJECT_ROOT,
             )
             if is_best:
@@ -2127,6 +2130,8 @@ def _run_pruning(device: torch.device, image_mode: str, db_train, teacher_artifa
         extra_state={"blueprint": blueprint, "weight_transfer": weight_transfer},
         is_best=True,
         save_tagged_checkpoint=False,
+        save_last_checkpoint=bool(args.save_last_checkpoint),
+        include_optimizer_state=bool(args.save_optimizer_state),
         project_root=PROJECT_ROOT,
     )
 
@@ -2591,6 +2596,8 @@ def _run_student(device: torch.device, image_mode: str, db_train, trainloader, v
                 },
                 is_best=is_best,
                 save_tagged_checkpoint=bool(args.save_history_checkpoints),
+                save_last_checkpoint=bool(args.save_last_checkpoint),
+                include_optimizer_state=bool(args.save_optimizer_state),
                 project_root=PROJECT_ROOT,
             )
             if is_best:

@@ -669,15 +669,33 @@ Với proposal branch, `model_info` hiện cũng ghi rõ checkpoint có phải r
 - `3_student` đang lưu model load từ `2_pruning`
 - compact student sau late hard pruning đang lưu model đã reuse subset weight từ student trước prune
 
-Mặc định chỉ lưu:
+Mặc định lưu bộ checkpoint gọn cho evaluate/reuse:
 
-- `best.pth`
-- `last.pth`
+- `checkpoints/best.pth`
+- `checkpoints/last.pth`
+- `checkpoints/config.yaml`
+- `checkpoints/metrics.json`
+- `checkpoints/train_log.csv`
+- `checkpoints/metadata/best.json`
+
+Checkpoint mặc định gồm `model_state_dict` và metadata cần thiết (`epoch`, `best_metric`, `metrics`, `config`, `model_info`, `phase`, `extra_state`). Repo không lưu `optimizer_state_dict`/scheduler/scaler mặc định để tránh file quá nặng.
 
 Nếu muốn giữ thêm checkpoint history:
 
 ```bash
 --save_history_checkpoints 1
+```
+
+Nếu muốn tắt checkpoint cuối cùng bị overwrite sau mỗi lần eval:
+
+```bash
+--save_last_checkpoint 0
+```
+
+Nếu thật sự cần resume đúng optimizer state:
+
+```bash
+--save_optimizer_state 1
 ```
 
 ## 9. Output structure
@@ -692,6 +710,9 @@ outputs/<model_name>/<dataset>/
 ├─ checkpoints/
 │  ├─ best.pth
 │  ├─ last.pth
+│  ├─ config.yaml
+│  ├─ metrics.json
+│  ├─ train_log.csv
 │  └─ metadata/
 ├─ configs/
 │  ├─ run_config.json

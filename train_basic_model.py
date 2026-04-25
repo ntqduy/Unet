@@ -64,7 +64,9 @@ parser.add_argument("--num_workers", type=int, default=4)
 parser.add_argument("--save_visualizations", type=int, default=1)
 parser.add_argument("--vis_num_samples", type=int, default=5)
 parser.add_argument("--output_root", type=str, default="", help="root directory for all exported outputs; defaults to PROJECT_ROOT/outputs")
-parser.add_argument("--save_history_checkpoints", type=int, default=0, help="set to 1 to keep epoch/iteration checkpoint history in addition to best/last")
+parser.add_argument("--save_history_checkpoints", type=int, default=0, help="set to 1 to keep epoch/iteration checkpoint history in addition to best.pth")
+parser.add_argument("--save_last_checkpoint", type=int, default=1, help="set to 1 to keep an overwritten last.pth checkpoint in addition to best.pth")
+parser.add_argument("--save_optimizer_state", type=int, default=0, help="set to 1 to include optimizer/scheduler/scaler states in saved checkpoints")
 parser.add_argument("--force_retrain", type=int, default=0, help="set to 1 to ignore existing compatible checkpoints and train again")
 parser.add_argument(
     "--final_eval_splits",
@@ -74,6 +76,10 @@ parser.add_argument(
 )
 
 args = parser.parse_args()
+for _flag_name in ("save_history_checkpoints", "save_last_checkpoint", "save_optimizer_state"):
+    if int(getattr(args, _flag_name)) not in (0, 1):
+        parser.error(f"--{_flag_name} must be 0 or 1.")
+    setattr(args, _flag_name, int(getattr(args, _flag_name)))
 dice_loss = losses.DiceLoss(n_classes=args.num_classes)
 
 
@@ -534,6 +540,8 @@ def train(args, snapshot_path):
             extra_state={"history": history},
             is_best=is_best,
             save_tagged_checkpoint=bool(args.save_history_checkpoints),
+            save_last_checkpoint=bool(args.save_last_checkpoint),
+            include_optimizer_state=bool(args.save_optimizer_state),
             project_root=PROJECT_ROOT,
         )
 
@@ -652,6 +660,8 @@ def train(args, snapshot_path):
             extra_state={"history": history},
             is_best=True,
             save_tagged_checkpoint=bool(args.save_history_checkpoints),
+            save_last_checkpoint=bool(args.save_last_checkpoint),
+            include_optimizer_state=bool(args.save_optimizer_state),
             project_root=PROJECT_ROOT,
         )
         best_checkpoint_path = fallback_checkpoint_path
