@@ -6,9 +6,9 @@
 
 ## Split Counts
 
-- `test`: `100`
-- `train`: `800`
-- `val`: `100`
+- `test`: `120`
+- `train`: `792`
+- `val`: `88`
 
 ## Image Statistics
 

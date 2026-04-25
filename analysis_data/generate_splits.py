@@ -21,6 +21,7 @@ except ModuleNotFoundError:
 
 DATA_ROOT = PROJECT_ROOT / "data"
 DEFAULT_SPLIT_RATIOS = (0.8, 0.1, 0.1)
+KVASIR_TRAIN_VAL_RATIOS = (0.9, 0.1)
 IMAGE_SUFFIXES = {".png", ".jpg", ".jpeg", ".bmp", ".tif", ".tiff"}
 MASK_HINTS = ("mask", "masks", "ground truth", "ground_truth", "groundtruth", "label", "labels", "annotation", "annotations")
 IMAGE_HINTS = ("image", "images", "original")
@@ -142,6 +143,21 @@ def _write_manifest(case_ids: Sequence[str], output_path: Path) -> None:
             file.write(f"{case_id}\n")
 
 
+def _read_manifest_case_ids(manifest_path: Path) -> List[str]:
+    if not manifest_path.is_file():
+        raise FileNotFoundError(f"Required manifest '{manifest_path}' does not exist.")
+    case_ids = []
+    with manifest_path.open("r", encoding="utf-8") as file:
+        for raw_line in file:
+            line = raw_line.strip()
+            if not line or line.startswith("#"):
+                continue
+            case_ids.append(Path(line.split(",")[0].strip()).stem)
+    if not case_ids:
+        raise RuntimeError(f"Required manifest '{manifest_path}' is empty.")
+    return case_ids
+
+
 def _extract_archive_if_needed(spec: DatasetSpec, dataset_root: Path, extract: bool) -> None:
     if dataset_root.exists():
         return
@@ -190,6 +206,95 @@ def split_case_ids(
     }
 
 
+def _validate_manifest_ids(case_ids: Sequence[str], available_case_ids: set[str], manifest_path: Path) -> None:
+    missing_ids = sorted({case_id for case_id in case_ids if case_id not in available_case_ids}, key=_natural_key)
+    if missing_ids:
+        preview = ", ".join(missing_ids[:10])
+        suffix = "..." if len(missing_ids) > 10 else ""
+        raise RuntimeError(
+            f"Manifest '{manifest_path}' references {len(missing_ids)} case(s) not found in image/mask pairs: {preview}{suffix}"
+        )
+
+
+def generate_kvasir_split(
+    spec: DatasetSpec,
+    seed: int,
+    extract: bool = False,
+    overwrite: bool = False,
+) -> Dict:
+    dataset_root = DATA_ROOT / spec.root_name
+    _extract_archive_if_needed(spec, dataset_root, extract=extract)
+
+    official_train_path = dataset_root / "train.txt"
+    official_val_path = dataset_root / "val.txt"
+    official_train_ids = _read_manifest_case_ids(official_train_path)
+    official_test_ids = _read_manifest_case_ids(official_val_path)
+
+    split_dir = dataset_root / "splits"
+    split_paths = {split: split_dir / f"{split}.txt" for split in ("train", "val", "test")}
+    if not overwrite and all(path.is_file() for path in split_paths.values()):
+        return {
+            "dataset": spec.key,
+            "dataset_root": str(dataset_root),
+            "skipped": True,
+            "reason": "split manifests already exist; use --overwrite to regenerate them",
+        }
+
+    records = scan_dataset_records(dataset_root) if scan_dataset_records is not None else _fallback_scan_dataset_records(dataset_root)
+    available_case_ids = {record.case_id for record in records}
+    _validate_manifest_ids(official_train_ids, available_case_ids, official_train_path)
+    _validate_manifest_ids(official_test_ids, available_case_ids, official_val_path)
+
+    overlap = sorted(set(official_train_ids) & set(official_test_ids), key=_natural_key)
+    if overlap:
+        preview = ", ".join(overlap[:10])
+        suffix = "..." if len(overlap) > 10 else ""
+        raise RuntimeError(f"Kvasir train.txt and val.txt overlap in {len(overlap)} case(s): {preview}{suffix}")
+
+    train_ratio, val_ratio = KVASIR_TRAIN_VAL_RATIOS
+    shuffled_train_ids = list(official_train_ids)
+    random.Random(seed).shuffle(shuffled_train_ids)
+    train_count = int(len(shuffled_train_ids) * (train_ratio / (train_ratio + val_ratio)))
+    splits = {
+        "train": sorted(shuffled_train_ids[:train_count], key=_natural_key),
+        "val": sorted(shuffled_train_ids[train_count:], key=_natural_key),
+        "test": list(official_test_ids),
+    }
+
+    for split, ids in splits.items():
+        _write_manifest(ids, split_paths[split])
+
+    summary = {
+        "dataset": spec.key,
+        "dataset_root": str(dataset_root),
+        "seed": seed,
+        "source_manifests": {
+            "train": str(official_train_path),
+            "test": str(official_val_path),
+        },
+        "split_policy": {
+            "train_source": "data/Kvasir-SEG/train.txt",
+            "test_source": "data/Kvasir-SEG/val.txt",
+            "train_val_split_from_train_txt": {
+                "train": train_ratio,
+                "val": val_ratio,
+            },
+        },
+        "total_cases": len(official_train_ids) + len(official_test_ids),
+        "official_train_count": len(official_train_ids),
+        "official_val_promoted_to_test_count": len(official_test_ids),
+        "train_count": len(splits["train"]),
+        "val_count": len(splits["val"]),
+        "test_count": len(splits["test"]),
+        "manifests": {split: str(path) for split, path in split_paths.items()},
+        "note": "Kvasir-SEG uses official val.txt as test.txt; official train.txt is split into train/val with a stable 90/10 split.",
+    }
+    split_dir.mkdir(parents=True, exist_ok=True)
+    with (split_dir / "split_summary.json").open("w", encoding="utf-8") as file:
+        json.dump(summary, file, indent=2)
+    return summary
+
+
 def generate_split_for_dataset(
     spec: DatasetSpec,
     seed: int,
@@ -197,6 +302,9 @@ def generate_split_for_dataset(
     extract: bool = False,
     overwrite: bool = False,
 ) -> Dict:
+    if spec.key == "kvasir_seg":
+        return generate_kvasir_split(spec, seed=seed, extract=extract, overwrite=overwrite)
+
     dataset_root = DATA_ROOT / spec.root_name
     _extract_archive_if_needed(spec, dataset_root, extract=extract)
 

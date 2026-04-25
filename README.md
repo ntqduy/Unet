@@ -127,13 +127,17 @@ data/
 
 ### Stable split manifests
 
-Chuẩn hóa split 80/10/10 cố định:
+Chuẩn hóa split cố định:
 
 ```bash
-python analysis_data/generate_splits.py --dataset all --extract --overwrite --seed 1337
+python analysis_data/generate_splits.py --dataset all --extract --seed 1337
 ```
 
-Script này tạo manifest trong `data/<dataset>/splits/`. Tỉ lệ dùng cùng rule với dataloader: `train=int(total*0.8)`, `val=int(total*0.1)`, `test` lấy phần còn lại. Các dataset polyp hiện dùng chung split manifest để tránh mỗi lần chạy tự chia khác nhau.
+Script này tạo manifest trong `data/<dataset>/splits/`. Mặc định với CVC-ClinicDB, ETIS, CVC-ColonDB và CVC-300: `train=int(total*0.8)`, `val=int(total*0.1)`, `test` lấy phần còn lại. Các dataset polyp hiện dùng chung split manifest để tránh mỗi lần chạy tự chia khác nhau.
+
+Riêng `kvasir_seg` dùng policy theo manifest gốc: bắt buộc có `data/Kvasir-SEG/train.txt` và `data/Kvasir-SEG/val.txt`; `val.txt` gốc được dùng làm `splits/test.txt`, còn `train.txt` gốc được chia ổn định `90/10` thành `splits/train.txt` và `splits/val.txt`. Nếu thiếu file manifest gốc, script sẽ dừng lỗi thay vì tự quét và chia toàn bộ ảnh.
+
+Nếu split đã tồn tại, script sẽ giữ nguyên và báo skip. Chỉ thêm `--overwrite` khi bạn cố ý muốn tạo lại split.
 
 ## 5. Basic branch
 

@@ -961,9 +961,9 @@
                                                 "val"
                                             ],
                        "split_counts":  {
-                                            "train":  800,
-                                            "val":  100,
-                                            "test":  100
+                                            "train":  792,
+                                            "val":  88,
+                                            "test":  120
                                         },
                        "image_size_top10":  [
                                                 {

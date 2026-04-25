@@ -32,13 +32,18 @@ fi
 
 SPLIT_SEED="${SPLIT_SEED:-1337}"
 PREPARE_SPLITS="${PREPARE_SPLITS:-1}"
-PREPARE_SPLITS_OVERWRITE="${PREPARE_SPLITS_OVERWRITE:-1}"
+PREPARE_SPLITS_OVERWRITE="${PREPARE_SPLITS_OVERWRITE:-0}"
 if [ "$PREPARE_SPLITS" = "1" ]; then
   SPLIT_ARGS=(--dataset "$DATASET_KEY" --seed "$SPLIT_SEED" --extract)
   if [ "$PREPARE_SPLITS_OVERWRITE" = "1" ]; then
     SPLIT_ARGS+=(--overwrite)
   fi
   python analysis_data/generate_splits.py "${SPLIT_ARGS[@]}"
+fi
+
+PREPARE_ANALYSIS="${PREPARE_ANALYSIS:-0}"
+if [ "$PREPARE_ANALYSIS" = "1" ]; then
+  python analysis_data/analyze_datasets.py --dataset "$DATASET_KEY"
 fi
 
 PRUNE_STRATEGY="${PRUNE_STRATEGY:-S1}"
