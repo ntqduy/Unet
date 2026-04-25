@@ -65,7 +65,7 @@ STEP3_ARGS=()
 
 # STEP3_PRUNING=1 enables student recovery/distillation after structural pruning.
 # STEP3_PRUNING=0 evaluates the pruned student without the recovery stage.
-STEP3_PRUNING="${STEP3_PRUNING:-1}"
+STEP3_PRUNING="${STEP3_PRUNING:-0}"
 STEP3_PRUNING="$(echo "$STEP3_PRUNING" | tr '[:upper:]' '[:lower:]')"
 STEP3_PRUNING_EPOCHS="${STEP3_PRUNING_EPOCHS:-4}"
 TEACHER_OUTPUT_ROOT="${TEACHER_OUTPUT_ROOT:-outputs}"
