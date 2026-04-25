@@ -1,0 +1,20 @@
+{
+  "dataset": "cvc_colondb",
+  "dataset_root": "D:\\HCMUS_Document\\N\u0103m 3\\K\u00ec 2\\Computer Vision\\project\\Code_main\\Unet\\data\\CVC-ColonDB",
+  "seed": 1337,
+  "split_ratios": {
+    "train": 0.8,
+    "val": 0.1,
+    "test": 0.1
+  },
+  "total_cases": 380,
+  "train_count": 304,
+  "val_count": 38,
+  "test_count": 38,
+  "manifests": {
+    "train": "D:\\HCMUS_Document\\N\u0103m 3\\K\u00ec 2\\Computer Vision\\project\\Code_main\\Unet\\data\\CVC-ColonDB\\splits\\train.txt",
+    "val": "D:\\HCMUS_Document\\N\u0103m 3\\K\u00ec 2\\Computer Vision\\project\\Code_main\\Unet\\data\\CVC-ColonDB\\splits\\val.txt",
+    "test": "D:\\HCMUS_Document\\N\u0103m 3\\K\u00ec 2\\Computer Vision\\project\\Code_main\\Unet\\data\\CVC-ColonDB\\splits\\test.txt"
+  },
+  "note": "Stable train/val/test manifests generated with the same slicing rule as dataloaders.dataset."
+}

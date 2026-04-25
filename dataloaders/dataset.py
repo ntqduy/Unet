@@ -21,8 +21,29 @@ IGNORE_HINTS = ("bbox", "bounding")
 DEFAULT_SPLIT_RATIOS = (0.8, 0.1, 0.1)
 MANIFEST_SEARCH_SUBDIRS = ("splits", "")
 BINARY_MASK_THRESHOLD = 127
-BINARY_MASK_DATASETS = {"cvc", "cvc_clinicdb", "kvasir", "kvasir_seg"}
-BINARY_MASK_PATH_HINTS = ("kvasir", "cvc-clinicdb", "cvc_clinicdb")
+BINARY_MASK_DATASETS = {
+    "cvc",
+    "cvc_clinicdb",
+    "kvasir",
+    "kvasir_seg",
+    "etis",
+    "etis_larib",
+    "cvc_colondb",
+    "cvc_colon_db",
+    "cvc_300",
+    "cvc300",
+}
+BINARY_MASK_PATH_HINTS = (
+    "kvasir",
+    "cvc-clinicdb",
+    "cvc_clinicdb",
+    "etis",
+    "cvc-colondb",
+    "cvc_colondb",
+    "cvc-colon",
+    "cvc-300",
+    "cvc_300",
+)
 
 
 @dataclass(frozen=True)
@@ -339,16 +360,45 @@ class KvasirSEG(SegmentationDataset2D):
         super().__init__(*args, **kwargs)
 
 
-class Cyst2D(SegmentationDataset2D):
-    pass
+class ETISLarib(SegmentationDataset2D):
+    def __init__(self, *args, **kwargs) -> None:
+        kwargs.setdefault("force_binary_masks", True)
+        super().__init__(*args, **kwargs)
+
+
+class CVCColonDB(SegmentationDataset2D):
+    def __init__(self, *args, **kwargs) -> None:
+        kwargs.setdefault("force_binary_masks", True)
+        super().__init__(*args, **kwargs)
+
+
+class CVC300(SegmentationDataset2D):
+    def __init__(self, *args, **kwargs) -> None:
+        kwargs.setdefault("force_binary_masks", True)
+        super().__init__(*args, **kwargs)
 
 
 CVC_ClinicDB = CVCClinicDB
 Kvasir_SEG = KvasirSEG
+ETIS_Larib = ETISLarib
+CVC_ColonDB = CVCColonDB
+CVC_300 = CVC300
 
 
 def list_available_datasets() -> List[str]:
-    return ["cvc", "cvc_clinicdb", "kvasir", "kvasir_seg", "cyst2d", "generic"]
+    return [
+        "cvc_clinicdb",
+        "kvasir_seg",
+        "etis",
+        "etis_larib",
+        "cvc_colondb",
+        "cvc_colon_db",
+        "cvc_300",
+        "cvc300",
+        "cvc",
+        "kvasir",
+        "generic",
+    ]
 
 
 def build_dataset(
@@ -365,7 +415,12 @@ def build_dataset(
         "cvc_clinicdb": CVCClinicDB,
         "kvasir": KvasirSEG,
         "kvasir_seg": KvasirSEG,
-        "cyst2d": Cyst2D,
+        "etis": ETISLarib,
+        "etis_larib": ETISLarib,
+        "cvc_colondb": CVCColonDB,
+        "cvc_colon_db": CVCColonDB,
+        "cvc_300": CVC300,
+        "cvc300": CVC300,
         "generic": SegmentationDataset2D,
     }.get(normalized_name, SegmentationDataset2D)
     return dataset_cls(

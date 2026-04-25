@@ -1,64 +1,64 @@
-# Hướng dẫn chạy project trên Slurm server với Conda
+﻿# HÆ°á»›ng dáº«n cháº¡y project trÃªn Slurm server vá»›i Conda
 
-Tài liệu này mô tả chi tiết từng bước để thiết lập môi trường `conda`, viết file `run.sh`, submit job lên Slurm, theo dõi log, và xử lý các lỗi thường gặp. Nội dung được viết dựa trên đúng bối cảnh hiện tại của bạn:
+TÃ i liá»‡u nÃ y mÃ´ táº£ chi tiáº¿t tá»«ng bÆ°á»›c Ä‘á»ƒ thiáº¿t láº­p mÃ´i trÆ°á»ng `conda`, viáº¿t file `run.sh`, submit job lÃªn Slurm, theo dÃµi log, vÃ  xá»­ lÃ½ cÃ¡c lá»—i thÆ°á»ng gáº·p. Ná»™i dung Ä‘Æ°á»£c viáº¿t dá»±a trÃªn Ä‘Ãºng bá»‘i cáº£nh hiá»‡n táº¡i cá»§a báº¡n:
 
-* Server dùng **Slurm**
-* Không có sẵn `anaconda` / `miniconda` trong `module avail`
-* Bạn đã cài Miniconda tại đường dẫn:
+* Server dÃ¹ng **Slurm**
+* KhÃ´ng cÃ³ sáºµn `anaconda` / `miniconda` trong `module avail`
+* Báº¡n Ä‘Ã£ cÃ i Miniconda táº¡i Ä‘Æ°á»ng dáº«n:
 
   * `$HOME/miniconda3`
-* Project nằm ở:
+* Project náº±m á»Ÿ:
 
   * `$HOME/PGD-UNet`
-* Environment muốn dùng là:
+* Environment muá»‘n dÃ¹ng lÃ :
 
   * `pgdunet`
 
 ---
 
-# 1. Kiểm tra môi trường server
+# 1. Kiá»ƒm tra mÃ´i trÆ°á»ng server
 
-Trước tiên, cần xác định server có những module nào khả dụng.
+TrÆ°á»›c tiÃªn, cáº§n xÃ¡c Ä‘á»‹nh server cÃ³ nhá»¯ng module nÃ o kháº£ dá»¥ng.
 
 ```bash
 module avail
 ```
 
-Mục đích của lệnh này là để xem server có sẵn:
+Má»¥c Ä‘Ã­ch cá»§a lá»‡nh nÃ y lÃ  Ä‘á»ƒ xem server cÃ³ sáºµn:
 
 * Python
 * CUDA
 * cuDNN
 * Anaconda / Miniconda
-* Các compiler liên quan
+* CÃ¡c compiler liÃªn quan
 
-Trong trường hợp của bạn, `module avail` không có `anaconda` hay `miniconda`, vì vậy cần tự cài Miniconda vào thư mục home.
+Trong trÆ°á»ng há»£p cá»§a báº¡n, `module avail` khÃ´ng cÃ³ `anaconda` hay `miniconda`, vÃ¬ váº­y cáº§n tá»± cÃ i Miniconda vÃ o thÆ° má»¥c home.
 
 ---
 
-# 2. Tải và cài Miniconda
+# 2. Táº£i vÃ  cÃ i Miniconda
 
-## 2.1. Tải bộ cài Miniconda
+## 2.1. Táº£i bá»™ cÃ i Miniconda
 
 ```bash
 wget https://repo.anaconda.com/miniconda/Miniconda3-latest-Linux-x86_64.sh
 ```
 
-Lệnh này tải file cài đặt Miniconda cho Linux 64-bit về thư mục hiện tại.
+Lá»‡nh nÃ y táº£i file cÃ i Ä‘áº·t Miniconda cho Linux 64-bit vá» thÆ° má»¥c hiá»‡n táº¡i.
 
-## 2.2. Cài Miniconda vào thư mục home
+## 2.2. CÃ i Miniconda vÃ o thÆ° má»¥c home
 
 ```bash
 bash Miniconda3-latest-Linux-x86_64.sh -b -p $HOME/miniconda3
 ```
 
-Giải thích:
+Giáº£i thÃ­ch:
 
-* `bash Miniconda3-latest-Linux-x86_64.sh`: chạy bộ cài
-* `-b`: cài đặt ở chế độ batch, không hỏi tương tác
-* `-p $HOME/miniconda3`: chỉ định thư mục cài đặt là `~/miniconda3`
+* `bash Miniconda3-latest-Linux-x86_64.sh`: cháº¡y bá»™ cÃ i
+* `-b`: cÃ i Ä‘áº·t á»Ÿ cháº¿ Ä‘á»™ batch, khÃ´ng há»i tÆ°Æ¡ng tÃ¡c
+* `-p $HOME/miniconda3`: chá»‰ Ä‘á»‹nh thÆ° má»¥c cÃ i Ä‘áº·t lÃ  `~/miniconda3`
 
-Sau khi cài xong, bạn sẽ có Conda nằm trong:
+Sau khi cÃ i xong, báº¡n sáº½ cÃ³ Conda náº±m trong:
 
 ```bash
 $HOME/miniconda3
@@ -66,66 +66,66 @@ $HOME/miniconda3
 
 ---
 
-# 3. Nạp Conda vào phiên shell hiện tại
+# 3. Náº¡p Conda vÃ o phiÃªn shell hiá»‡n táº¡i
 
-Sau khi cài xong, cần nạp script khởi tạo Conda để shell hiện tại nhận lệnh `conda`.
+Sau khi cÃ i xong, cáº§n náº¡p script khá»Ÿi táº¡o Conda Ä‘á»ƒ shell hiá»‡n táº¡i nháº­n lá»‡nh `conda`.
 
 ```bash
 source $HOME/miniconda3/etc/profile.d/conda.sh
 ```
 
-Kiểm tra lại:
+Kiá»ƒm tra láº¡i:
 
 ```bash
 conda --version
 ```
 
-Nếu thấy kết quả như:
+Náº¿u tháº¥y káº¿t quáº£ nhÆ°:
 
 ```bash
 conda 26.1.1
 ```
 
-thì có nghĩa là Conda đã hoạt động.
+thÃ¬ cÃ³ nghÄ©a lÃ  Conda Ä‘Ã£ hoáº¡t Ä‘á»™ng.
 
 ---
 
-# 4. Chấp nhận Terms of Service của Conda channels
+# 4. Cháº¥p nháº­n Terms of Service cá»§a Conda channels
 
-Ở bản Conda mới, khi dùng các channel mặc định của Anaconda lần đầu, bạn cần chấp nhận điều khoản sử dụng.
+á»ž báº£n Conda má»›i, khi dÃ¹ng cÃ¡c channel máº·c Ä‘á»‹nh cá»§a Anaconda láº§n Ä‘áº§u, báº¡n cáº§n cháº¥p nháº­n Ä‘iá»u khoáº£n sá»­ dá»¥ng.
 
-Chạy lần lượt 2 lệnh sau:
+Cháº¡y láº§n lÆ°á»£t 2 lá»‡nh sau:
 
 ```bash
 conda tos accept --override-channels --channel https://repo.anaconda.com/pkgs/main
 conda tos accept --override-channels --channel https://repo.anaconda.com/pkgs/r
 ```
 
-Nếu không chạy bước này, lệnh `conda create` sẽ báo lỗi và không tạo được environment.
+Náº¿u khÃ´ng cháº¡y bÆ°á»›c nÃ y, lá»‡nh `conda create` sáº½ bÃ¡o lá»—i vÃ  khÃ´ng táº¡o Ä‘Æ°á»£c environment.
 
 ---
 
-# 5. Tạo môi trường Conda
+# 5. Táº¡o mÃ´i trÆ°á»ng Conda
 
-Tạo environment tên `pgdunet` với Python 3.10:
+Táº¡o environment tÃªn `pgdunet` vá»›i Python 3.10:
 
 ```bash
 conda create -n pgdunet python=3.10 -y
 ```
 
-Giải thích:
+Giáº£i thÃ­ch:
 
-* `-n pgdunet`: đặt tên môi trường là `pgdunet`
-* `python=3.10`: chọn phiên bản Python 3.10
-* `-y`: tự động đồng ý với các câu hỏi xác nhận
+* `-n pgdunet`: Ä‘áº·t tÃªn mÃ´i trÆ°á»ng lÃ  `pgdunet`
+* `python=3.10`: chá»n phiÃªn báº£n Python 3.10
+* `-y`: tá»± Ä‘á»™ng Ä‘á»“ng Ã½ vá»›i cÃ¡c cÃ¢u há»i xÃ¡c nháº­n
 
-Sau đó activate môi trường:
+Sau Ä‘Ã³ activate mÃ´i trÆ°á»ng:
 
 ```bash
 conda activate pgdunet
 ```
 
-Kiểm tra:
+Kiá»ƒm tra:
 
 ```bash
 conda info --envs
@@ -133,29 +133,29 @@ which python
 python --version
 ```
 
-Nếu prompt hiện thêm `(pgdunet)` ở đầu dòng thì có nghĩa là environment đã được kích hoạt.
+Náº¿u prompt hiá»‡n thÃªm `(pgdunet)` á»Ÿ Ä‘áº§u dÃ²ng thÃ¬ cÃ³ nghÄ©a lÃ  environment Ä‘Ã£ Ä‘Æ°á»£c kÃ­ch hoáº¡t.
 
 ---
 
-# 6. Cài các package cần thiết
+# 6. CÃ i cÃ¡c package cáº§n thiáº¿t
 
-Tùy theo project, bạn cần cài các thư viện Python cần thiết. Với project segmentation bằng PyTorch, có thể bắt đầu với các lệnh sau.
+TÃ¹y theo project, báº¡n cáº§n cÃ i cÃ¡c thÆ° viá»‡n Python cáº§n thiáº¿t. Vá»›i project segmentation báº±ng PyTorch, cÃ³ thá»ƒ báº¯t Ä‘áº§u vá»›i cÃ¡c lá»‡nh sau.
 
-## 6.1. Cài PyTorch bản GPU
+## 6.1. CÃ i PyTorch báº£n GPU
 
-Server của bạn có module CUDA 11.8, vì vậy có thể dùng wheel PyTorch cho `cu118`.
+Server cá»§a báº¡n cÃ³ module CUDA 11.8, vÃ¬ váº­y cÃ³ thá»ƒ dÃ¹ng wheel PyTorch cho `cu118`.
 
 ```bash
 pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu118
 ```
 
-## 6.2. Cài các package cơ bản khác
+## 6.2. CÃ i cÃ¡c package cÆ¡ báº£n khÃ¡c
 
 ```bash
 pip install numpy pandas scikit-learn tqdm matplotlib opencv-python
 ```
 
-Nếu project có yêu cầu khác, bạn có thể cài thêm theo file `requirements.txt` nếu có:
+Náº¿u project cÃ³ yÃªu cáº§u khÃ¡c, báº¡n cÃ³ thá»ƒ cÃ i thÃªm theo file `requirements.txt` náº¿u cÃ³:
 
 ```bash
 pip install -r requirements.txt
@@ -163,41 +163,41 @@ pip install -r requirements.txt
 
 ---
 
-# 7. Kiểm tra PyTorch có nhận GPU hay không
+# 7. Kiá»ƒm tra PyTorch cÃ³ nháº­n GPU hay khÃ´ng
 
-Sau khi cài xong, kiểm tra nhanh bằng lệnh:
+Sau khi cÃ i xong, kiá»ƒm tra nhanh báº±ng lá»‡nh:
 
 ```bash
 python -c "import torch; print(torch.__version__); print(torch.cuda.is_available())"
 ```
 
-Nếu dòng thứ hai in ra:
+Náº¿u dÃ²ng thá»© hai in ra:
 
 ```bash
 True
 ```
 
-thì PyTorch đã nhận GPU.
+thÃ¬ PyTorch Ä‘Ã£ nháº­n GPU.
 
-Nếu ra `False` thì có thể do:
+Náº¿u ra `False` thÃ¬ cÃ³ thá»ƒ do:
 
-* chưa load CUDA module trong job
-* cài sai bản PyTorch
-* đang đứng ở login node không có GPU
+* chÆ°a load CUDA module trong job
+* cÃ i sai báº£n PyTorch
+* Ä‘ang Ä‘á»©ng á»Ÿ login node khÃ´ng cÃ³ GPU
 
-Lưu ý: việc `torch.cuda.is_available()` ra `False` trên **login node** chưa chắc là lỗi, vì nhiều cluster chỉ có GPU trên compute node.
+LÆ°u Ã½: viá»‡c `torch.cuda.is_available()` ra `False` trÃªn **login node** chÆ°a cháº¯c lÃ  lá»—i, vÃ¬ nhiá»u cluster chá»‰ cÃ³ GPU trÃªn compute node.
 
 ---
 
-# 8. Cấu trúc cơ bản của một file Slurm `run.sh`
+# 8. Cáº¥u trÃºc cÆ¡ báº£n cá»§a má»™t file Slurm `run.sh`
 
-Một file Slurm script thường gồm 3 phần:
+Má»™t file Slurm script thÆ°á»ng gá»“m 3 pháº§n:
 
-1. **Shebang**: xác định shell dùng để chạy script
-2. **Các dòng `#SBATCH`**: mô tả tài nguyên cần xin từ Slurm
-3. **Các lệnh thực thi**: load module, activate conda, chạy code
+1. **Shebang**: xÃ¡c Ä‘á»‹nh shell dÃ¹ng Ä‘á»ƒ cháº¡y script
+2. **CÃ¡c dÃ²ng `#SBATCH`**: mÃ´ táº£ tÃ i nguyÃªn cáº§n xin tá»« Slurm
+3. **CÃ¡c lá»‡nh thá»±c thi**: load module, activate conda, cháº¡y code
 
-Ví dụ khung cơ bản:
+VÃ­ dá»¥ khung cÆ¡ báº£n:
 
 ```bash
 #!/bin/bash
@@ -224,70 +224,70 @@ python train.py
 
 ---
 
-# 9. Giải thích chi tiết từng dòng trong Slurm script
+# 9. Giáº£i thÃ­ch chi tiáº¿t tá»«ng dÃ²ng trong Slurm script
 
-## 9.1. Dòng shebang
+## 9.1. DÃ²ng shebang
 
 ```bash
 #!/bin/bash
 ```
 
-Cho biết script sẽ được chạy bằng `bash`.
+Cho biáº¿t script sáº½ Ä‘Æ°á»£c cháº¡y báº±ng `bash`.
 
-## 9.2. Tên job
+## 9.2. TÃªn job
 
 ```bash
 #SBATCH --job-name=myjob
 ```
 
-Đặt tên cho job để dễ theo dõi trong `squeue` và log.
+Äáº·t tÃªn cho job Ä‘á»ƒ dá»… theo dÃµi trong `squeue` vÃ  log.
 
-## 9.3. File log output và error
+## 9.3. File log output vÃ  error
 
 ```bash
 #SBATCH --output=logs/%x_%j.out
 #SBATCH --error=logs/%x_%j.err
 ```
 
-Giải thích:
+Giáº£i thÃ­ch:
 
-* `%x`: tên job
+* `%x`: tÃªn job
 * `%j`: job ID
 
-Ví dụ file log có thể là:
+VÃ­ dá»¥ file log cÃ³ thá»ƒ lÃ :
 
 ```bash
 logs/myjob_12345.out
 logs/myjob_12345.err
 ```
 
-## 9.4. Số node
+## 9.4. Sá»‘ node
 
 ```bash
 #SBATCH --nodes=1
 ```
 
-Yêu cầu 1 node, tức là 1 máy vật lý.
+YÃªu cáº§u 1 node, tá»©c lÃ  1 mÃ¡y váº­t lÃ½.
 
-Với phần lớn bài toán deep learning thông thường, giá trị này nên để là `1`.
+Vá»›i pháº§n lá»›n bÃ i toÃ¡n deep learning thÃ´ng thÆ°á»ng, giÃ¡ trá»‹ nÃ y nÃªn Ä‘á»ƒ lÃ  `1`.
 
-## 9.5. Số task
+## 9.5. Sá»‘ task
 
 ```bash
 #SBATCH --ntasks=1
 ```
 
-Yêu cầu 1 tiến trình chính.
+YÃªu cáº§u 1 tiáº¿n trÃ¬nh chÃ­nh.
 
-Đối với các bài train đơn GPU hoặc đơn process, giá trị này thường là `1`.
+Äá»‘i vá»›i cÃ¡c bÃ i train Ä‘Æ¡n GPU hoáº·c Ä‘Æ¡n process, giÃ¡ trá»‹ nÃ y thÆ°á»ng lÃ  `1`.
 
-## 9.6. Số CPU cho mỗi task
+## 9.6. Sá»‘ CPU cho má»—i task
 
 ```bash
 #SBATCH --cpus-per-task=4
 ```
 
-Cấp phát 4 CPU cores cho tiến trình chính. Thông số này có thể ảnh hưởng đến tốc độ đọc dữ liệu nếu code dùng `num_workers` trong DataLoader.
+Cáº¥p phÃ¡t 4 CPU cores cho tiáº¿n trÃ¬nh chÃ­nh. ThÃ´ng sá»‘ nÃ y cÃ³ thá»ƒ áº£nh hÆ°á»Ÿng Ä‘áº¿n tá»‘c Ä‘á»™ Ä‘á»c dá»¯ liá»‡u náº¿u code dÃ¹ng `num_workers` trong DataLoader.
 
 ## 9.7. RAM
 
@@ -297,13 +297,13 @@ Cấp phát 4 CPU cores cho tiến trình chính. Thông số này có thể ả
 
 Xin 16 GB RAM cho job.
 
-## 9.8. Thời gian tối đa
+## 9.8. Thá»i gian tá»‘i Ä‘a
 
 ```bash
 #SBATCH --time=24:00:00
 ```
 
-Cho phép job chạy tối đa 24 giờ.
+Cho phÃ©p job cháº¡y tá»‘i Ä‘a 24 giá».
 
 ## 9.9. GPU
 
@@ -311,23 +311,23 @@ Cho phép job chạy tối đa 24 giờ.
 #SBATCH --gres=gpu:1
 ```
 
-Yêu cầu 1 GPU.
+YÃªu cáº§u 1 GPU.
 
 ---
 
-# 10. File `run.sh` cho lệnh train supervised UNet
+# 10. File `run.sh` cho lá»‡nh train supervised UNet
 
-Đây là file hoàn chỉnh cho lệnh:
+ÄÃ¢y lÃ  file hoÃ n chá»‰nh cho lá»‡nh:
 
 ```bash
-python train_basic_model.py --dataset kvasir --root_path data/Kvasir-SEG --model unet --exp supervised_unet --max_epochs 100 --batch_size 8 --base_lr 0.01 --patch_size 256 256
+python train_basic_model.py --dataset kvasir_seg --root_path data/Kvasir-SEG --model unet --exp supervised_unet --max_epochs 100 --batch_size 8 --base_lr 0.01 --patch_size 256 256
 ```
 
-## Nội dung file `run_basic_unet.sh`
+## Ná»™i dung file `run_basic_unet.sh`
 
 ```bash
 #!/bin/bash
-#SBATCH --job-name=pgdunet_kvasir
+#SBATCH --job-name=pgdunet_kvasir_seg
 #SBATCH --output=logs/%x_%j.out
 #SBATCH --error=logs/%x_%j.err
 #SBATCH --nodes=1
@@ -355,7 +355,7 @@ cd $HOME/PGD-UNet
 nvidia-smi
 
 python train_basic_model.py \
-  --dataset kvasir \
+  --dataset kvasir_seg \
   --root_path data/Kvasir-SEG \
   --model unet \
   --exp supervised_unet \
@@ -371,19 +371,19 @@ echo "=============================="
 
 ---
 
-# 11. File `run.sh` cho lệnh train PGD
+# 11. File `run.sh` cho lá»‡nh train PGD
 
-Đây là file hoàn chỉnh cho lệnh:
+ÄÃ¢y lÃ  file hoÃ n chá»‰nh cho lá»‡nh:
 
 ```bash
-python train_pgd.py --dataset cvc --root_path data/CVC-ClinicDB --teacher_model unet_resnet152 --exp pgd_cvc --max_epochs_teacher 50 --max_epochs_student 50 --prune_ratio 0.5 --lambda_distill 0.3 --lambda_sparsity 0.3 --batch_size 8 --patch_size 256 256
+python train_pgd.py --dataset cvc_clinicdb --root_path data/CVC-ClinicDB --teacher_model unet_resnet152 --exp pgd_cvc_clinicdb --max_epochs_teacher 50 --max_epochs_student 50 --prune_ratio 0.5 --lambda_distill 0.3 --lambda_sparsity 0.3 --batch_size 8 --patch_size 256 256
 ```
 
-## Nội dung file `run_pgd.sh`
+## Ná»™i dung file `run_pgd_cvc_clinicdb.sh`
 
 ```bash
 #!/bin/bash
-#SBATCH --job-name=pgd_cvc
+#SBATCH --job-name=pgd_cvc_clinicdb
 #SBATCH --output=logs/%x_%j.out
 #SBATCH --error=logs/%x_%j.err
 #SBATCH --nodes=1
@@ -410,10 +410,10 @@ cd $HOME/PGD-UNet
 nvidia-smi
 
 python train_pgd.py \
-  --dataset cvc \
+  --dataset cvc_clinicdb \
   --root_path data/CVC-ClinicDB \
   --teacher_model unet_resnet152 \
-  --exp pgd_cvc \
+  --exp pgd_cvc_clinicdb \
   --max_epochs_teacher 50 \
   --max_epochs_student 50 \
   --prune_ratio 0.5 \
@@ -429,188 +429,188 @@ echo "=============================="
 
 ---
 
-# 12. Cách tạo file `run.sh`
+# 12. CÃ¡ch táº¡o file `run.sh`
 
-Có nhiều cách, nhưng đơn giản nhất là dùng `nano`.
+CÃ³ nhiá»u cÃ¡ch, nhÆ°ng Ä‘Æ¡n giáº£n nháº¥t lÃ  dÃ¹ng `nano`.
 
-Ví dụ tạo file `run_pgd.sh`:
+VÃ­ dá»¥ táº¡o file `run_pgd_cvc_clinicdb.sh`:
 
 ```bash
-nano run_pgd.sh
+nano run_pgd_cvc_clinicdb.sh
 ```
 
-Dán nội dung script vào.
+DÃ¡n ná»™i dung script vÃ o.
 
-Sau đó:
+Sau Ä‘Ã³:
 
-* nhấn `Ctrl + O` để lưu
-* nhấn `Enter` để xác nhận tên file
-* nhấn `Ctrl + X` để thoát
+* nháº¥n `Ctrl + O` Ä‘á»ƒ lÆ°u
+* nháº¥n `Enter` Ä‘á»ƒ xÃ¡c nháº­n tÃªn file
+* nháº¥n `Ctrl + X` Ä‘á»ƒ thoÃ¡t
 
-Cấp quyền thực thi:
+Cáº¥p quyá»n thá»±c thi:
 
 ```bash
-chmod +x run_pgd.sh
+chmod +x run_pgd_cvc_clinicdb.sh
 ```
 
 ---
 
-# 13. Cách submit job lên Slurm
+# 13. CÃ¡ch submit job lÃªn Slurm
 
-Sau khi có file `.sh`, submit bằng lệnh:
+Sau khi cÃ³ file `.sh`, submit báº±ng lá»‡nh:
 
 ```bash
-chmod +x run_pgd.sh
-sbatch run_pgd.sh
+chmod +x run_pgd_cvc_clinicdb.sh
+sbatch run_pgd_cvc_clinicdb.sh
 ```
 
-Nếu thành công, Slurm sẽ trả về dạng:
+Náº¿u thÃ nh cÃ´ng, Slurm sáº½ tráº£ vá» dáº¡ng:
 
 ```bash
 Submitted batch job 12345
 ```
 
-Trong đó `12345` là job ID.
+Trong Ä‘Ã³ `12345` lÃ  job ID.
 
 ---
 
-# 14. Cách theo dõi job
+# 14. CÃ¡ch theo dÃµi job
 
-## 14.1. Xem job đang chờ hoặc đang chạy
+## 14.1. Xem job Ä‘ang chá» hoáº·c Ä‘ang cháº¡y
 
 ```bash
 squeue -u $USER
 ```
 
-Lệnh này hiển thị tất cả job của bạn.
+Lá»‡nh nÃ y hiá»ƒn thá»‹ táº¥t cáº£ job cá»§a báº¡n.
 
-## 14.2. Xem chi tiết job
+## 14.2. Xem chi tiáº¿t job
 
 ```bash
 scontrol show job 12345
 ```
 
-Thay `12345` bằng job ID thực tế.
+Thay `12345` báº±ng job ID thá»±c táº¿.
 
-## 14.3. Hủy job
+## 14.3. Há»§y job
 
 ```bash
 scancel 12345
 ```
 
-Lệnh này dùng khi cần dừng job.
+Lá»‡nh nÃ y dÃ¹ng khi cáº§n dá»«ng job.
 
 ---
 
-# 15. Cách xem log
+# 15. CÃ¡ch xem log
 
-Nếu bạn đã khai báo:
+Náº¿u báº¡n Ä‘Ã£ khai bÃ¡o:
 
 ```bash
 #SBATCH --output=logs/%x_%j.out
 #SBATCH --error=logs/%x_%j.err
 ```
 
-thì log sẽ nằm trong thư mục `logs`.
+thÃ¬ log sáº½ náº±m trong thÆ° má»¥c `logs`.
 
-Liệt kê file log:
+Liá»‡t kÃª file log:
 
 ```bash
 ls logs
 ```
 
-Xem log theo thời gian thực:
+Xem log theo thá»i gian thá»±c:
 
 ```bash
-tail -f logs/pgd_cvc_12345.out
+tail -f logs/pgd_cvc_clinicdb_12345.out
 ```
 
-Xem lỗi:
+Xem lá»—i:
 
 ```bash
-cat logs/pgd_cvc_12345.err
+cat logs/pgd_cvc_clinicdb_12345.err
 ```
 
 ---
 
-# 16. Quy trình chạy đầy đủ từ đầu đến cuối
+# 16. Quy trÃ¬nh cháº¡y Ä‘áº§y Ä‘á»§ tá»« Ä‘áº§u Ä‘áº¿n cuá»‘i
 
-Dưới đây là quy trình đầy đủ theo đúng thứ tự.
+DÆ°á»›i Ä‘Ã¢y lÃ  quy trÃ¬nh Ä‘áº§y Ä‘á»§ theo Ä‘Ãºng thá»© tá»±.
 
-## Bước 1: Nạp Conda
+## BÆ°á»›c 1: Náº¡p Conda
 
 ```bash
 source $HOME/miniconda3/etc/profile.d/conda.sh
 ```
 
-## Bước 2: Activate environment
+## BÆ°á»›c 2: Activate environment
 
 ```bash
 conda activate pgdunet
 ```
 
-## Bước 3: Đi vào thư mục project
+## BÆ°á»›c 3: Äi vÃ o thÆ° má»¥c project
 
 ```bash
 cd $HOME/PGD-UNet
 ```
 
-## Bước 4: Tạo hoặc chỉnh file `run.sh`
+## BÆ°á»›c 4: Táº¡o hoáº·c chá»‰nh file `run.sh`
 
 ```bash
-nano run_pgd.sh
+nano run_pgd_cvc_clinicdb.sh
 ```
 
-## Bước 5: Cấp quyền thực thi
+## BÆ°á»›c 5: Cáº¥p quyá»n thá»±c thi
 
 ```bash
-chmod +x run_pgd.sh
+chmod +x run_pgd_cvc_clinicdb.sh
 ```
 
-## Bước 6: Submit job
+## BÆ°á»›c 6: Submit job
 
 ```bash
-sbatch run_pgd.sh
+sbatch run_pgd_cvc_clinicdb.sh
 ```
 
-## Bước 7: Theo dõi job
+## BÆ°á»›c 7: Theo dÃµi job
 
 ```bash
 squeue -u $USER
 ```
 
-## Bước 8: Xem log
+## BÆ°á»›c 8: Xem log
 
 ```bash
-tail -f logs/pgd_cvc_*.out
+tail -f logs/pgd_cvc_clinicdb_*.out
 ```
 
 ---
 
-# 17. Cách debug trước khi submit job
+# 17. CÃ¡ch debug trÆ°á»›c khi submit job
 
-Trước khi submit, bạn có thể chạy thử trực tiếp bằng `bash` để xem script có lỗi cú pháp hay lỗi môi trường không.
+TrÆ°á»›c khi submit, báº¡n cÃ³ thá»ƒ cháº¡y thá»­ trá»±c tiáº¿p báº±ng `bash` Ä‘á»ƒ xem script cÃ³ lá»—i cÃº phÃ¡p hay lá»—i mÃ´i trÆ°á»ng khÃ´ng.
 
 ```bash
-bash run_pgd.sh
+bash run_pgd_cvc_clinicdb.sh
 ```
 
-Lưu ý: cách này sẽ chạy ngay trên node hiện tại. Nếu bạn đang ở login node thì có thể không phù hợp để train thật, nhưng rất hữu ích để kiểm tra:
+LÆ°u Ã½: cÃ¡ch nÃ y sáº½ cháº¡y ngay trÃªn node hiá»‡n táº¡i. Náº¿u báº¡n Ä‘ang á»Ÿ login node thÃ¬ cÃ³ thá»ƒ khÃ´ng phÃ¹ há»£p Ä‘á»ƒ train tháº­t, nhÆ°ng ráº¥t há»¯u Ã­ch Ä‘á»ƒ kiá»ƒm tra:
 
-* đường dẫn có đúng không
-* `conda activate` có hoạt động không
-* script có typo không
-* tên file Python có đúng không
+* Ä‘Æ°á»ng dáº«n cÃ³ Ä‘Ãºng khÃ´ng
+* `conda activate` cÃ³ hoáº¡t Ä‘á»™ng khÃ´ng
+* script cÃ³ typo khÃ´ng
+* tÃªn file Python cÃ³ Ä‘Ãºng khÃ´ng
 
 ---
 
-# 18. Các lỗi thường gặp và cách xử lý
+# 18. CÃ¡c lá»—i thÆ°á»ng gáº·p vÃ  cÃ¡ch xá»­ lÃ½
 
 ## 18.1. `conda: command not found`
 
-Nguyên nhân: chưa source Conda trong shell hoặc trong file `.sh`.
+NguyÃªn nhÃ¢n: chÆ°a source Conda trong shell hoáº·c trong file `.sh`.
 
-Cách sửa:
+CÃ¡ch sá»­a:
 
 ```bash
 source $HOME/miniconda3/etc/profile.d/conda.sh
@@ -618,9 +618,9 @@ source $HOME/miniconda3/etc/profile.d/conda.sh
 
 ## 18.2. `EnvironmentNameNotFound`
 
-Nguyên nhân: environment chưa được tạo hoặc gõ sai tên.
+NguyÃªn nhÃ¢n: environment chÆ°a Ä‘Æ°á»£c táº¡o hoáº·c gÃµ sai tÃªn.
 
-Kiểm tra:
+Kiá»ƒm tra:
 
 ```bash
 conda info --envs
@@ -628,82 +628,82 @@ conda info --envs
 
 ## 18.3. `torch.cuda.is_available() = False`
 
-Nguyên nhân có thể là:
+NguyÃªn nhÃ¢n cÃ³ thá»ƒ lÃ :
 
-* đang ở login node không có GPU
-* chưa `module load cuda-11.8.0-gcc-11.4.0-cuusula`
-* cài sai bản PyTorch
+* Ä‘ang á»Ÿ login node khÃ´ng cÃ³ GPU
+* chÆ°a `module load cuda-11.8.0-gcc-11.4.0-cuusula`
+* cÃ i sai báº£n PyTorch
 
-## 18.4. Job pending mãi
+## 18.4. Job pending mÃ£i
 
-Nguyên nhân có thể là:
+NguyÃªn nhÃ¢n cÃ³ thá»ƒ lÃ :
 
-* thiếu tài nguyên trống
-* xin quá nhiều RAM hoặc GPU
-* cluster yêu cầu partition cụ thể
+* thiáº¿u tÃ i nguyÃªn trá»‘ng
+* xin quÃ¡ nhiá»u RAM hoáº·c GPU
+* cluster yÃªu cáº§u partition cá»¥ thá»ƒ
 
-Kiểm tra:
+Kiá»ƒm tra:
 
 ```bash
 scontrol show job <jobid>
 ```
 
-## 18.5. Không có thư mục `logs`
+## 18.5. KhÃ´ng cÃ³ thÆ° má»¥c `logs`
 
-Nếu chưa tạo thư mục `logs`, file output có thể không ghi được đúng như mong muốn.
+Náº¿u chÆ°a táº¡o thÆ° má»¥c `logs`, file output cÃ³ thá»ƒ khÃ´ng ghi Ä‘Æ°á»£c Ä‘Ãºng nhÆ° mong muá»‘n.
 
-Cách sửa:
+CÃ¡ch sá»­a:
 
 ```bash
 mkdir -p logs
 ```
 
-## 18.6. Lỗi do xuống dòng sai trong command
+## 18.6. Lá»—i do xuá»‘ng dÃ²ng sai trong command
 
-Ví dụ sai:
+VÃ­ dá»¥ sai:
 
 ```bash
 --max_epochs_studen
 t 50
 ```
 
-Khi viết command nhiều dòng trong shell script, nên dùng dấu `\` ở cuối dòng trước để nối lệnh cho đúng.
+Khi viáº¿t command nhiá»u dÃ²ng trong shell script, nÃªn dÃ¹ng dáº¥u `\` á»Ÿ cuá»‘i dÃ²ng trÆ°á»›c Ä‘á»ƒ ná»‘i lá»‡nh cho Ä‘Ãºng.
 
 ---
 
-# 19. Gợi ý tối ưu thực tế
+# 19. Gá»£i Ã½ tá»‘i Æ°u thá»±c táº¿
 
-## 19.1. Tăng số CPU nếu DataLoader dùng nhiều worker
+## 19.1. TÄƒng sá»‘ CPU náº¿u DataLoader dÃ¹ng nhiá»u worker
 
-Nếu code có `num_workers > 0`, bạn có thể tăng:
+Náº¿u code cÃ³ `num_workers > 0`, báº¡n cÃ³ thá»ƒ tÄƒng:
 
 ```bash
 #SBATCH --cpus-per-task=8
 ```
 
-## 19.2. Tăng RAM nếu dataset lớn
+## 19.2. TÄƒng RAM náº¿u dataset lá»›n
 
-Ví dụ:
+VÃ­ dá»¥:
 
 ```bash
 #SBATCH --mem=32G
 ```
 
-## 19.3. Tăng thời gian nếu job chạy lâu
+## 19.3. TÄƒng thá»i gian náº¿u job cháº¡y lÃ¢u
 
-Ví dụ cho 48 giờ:
+VÃ­ dá»¥ cho 48 giá»:
 
 ```bash
 #SBATCH --time=48:00:00
 ```
 
-## 19.4. Lưu environment để tái sử dụng
+## 19.4. LÆ°u environment Ä‘á»ƒ tÃ¡i sá»­ dá»¥ng
 
 ```bash
 conda env export > environment.yml
 ```
 
-Sau này có thể khôi phục bằng:
+Sau nÃ y cÃ³ thá»ƒ khÃ´i phá»¥c báº±ng:
 
 ```bash
 conda env create -f environment.yml
@@ -711,38 +711,40 @@ conda env create -f environment.yml
 
 ---
 
-# 20. Checklist ngắn gọn
+# 20. Checklist ngáº¯n gá»n
 
-Dùng checklist này mỗi lần chạy job:
+DÃ¹ng checklist nÃ y má»—i láº§n cháº¡y job:
 
 ```bash
 source $HOME/miniconda3/etc/profile.d/conda.sh
 conda activate pgdunet
 cd $HOME/PGD-UNet
 mkdir -p logs
-sbatch run_pgd.sh
+sbatch run_pgd_cvc_clinicdb.sh
 squeue -u $USER
 ```
 
 Xem log:
 
 ```bash
-tail -f logs/pgd_cvc_*.out
+tail -f logs/pgd_cvc_clinicdb_*.out
 ```
 
 ---
 
-# 21. Kết luận
+# 21. Káº¿t luáº­n
 
-Quy trình chuẩn để chạy project của bạn trên Slurm gồm các bước chính:
+Quy trÃ¬nh chuáº©n Ä‘á»ƒ cháº¡y project cá»§a báº¡n trÃªn Slurm gá»“m cÃ¡c bÆ°á»›c chÃ­nh:
 
-1. Cài Miniconda vào thư mục home
+1. CÃ i Miniconda vÃ o thÆ° má»¥c home
 2. Source Conda
-3. Tạo environment `pgdunet`
-4. Cài các package cần thiết
-5. Viết file `run.sh` với các dòng `#SBATCH`
-6. Load CUDA và activate Conda trong script
-7. Submit bằng `sbatch`
-8. Theo dõi bằng `squeue` và `tail -f`
+3. Táº¡o environment `pgdunet`
+4. CÃ i cÃ¡c package cáº§n thiáº¿t
+5. Viáº¿t file `run.sh` vá»›i cÃ¡c dÃ²ng `#SBATCH`
+6. Load CUDA vÃ  activate Conda trong script
+7. Submit báº±ng `sbatch`
+8. Theo dÃµi báº±ng `squeue` vÃ  `tail -f`
 
-Nếu sau này bạn có thêm model mới, bạn chỉ cần sửa phần command Python trong file `run.sh`, còn khung Slurm script gần như có thể giữ nguyên.
+Náº¿u sau nÃ y báº¡n cÃ³ thÃªm model má»›i, báº¡n chá»‰ cáº§n sá»­a pháº§n command Python trong file `run.sh`, cÃ²n khung Slurm script gáº§n nhÆ° cÃ³ thá»ƒ giá»¯ nguyÃªn.
+
+

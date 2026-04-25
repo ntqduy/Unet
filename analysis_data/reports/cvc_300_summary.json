@@ -1,0 +1,18 @@
+{
+  "dataset_name": "cvc_300",
+  "dataset_root": "data/CVC-300",
+  "num_pairs": 60,
+  "num_images": 60,
+  "num_masks": 60,
+  "available_splits": [
+    "test",
+    "train",
+    "val"
+  ],
+  "split_counts": {
+    "train": 48,
+    "val": 6,
+    "test": 6
+  },
+  "note": "Lightweight status file. Regenerate full image statistics with analysis_data/analyze_datasets.py in an environment with PyTorch installed."
+}

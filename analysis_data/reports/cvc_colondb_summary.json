@@ -1,0 +1,18 @@
+{
+  "dataset_name": "cvc_colondb",
+  "dataset_root": "data/CVC-ColonDB",
+  "num_pairs": 380,
+  "num_images": 380,
+  "num_masks": 380,
+  "available_splits": [
+    "test",
+    "train",
+    "val"
+  ],
+  "split_counts": {
+    "train": 304,
+    "val": 38,
+    "test": 38
+  },
+  "note": "Lightweight status file. Regenerate full image statistics with analysis_data/analyze_datasets.py in an environment with PyTorch installed."
+}

@@ -19,7 +19,35 @@ from dataloaders import dataset as dataset_module
 
 DATA_ROOT = PROJECT_ROOT / "data"
 REPORT_ROOT = PROJECT_ROOT / "analysis_data" / "reports"
-FALLBACK_BINARY_MASK_DATASETS = {"cvc", "cvc_clinicdb", "kvasir", "kvasir_seg"}
+FALLBACK_BINARY_MASK_DATASETS = {
+    "cvc",
+    "cvc_clinicdb",
+    "kvasir",
+    "kvasir_seg",
+    "etis",
+    "etis_larib",
+    "cvc_colondb",
+    "cvc_colon_db",
+    "cvc_300",
+    "cvc300",
+}
+DATASETS = {
+    "cvc_clinicdb": DATA_ROOT / "CVC-ClinicDB",
+    "kvasir_seg": DATA_ROOT / "Kvasir-SEG",
+    "etis": DATA_ROOT / "ETIS",
+    "cvc_colondb": DATA_ROOT / "CVC-ColonDB",
+    "cvc_300": DATA_ROOT / "CVC-300",
+}
+DATASET_ALIASES = {
+    "all": "all",
+    "cvc": "cvc_clinicdb",
+    "clinicdb": "cvc_clinicdb",
+    "kvasir": "kvasir_seg",
+    "etis_larib": "etis",
+    "cvc_colon_db": "cvc_colondb",
+    "colondb": "cvc_colondb",
+    "cvc300": "cvc_300",
+}
 
 find_manifest_path = dataset_module.find_manifest_path
 list_existing_splits = dataset_module.list_existing_splits
@@ -213,15 +241,17 @@ def summary_to_markdown(summary: Dict) -> str:
 
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument("--dataset", default="all", choices=["all", "cvc", "kvasir"], help="dataset to analyze")
+    parser.add_argument(
+        "--dataset",
+        default="all",
+        choices=["all", *DATASETS.keys(), *DATASET_ALIASES.keys()],
+        help="dataset to analyze",
+    )
     args = parser.parse_args()
 
     REPORT_ROOT.mkdir(parents=True, exist_ok=True)
-    datasets = []
-    if args.dataset in {"all", "cvc"}:
-        datasets.append(("cvc_clinicdb", DATA_ROOT / "CVC-ClinicDB"))
-    if args.dataset in {"all", "kvasir"}:
-        datasets.append(("kvasir_seg", DATA_ROOT / "Kvasir-SEG"))
+    normalized_dataset = DATASET_ALIASES.get(args.dataset, args.dataset)
+    datasets = DATASETS.items() if normalized_dataset == "all" else [(normalized_dataset, DATASETS[normalized_dataset])]
 
     combined = {}
     for dataset_name, dataset_root in datasets:

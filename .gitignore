@@ -57,8 +57,25 @@ data/Kvasir-SEG/**
 !data/Kvasir-SEG/splits/
 !data/Kvasir-SEG/splits/**
 
+# Ignore raw ETIS data but keep split manifests
+data/ETIS/**
+!data/ETIS/
+!data/ETIS/splits/
+!data/ETIS/splits/**
+
+# Ignore raw CVC-ColonDB data but keep split manifests
+data/CVC-ColonDB/**
+!data/CVC-ColonDB/
+!data/CVC-ColonDB/splits/
+!data/CVC-ColonDB/splits/**
+
+# Ignore raw CVC-300 data but keep split manifests
+data/CVC-300/**
+!data/CVC-300/
+!data/CVC-300/splits/
+!data/CVC-300/splits/**
+
 dataset/
-data/
 venv/
 .venv/
 outputs/

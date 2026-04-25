@@ -95,11 +95,15 @@ pip install thop
 
 Repo hiện hỗ trợ các dataset key:
 
-- `kvasir`
-- `kvasir_seg`
-- `cvc`
 - `cvc_clinicdb`
-- `cyst2d`
+- `kvasir_seg`
+- `etis`
+- `etis_larib`
+- `cvc_colondb`
+- `cvc_colon_db`
+- `cvc_300`
+- `cvc300`
+- `cvc` và `kvasir` vẫn còn là alias tương thích cũ, nhưng output mới nên dùng `cvc_clinicdb` và `kvasir_seg`
 - `generic`
 
 Ví dụ cấu trúc:
@@ -121,6 +125,16 @@ data/
 - normalize mask nhị phân về `0/1`
 - transform train / eval riêng
 
+### Stable split manifests
+
+Chuẩn hóa split 80/10/10 cố định:
+
+```bash
+python analysis_data/generate_splits.py --dataset all --extract --overwrite --seed 1337
+```
+
+Script này tạo manifest trong `data/<dataset>/splits/`. Tỉ lệ dùng cùng rule với dataloader: `train=int(total*0.8)`, `val=int(total*0.1)`, `test` lấy phần còn lại. Các dataset polyp hiện dùng chung split manifest để tránh mỗi lần chạy tự chia khác nhau.
+
 ## 5. Basic branch
 
 ### Train
@@ -128,13 +142,13 @@ data/
 Ví dụ:
 
 ```bash
-python train_basic_model.py --dataset kvasir --root_path data/Kvasir-SEG --model unet --exp supervised_unet --max_epochs 100 --batch_size 8 --base_lr 0.01 --patch_size 256 256
+python train_basic_model.py --dataset kvasir_seg --root_path data/Kvasir-SEG --model unet --exp supervised_unet --max_epochs 100 --batch_size 8 --base_lr 0.01 --patch_size 256 256
 ```
 
 Ví dụ với `unet_resnet152`:
 
 ```bash
-python train_basic_model.py --dataset cvc --root_path data/CVC-ClinicDB --model unet_resnet152 --encoder_pretrained 1 --exp supervised_resnet152 --max_epochs 100
+python train_basic_model.py --dataset cvc_clinicdb --root_path data/CVC-ClinicDB --model unet_resnet152 --encoder_pretrained 1 --exp supervised_resnet152 --max_epochs 100
 ```
 
 Lưu ý:
@@ -145,7 +159,7 @@ Lưu ý:
 ### Evaluate
 
 ```bash
-python test2d.py --dataset kvasir --root_path data/Kvasir-SEG --model unet --split test
+python test2d.py --dataset kvasir_seg --root_path data/Kvasir-SEG --model unet --split test
 ```
 
 ### Checkpoint behavior
@@ -161,7 +175,7 @@ python test2d.py --dataset kvasir --root_path data/Kvasir-SEG --model unet --spl
 ### Train full pipeline
 
 ```bash
-python run_pgd.py --dataset kvasir --root_path data/Kvasir-SEG --teacher_model unet_resnet152 --exp pdg_kvasir --max_epochs_teacher 50 --max_epochs_student 100 --prune_strategy S1 --prune_method static --static_prune_ratio 0.5 --lambda_distill 0.3 --lambda_sparsity 0.3 --batch_size 8 --patch_size 256 256
+python run_pgd.py --dataset kvasir_seg --root_path data/Kvasir-SEG --teacher_model unet_resnet152 --exp pdg_kvasir_seg --max_epochs_teacher 50 --max_epochs_student 100 --prune_strategy S1 --prune_method static --static_prune_ratio 0.5 --lambda_distill 0.3 --lambda_sparsity 0.3 --batch_size 8 --patch_size 256 256
 ```
 
 Lưu ý:
@@ -205,59 +219,75 @@ Ví dụ chạy trực tiếp Python:
 
 ```bash
 # S1: static pruning 50%
-python run_pgd.py --dataset cvc --root_path data/CVC-ClinicDB --teacher_model unet_resnet152 --prune_strategy S1 --static_prune_ratio 0.5
+python run_pgd.py --dataset cvc_clinicdb --root_path data/CVC-ClinicDB --teacher_model unet_resnet152 --prune_strategy S1 --static_prune_ratio 0.5
 
 # S2: Kneedle
-python run_pgd.py --dataset cvc --root_path data/CVC-ClinicDB --teacher_model unet_resnet152 --prune_strategy S2
+python run_pgd.py --dataset cvc_clinicdb --root_path data/CVC-ClinicDB --teacher_model unet_resnet152 --prune_strategy S2
 
 # S3: Otsu
-python run_pgd.py --dataset cvc --root_path data/CVC-ClinicDB --teacher_model unet_resnet152 --prune_strategy S3
+python run_pgd.py --dataset cvc_clinicdb --root_path data/CVC-ClinicDB --teacher_model unet_resnet152 --prune_strategy S3
 
 # S4: GMM
-python run_pgd.py --dataset cvc --root_path data/CVC-ClinicDB --teacher_model unet_resnet152 --prune_strategy S4
+python run_pgd.py --dataset cvc_clinicdb --root_path data/CVC-ClinicDB --teacher_model unet_resnet152 --prune_strategy S4
 
 # S5: middle-static pruning 50%
-python run_pgd.py --dataset cvc --root_path data/CVC-ClinicDB --teacher_model unet_resnet152 --prune_strategy S5 --static_prune_ratio 0.5
+python run_pgd.py --dataset cvc_clinicdb --root_path data/CVC-ClinicDB --teacher_model unet_resnet152 --prune_strategy S5 --static_prune_ratio 0.5
 
 # S6: middle-kneedle pruning
-python run_pgd.py --dataset cvc --root_path data/CVC-ClinicDB --teacher_model unet_resnet152 --prune_strategy S6
+python run_pgd.py --dataset cvc_clinicdb --root_path data/CVC-ClinicDB --teacher_model unet_resnet152 --prune_strategy S6
 
 # S7: middle-otsu pruning
-python run_pgd.py --dataset cvc --root_path data/CVC-ClinicDB --teacher_model unet_resnet152 --prune_strategy S7
+python run_pgd.py --dataset cvc_clinicdb --root_path data/CVC-ClinicDB --teacher_model unet_resnet152 --prune_strategy S7
 
 # S8: middle-gmm pruning
-python run_pgd.py --dataset cvc --root_path data/CVC-ClinicDB --teacher_model unet_resnet152 --prune_strategy S8
+python run_pgd.py --dataset cvc_clinicdb --root_path data/CVC-ClinicDB --teacher_model unet_resnet152 --prune_strategy S8
 ```
 
-Khi chạy qua `run_pgd.sh`, set biến môi trường:
+Khi chạy qua script theo dataset, set biến môi trường:
 
 ```bash
 # S1: static, có pruning ở step 3 trong 4 epoch cuối
-PRUNE_STRATEGY=S1 PRUNE_RATE=0.5 STEP3_PRUNING=1 STEP3_PRUNING_EPOCHS=4 TEACHER_OUTPUT_ROOT=outputs bash run_pgd.sh
+PRUNE_STRATEGY=S1 PRUNE_RATE=0.5 STEP3_PRUNING=1 STEP3_PRUNING_EPOCHS=4 TEACHER_OUTPUT_ROOT=outputs bash run_pgd_cvc_clinicdb.sh
 
 # S1: static, không pruning ở step 3
-PRUNE_STRATEGY=S1 PRUNE_RATE=0.5 STEP3_PRUNING=0 TEACHER_OUTPUT_ROOT=outputs bash run_pgd.sh
+PRUNE_STRATEGY=S1 PRUNE_RATE=0.5 STEP3_PRUNING=0 TEACHER_OUTPUT_ROOT=outputs bash run_pgd_cvc_clinicdb.sh
 
 # S2/S3/S4: dynamic, PRUNE_RATE không dùng
-PRUNE_STRATEGY=S2 STEP3_PRUNING=1 STEP3_PRUNING_EPOCHS=4 TEACHER_OUTPUT_ROOT=outputs bash run_pgd.sh
-PRUNE_STRATEGY=S3 STEP3_PRUNING=1 STEP3_PRUNING_EPOCHS=4 TEACHER_OUTPUT_ROOT=outputs bash run_pgd.sh
-PRUNE_STRATEGY=S4 STEP3_PRUNING=1 STEP3_PRUNING_EPOCHS=4 TEACHER_OUTPUT_ROOT=outputs bash run_pgd.sh
+PRUNE_STRATEGY=S2 STEP3_PRUNING=1 STEP3_PRUNING_EPOCHS=4 TEACHER_OUTPUT_ROOT=outputs bash run_pgd_cvc_clinicdb.sh
+PRUNE_STRATEGY=S3 STEP3_PRUNING=1 STEP3_PRUNING_EPOCHS=4 TEACHER_OUTPUT_ROOT=outputs bash run_pgd_cvc_clinicdb.sh
+PRUNE_STRATEGY=S4 STEP3_PRUNING=1 STEP3_PRUNING_EPOCHS=4 TEACHER_OUTPUT_ROOT=outputs bash run_pgd_cvc_clinicdb.sh
 
 # S5: middle-static, dùng PRUNE_RATE giống S1
-PRUNE_STRATEGY=S5 PRUNE_RATE=0.5 STEP3_PRUNING=1 STEP3_PRUNING_EPOCHS=4 TEACHER_OUTPUT_ROOT=outputs bash run_pgd.sh
+PRUNE_STRATEGY=S5 PRUNE_RATE=0.5 STEP3_PRUNING=1 STEP3_PRUNING_EPOCHS=4 TEACHER_OUTPUT_ROOT=outputs bash run_pgd_cvc_clinicdb.sh
 
 # S6: middle-kneedle, PRUNE_RATE không dùng
-PRUNE_STRATEGY=S6 STEP3_PRUNING=1 STEP3_PRUNING_EPOCHS=4 TEACHER_OUTPUT_ROOT=outputs bash run_pgd.sh
+PRUNE_STRATEGY=S6 STEP3_PRUNING=1 STEP3_PRUNING_EPOCHS=4 TEACHER_OUTPUT_ROOT=outputs bash run_pgd_cvc_clinicdb.sh
 
 # S7/S8: middle dynamic, PRUNE_RATE không dùng
-PRUNE_STRATEGY=S7 STEP3_PRUNING=1 STEP3_PRUNING_EPOCHS=4 TEACHER_OUTPUT_ROOT=outputs bash run_pgd.sh
-PRUNE_STRATEGY=S8 STEP3_PRUNING=1 STEP3_PRUNING_EPOCHS=4 TEACHER_OUTPUT_ROOT=outputs bash run_pgd.sh
+PRUNE_STRATEGY=S7 STEP3_PRUNING=1 STEP3_PRUNING_EPOCHS=4 TEACHER_OUTPUT_ROOT=outputs bash run_pgd_cvc_clinicdb.sh
+PRUNE_STRATEGY=S8 STEP3_PRUNING=1 STEP3_PRUNING_EPOCHS=4 TEACHER_OUTPUT_ROOT=outputs bash run_pgd_cvc_clinicdb.sh
 ```
 
-`run_pgd.sh` sẽ tự map strategy và tạo thư mục experiment con theo format:
+`run_pgd_common.sh` sẽ tự map strategy và tạo thư mục experiment con theo format:
 
 ```text
 output_<prune_method>_<rate-or-auto>_<step3-pruning-epochs-or-no>
+```
+
+Script chạy theo dataset:
+
+```bash
+bash run_pgd_cvc_clinicdb.sh
+bash run_pgd_kvasir_seg.sh
+bash run_pgd_etis.sh
+bash run_pgd_cvc_colondb.sh
+bash run_pgd_cvc_300.sh
+```
+
+Đổi kiến trúc teacher bằng biến môi trường, ví dụ:
+
+```bash
+TEACHER_MODEL=unet_resnet152 PRUNE_STRATEGY=S1 bash run_pgd_etis.sh
 ```
 
 | Strategy | Experiment folder |
@@ -287,7 +317,7 @@ Loss weights: kd=0.3 sparsity=0.3 feat=0.1 aux=0.2
 
 ### Loss ablation cho Step 3
 
-PDG student training có thể bật/tắt từng loss bằng argument hoặc biến môi trường trong `run_pgd.sh`.
+PDG student training có thể bật/tắt từng loss bằng argument hoặc biến môi trường trong các script dataset.
 
 Các argument chính:
 
@@ -331,7 +361,7 @@ outputs/pgd_unet/<dataset>/<teacher_model>_teacher/<loss_tag>/<experiment_folder
 Ví dụ:
 
 ```text
-outputs/pgd_unet/cvc/unet_resnet152_teacher/loss_seg_kd_sparsity/output_gmm_auto_no/
+outputs/pgd_unet/cvc_clinicdb/unet_resnet152_teacher/loss_seg_kd_sparsity/output_gmm_auto_no/
 ```
 
 Teacher vẫn dùng chung ở:
@@ -342,20 +372,20 @@ outputs/pgd_unet/<dataset>/<teacher_model>_teacher/1_teacher/
 
 Nghĩa là đổi ablation loss không làm đổi logic pretrain/load/reuse teacher.
 
-Ví dụ chạy ablation qua `run_pgd.sh`:
+Ví dụ chạy ablation qua script dataset:
 
 ```bash
 # Segmentation only
-USE_KD_OUTPUT=0 USE_SPARSITY=0 USE_FEATURE_DISTILL=0 USE_AUX_LOSS=0 bash run_pgd.sh
+USE_KD_OUTPUT=0 USE_SPARSITY=0 USE_FEATURE_DISTILL=0 USE_AUX_LOSS=0 bash run_pgd_cvc_clinicdb.sh
 
 # Segmentation + KD
-USE_KD_OUTPUT=1 USE_SPARSITY=0 USE_FEATURE_DISTILL=0 USE_AUX_LOSS=0 bash run_pgd.sh
+USE_KD_OUTPUT=1 USE_SPARSITY=0 USE_FEATURE_DISTILL=0 USE_AUX_LOSS=0 bash run_pgd_cvc_clinicdb.sh
 
 # Segmentation + KD + feature + aux + sparsity
-USE_KD_OUTPUT=1 USE_SPARSITY=1 USE_FEATURE_DISTILL=1 USE_AUX_LOSS=1 LAMBDA_FEAT=0.1 LAMBDA_AUX=0.2 bash run_pgd.sh
+USE_KD_OUTPUT=1 USE_SPARSITY=1 USE_FEATURE_DISTILL=1 USE_AUX_LOSS=1 LAMBDA_FEAT=0.1 LAMBDA_AUX=0.2 bash run_pgd_cvc_clinicdb.sh
 ```
 
-`TEACHER_OUTPUT_ROOT` dùng để cố định nơi lưu `1_teacher`. Mặc định `run_pgd.sh` dùng `outputs`, nên teacher chỉ cần train một lần tại:
+`TEACHER_OUTPUT_ROOT` dùng để cố định nơi lưu `1_teacher`. Mặc định các script dataset dùng `outputs`, nên teacher chỉ cần train một lần tại:
 
 ```text
 outputs/pgd_unet/<dataset>/<teacher_model>_teacher/1_teacher/
@@ -398,20 +428,20 @@ Có 2 cách dùng thực tế:
 Ví dụ train baseline teacher trước:
 
 ```bash
-python train_basic_model.py --dataset cvc --root_path data/CVC-ClinicDB --model unet_resnet152 --encoder_pretrained 1 --exp supervised_resnet152 --max_epochs 100
+python train_basic_model.py --dataset cvc_clinicdb --root_path data/CVC-ClinicDB --model unet_resnet152 --encoder_pretrained 1 --exp supervised_resnet152 --max_epochs 100
 ```
 
 Sau đó chạy proposal với cùng `teacher_model` và `dataset`:
 
 ```bash
-python train_pgd.py --dataset cvc --root_path data/CVC-ClinicDB --teacher_model unet_resnet152 --encoder_pretrained 1 --max_epochs_teacher 50 --max_epochs_student 100 --prune_strategy S1 --static_prune_ratio 0.5
+python train_pgd.py --dataset cvc_clinicdb --root_path data/CVC-ClinicDB --teacher_model unet_resnet152 --encoder_pretrained 1 --max_epochs_teacher 50 --max_epochs_student 100 --prune_strategy S1 --static_prune_ratio 0.5
 ```
 
 Khi đó `train_pgd.py` sẽ:
 
-- tìm teacher checkpoint trong `outputs/unet_resnet152/cvc/checkpoints/`
+- tìm teacher checkpoint trong `outputs/unet_resnet152/cvc_clinicdb/checkpoints/`
 - load lại weight đó
-- register/copy checkpoint vào `outputs/pgd_unet/cvc/unet_resnet152_teacher/1_teacher/checkpoints/`
+- register/copy checkpoint vào `outputs/pgd_unet/cvc_clinicdb/unet_resnet152_teacher/1_teacher/checkpoints/`
 - skip teacher training nếu checkpoint compatible
 
 #### Cách 2: chỉ định trực tiếp teacher checkpoint
@@ -419,7 +449,7 @@ Khi đó `train_pgd.py` sẽ:
 Bạn cũng có thể chỉ định thẳng một checkpoint đã có:
 
 ```bash
-python train_pgd.py --dataset cvc --root_path data/CVC-ClinicDB --teacher_model unet_resnet152 --teacher_checkpoint outputs/unet_resnet152/cvc/checkpoints/best.pth --encoder_pretrained 1 --max_epochs_student 100 --prune_strategy S1 --static_prune_ratio 0.5
+python train_pgd.py --dataset cvc_clinicdb --root_path data/CVC-ClinicDB --teacher_model unet_resnet152 --teacher_checkpoint outputs/unet_resnet152/cvc_clinicdb/checkpoints/best.pth --encoder_pretrained 1 --max_epochs_student 100 --prune_strategy S1 --static_prune_ratio 0.5
 ```
 
 Repo sẽ kiểm tra compatibility của checkpoint này trước khi dùng. Nếu checkpoint này tồn tại và compatible, nó sẽ được ưu tiên dùng trước proposal outputs và basic outputs. Nếu checkpoint không tồn tại hoặc không tương thích, pipeline mới tiếp tục check các nguồn còn lại.
@@ -680,9 +710,9 @@ outputs/<model_name>/<dataset>/
 
 ### 9.2 Proposal branch
 
-Nếu không truyền `--output_root`, output mặc định nằm dưới `outputs/`. Nếu chạy qua `run_pgd.sh`, `--output_root` là root chung, mặc định `outputs`; cấu hình strategy và step 3 nằm ở folder con như `output_static_0.5_4`, `output_static_0.5_no`, `output_kneedle_auto_4`, `output_middle_static_0.5_4`, `output_middle_kneedle_auto_4`, `output_middle_otsu_auto_4`, `output_middle_gmm_auto_4`, hoặc `output_gmm_auto_no`.
+Nếu không truyền `--output_root`, output mặc định nằm dưới `outputs/`. Nếu chạy qua script dataset, `--output_root` là root chung, mặc định `outputs`; cấu hình strategy và step 3 nằm ở folder con như `output_static_0.5_4`, `output_static_0.5_no`, `output_kneedle_auto_4`, `output_middle_static_0.5_4`, `output_middle_kneedle_auto_4`, `output_middle_otsu_auto_4`, `output_middle_gmm_auto_4`, hoặc `output_gmm_auto_no`.
 
-Teacher có root riêng qua `--teacher_output_root`. Khi dùng `run_pgd.sh`, giá trị mặc định là `outputs`, vì vậy:
+Teacher có root riêng qua `--teacher_output_root`. Khi dùng script dataset, giá trị mặc định là `outputs`, vì vậy:
 
 - `1_teacher` dùng chung: `outputs/pgd_unet/<dataset>/<teacher_model>_teacher/1_teacher/`
 - `2_pruning`, `3_student`, `pipeline` theo từng thử nghiệm: `<output_root>/pgd_unet/<dataset>/<teacher_model>_teacher/<experiment_folder>/...`

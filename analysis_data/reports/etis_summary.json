@@ -1,0 +1,18 @@
+{
+  "dataset_name": "etis",
+  "dataset_root": "data/ETIS",
+  "num_pairs": 196,
+  "num_images": 196,
+  "num_masks": 196,
+  "available_splits": [
+    "test",
+    "train",
+    "val"
+  ],
+  "split_counts": {
+    "train": 156,
+    "val": 19,
+    "test": 21
+  },
+  "note": "Lightweight status file. Regenerate full image statistics with analysis_data/analyze_datasets.py in an environment with PyTorch installed."
+}

@@ -1,4 +1,4 @@
-{
+﻿{
   "dataset_name": "kvasir_seg",
   "dataset_root": "/Users/dangnguyen/Desktop/PGD-UNet/data/Kvasir-SEG",
   "num_pairs": 1000,
@@ -10,9 +10,9 @@
     "val"
   ],
   "split_counts": {
-    "train": 792,
-    "val": 88,
-    "test": 120
+    "train": 800,
+    "val": 100,
+    "test": 100
   },
   "image_size_top10": [
     {

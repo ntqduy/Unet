@@ -42,7 +42,7 @@ DEFAULT_DATA_ROOT = PROJECT_ROOT / "data" / "Kvasir-SEG"
 
 parser = argparse.ArgumentParser()
 parser.add_argument("--root_path", type=str, default=str(DEFAULT_DATA_ROOT), help="dataset root path")
-parser.add_argument("--dataset", type=str, default="kvasir", choices=list_available_datasets(), help="dataset name")
+parser.add_argument("--dataset", type=str, default="kvasir_seg", choices=list_available_datasets(), help="dataset name")
 parser.add_argument("--exp", type=str, default="supervised", help="experiment name")
 parser.add_argument("--model", type=str, default="unet", choices=list_models(), help="model name")
 parser.add_argument("--train_split", type=str, default="train", choices=["train", "val", "test"], help="training split")

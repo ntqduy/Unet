@@ -9,7 +9,7 @@ from pathlib import Path
 def _build_help_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Wrapper for train_pgd.py")
     parser.add_argument("--root_path", type=str, default="data/Kvasir-SEG")
-    parser.add_argument("--dataset", type=str, default="kvasir")
+    parser.add_argument("--dataset", type=str, default="kvasir_seg")
     parser.add_argument("--exp", type=str, default="pdg_pipeline")
     parser.add_argument("--teacher_model", type=str, default="unet_resnet152")
     parser.add_argument("--teacher_checkpoint", type=str, default="")

@@ -214,7 +214,7 @@ def _normalize_step3_pruning_args(parsed_args: argparse.Namespace, active_parser
 
 parser = argparse.ArgumentParser(description="Teacher -> Pruning -> Student training for PDG-UNet")
 parser.add_argument("--root_path", type=str, default=str(DEFAULT_DATA_ROOT))
-parser.add_argument("--dataset", type=str, default="kvasir", choices=list_available_datasets())
+parser.add_argument("--dataset", type=str, default="kvasir_seg", choices=list_available_datasets())
 parser.add_argument("--exp", type=str, default="pdg_pipeline")
 parser.add_argument("--teacher_model", type=str, default="unet_resnet152", choices=list_models())
 parser.add_argument("--teacher_checkpoint", type=str, default="")
