@@ -28,7 +28,10 @@ USE_SPARSITY="${USE_SPARSITY:-1}"
 USE_FEATURE_DISTILL="${USE_FEATURE_DISTILL:-0}"
 USE_AUX_LOSS="${USE_AUX_LOSS:-0}"
 
-# Four KD losses for Table III loss study. Override if needed:
+# Four KD losses for Table III loss study.
+# mse is intentionally excluded because the default scripts/ batch already
+# covers the original/old MSE distillation.
+# Override if needed:
 # DISTILL_METHODS="ce dice kl hybrid" bash scripts_2/run_....sh
 DISTILL_METHODS_STRING="${DISTILL_METHODS:-ce dice kl hybrid}"
 read -r -a DISTILL_METHOD_LIST <<< "$DISTILL_METHODS_STRING"
@@ -64,6 +67,10 @@ run_pgd_strategy_once() {
 }
 
 for distill_method in "${DISTILL_METHOD_LIST[@]}"; do
+  if [ "$distill_method" = "mse" ]; then
+    echo "Skipping distill_method=mse because scripts_2 is reserved for non-MSE KD loss study."
+    continue
+  fi
   export DISTILL_LOSS_METHOD="$distill_method"
   export LOSS_METHOD="Proposed + $(distill_label "$distill_method") KD"
 
