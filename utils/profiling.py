@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 import time
 from typing import Dict, Optional, Sequence
 
@@ -34,11 +35,18 @@ def maybe_compute_flops(model, input_shape: Sequence[int], device: torch.device)
     except ImportError:
         return None
 
-    dummy = torch.randn(*input_shape, device=device)
-    with torch.no_grad():
-        flops, _ = profile(model, inputs=(dummy,), verbose=False)
-    _remove_profiling_buffers(model)
-    return int(flops)
+    try:
+        dummy = torch.randn(*input_shape, device=device)
+        with torch.no_grad():
+            flops, _ = profile(model, inputs=(dummy,), verbose=False)
+        return int(flops)
+    except RuntimeError as error:
+        if device.type == "cuda":
+            torch.cuda.empty_cache()
+        logging.warning("Skipping FLOPs profiling because the profiling forward pass failed: %s", error)
+        return None
+    finally:
+        _remove_profiling_buffers(model)
 
 
 def benchmark_inference(
@@ -49,21 +57,30 @@ def benchmark_inference(
     warmup_steps: int = 10,
     measure_steps: int = 30,
 ) -> Dict[str, Optional[float]]:
-    dummy = torch.randn(*input_shape, device=device)
     model.eval()
 
-    with torch.no_grad():
-        for _ in range(max(0, warmup_steps)):
-            model(dummy)
+    try:
+        dummy = torch.randn(*input_shape, device=device)
+        with torch.no_grad():
+            for _ in range(max(0, warmup_steps)):
+                model(dummy)
 
+            if device.type == "cuda":
+                torch.cuda.synchronize(device)
+            start_time = time.perf_counter()
+            for _ in range(max(1, measure_steps)):
+                model(dummy)
+            if device.type == "cuda":
+                torch.cuda.synchronize(device)
+            elapsed = time.perf_counter() - start_time
+    except RuntimeError as error:
         if device.type == "cuda":
-            torch.cuda.synchronize(device)
-        start_time = time.perf_counter()
-        for _ in range(max(1, measure_steps)):
-            model(dummy)
-        if device.type == "cuda":
-            torch.cuda.synchronize(device)
-        elapsed = time.perf_counter() - start_time
+            torch.cuda.empty_cache()
+        logging.warning("Skipping inference benchmark because the profiling forward pass failed: %s", error)
+        return {
+            "inference_time_seconds": None,
+            "fps": None,
+        }
 
     mean_latency = elapsed / max(1, measure_steps)
     fps = 1.0 / mean_latency if mean_latency > 0 else None

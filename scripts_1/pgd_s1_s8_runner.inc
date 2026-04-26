@@ -21,6 +21,24 @@ TEACHER_OUTPUT_ROOT="${TEACHER_OUTPUT_ROOT:-$OUTPUT_ROOT}"
 # Override STEP3_PRUNING=1 and set STEP3_PRUNING_EPOCHS>0 only when needed.
 STEP3_PRUNING="${STEP3_PRUNING:-0}"
 
+export_if_set() {
+  local name="$1"
+  if [ "${!name+x}" = "x" ]; then
+    export "$name"
+  fi
+}
+
+for variable_name in \
+  DATASET_KEY ROOT_PATH EXP_NAME PROJECT_DIR OUTPUT_ROOT TEACHER_OUTPUT_ROOT \
+  STEP3_PRUNING STEP3_PRUNING_EPOCHS TEACHER_MODEL MAX_EPOCHS_TEACHER MAX_EPOCHS_STUDENT \
+  BATCH_SIZE NUM_WORKERS PATCH_SIZE_H PATCH_SIZE_W \
+  USE_KD_OUTPUT USE_SPARSITY USE_FEATURE_DISTILL USE_AUX_LOSS \
+  LAMBDA_DISTILL LAMBDA_SPARSITY LAMBDA_FEAT LAMBDA_AUX \
+  FEATURE_LAYERS SEG_LOSS_METHOD DISTILL_LOSS_METHOD DISTILL_TEMPERATURE LOSS_METHOD \
+  SPLIT_SEED PREPARE_SPLITS PREPARE_SPLITS_OVERWRITE PREPARE_ANALYSIS CONDA_ENV CUDA_MODULE; do
+  export_if_set "$variable_name"
+done
+
 # S1 and S5 static strategies run all these ratios. Override with:
 # STATIC_PRUNE_RATES="0.2 0.4" bash scripts/run_....sh
 STATIC_PRUNE_RATES_STRING="${STATIC_PRUNE_RATES:-0.05 0.1 0.3 0.5 0.75}"
@@ -39,7 +57,7 @@ run_pgd_strategy_once() {
     echo ">>> Dataset=$DATASET_KEY strategy=$strategy prune_rate=auto"
   fi
 
-  source "$PROJECT_ROOT/run_pgd_common.sh"
+  bash "$PROJECT_ROOT/run_pgd_common.sh"
 }
 
 for strategy in S1 S2 S3 S4 S5 S6 S7 S8; do

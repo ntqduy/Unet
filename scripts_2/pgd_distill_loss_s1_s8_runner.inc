@@ -28,6 +28,24 @@ USE_SPARSITY="${USE_SPARSITY:-1}"
 USE_FEATURE_DISTILL="${USE_FEATURE_DISTILL:-0}"
 USE_AUX_LOSS="${USE_AUX_LOSS:-0}"
 
+export_if_set() {
+  local name="$1"
+  if [ "${!name+x}" = "x" ]; then
+    export "$name"
+  fi
+}
+
+for variable_name in \
+  DATASET_KEY ROOT_PATH EXP_NAME PROJECT_DIR OUTPUT_ROOT TEACHER_OUTPUT_ROOT \
+  STEP3_PRUNING STEP3_PRUNING_EPOCHS TEACHER_MODEL MAX_EPOCHS_TEACHER MAX_EPOCHS_STUDENT \
+  BATCH_SIZE NUM_WORKERS PATCH_SIZE_H PATCH_SIZE_W \
+  USE_KD_OUTPUT USE_SPARSITY USE_FEATURE_DISTILL USE_AUX_LOSS \
+  LAMBDA_DISTILL LAMBDA_SPARSITY LAMBDA_FEAT LAMBDA_AUX \
+  FEATURE_LAYERS SEG_LOSS_METHOD DISTILL_TEMPERATURE \
+  SPLIT_SEED PREPARE_SPLITS PREPARE_SPLITS_OVERWRITE PREPARE_ANALYSIS CONDA_ENV CUDA_MODULE; do
+  export_if_set "$variable_name"
+done
+
 # Four KD losses for Table III loss study.
 # mse is intentionally excluded because the default scripts/ batch already
 # covers the original/old MSE distillation.
@@ -63,7 +81,7 @@ run_pgd_strategy_once() {
     echo ">>> Dataset=$DATASET_KEY distill=$DISTILL_LOSS_METHOD strategy=$strategy prune_rate=auto"
   fi
 
-  source "$PROJECT_ROOT/run_pgd_common.sh"
+  bash "$PROJECT_ROOT/run_pgd_common.sh"
 }
 
 for distill_method in "${DISTILL_METHOD_LIST[@]}"; do
