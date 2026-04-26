@@ -12,7 +12,7 @@ DEVICE="${DEVICE:-0}"
 EPOCHS="${EPOCHS:-50}"
 BATCH_SIZE="${BATCH_SIZE:-8}"
 BASE_LR="${BASE_LR:-0.01}"
-NUM_WORKERS="${NUM_WORKERS:-0}"
+NUM_WORKERS="${NUM_WORKERS:-2}"
 # Keep ResNet152 pretrained by default. Set ENCODER_PRETRAINED=0 only when you
 # explicitly want to train the ResNet encoder from scratch.
 ENCODER_PRETRAINED="${ENCODER_PRETRAINED:-1}"

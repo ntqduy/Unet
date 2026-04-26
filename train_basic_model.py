@@ -60,7 +60,7 @@ parser.add_argument("--encoder_pretrained", type=int, default=1, help="only used
 parser.add_argument("--seed", type=int, default=1337)
 parser.add_argument("--deterministic", type=int, default=1)
 parser.add_argument("--gpu", type=str, default="0")
-parser.add_argument("--num_workers", type=int, default=0)
+parser.add_argument("--num_workers", type=int, default=2)
 parser.add_argument("--save_visualizations", type=int, default=1)
 parser.add_argument("--vis_num_samples", type=int, default=5)
 parser.add_argument("--output_root", type=str, default="", help="root directory for all exported outputs; defaults to PROJECT_ROOT/outputs")

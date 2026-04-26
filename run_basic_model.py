@@ -132,7 +132,7 @@ def parse_args() -> tuple[argparse.Namespace, List[str]]:
     parser.add_argument("--epochs", type=int, default=50)
     parser.add_argument("--batch-size", type=int, default=8)
     parser.add_argument("--base-lr", type=float, default=0.01)
-    parser.add_argument("--num-workers", type=int, default=0)
+    parser.add_argument("--num-workers", type=int, default=2)
     parser.add_argument("--encoder-pretrained", type=int, default=1, help="Use 1 for pretrained ResNet152 encoder when model=unet_resnet152.")
     parser.add_argument("--force-retrain", action="store_true", help="Ignore compatible existing checkpoints and train again.")
     parser.add_argument("--summary-csv", type=str, default="", help="Optional path for aggregate summary CSV.")
