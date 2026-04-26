@@ -60,7 +60,7 @@ parser.add_argument("--encoder_pretrained", type=int, default=1, help="only used
 parser.add_argument("--seed", type=int, default=1337)
 parser.add_argument("--deterministic", type=int, default=1)
 parser.add_argument("--gpu", type=str, default="0")
-parser.add_argument("--num_workers", type=int, default=4)
+parser.add_argument("--num_workers", type=int, default=0)
 parser.add_argument("--save_visualizations", type=int, default=1)
 parser.add_argument("--vis_num_samples", type=int, default=5)
 parser.add_argument("--output_root", type=str, default="", help="root directory for all exported outputs; defaults to PROJECT_ROOT/outputs")
@@ -334,7 +334,7 @@ def _run_final_evaluations(snapshot_path: Path, checkpoint_path: Path, model, de
             logging.warning("Skipping final evaluation for split '%s': %s", split, error)
             continue
 
-        dataloader = DataLoader(dataset, batch_size=1, shuffle=False, num_workers=1, pin_memory=device.type == "cuda")
+        dataloader = DataLoader(dataset, batch_size=1, shuffle=False, num_workers=args.num_workers, pin_memory=device.type == "cuda")
         output_dir = build_evaluation_output_dir(snapshot_path, args.dataset, args.model, checkpoint_path, split)
         start_time = time.perf_counter()
         result = evaluate_segmentation_dataset(
@@ -559,7 +559,7 @@ def train(args, snapshot_path):
         db_val,
         batch_size=1,
         shuffle=False,
-        num_workers=1,
+        num_workers=args.num_workers,
         pin_memory=device.type == "cuda",
     )
     iterations_per_epoch = len(trainloader)

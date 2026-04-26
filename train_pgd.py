@@ -277,7 +277,7 @@ parser.add_argument(
 parser.add_argument("--seed", type=int, default=1337)
 parser.add_argument("--deterministic", type=int, default=1)
 parser.add_argument("--gpu", type=str, default="0")
-parser.add_argument("--num_workers", type=int, default=4)
+parser.add_argument("--num_workers", type=int, default=0)
 parser.add_argument("--save_visualizations", type=int, default=1)
 parser.add_argument("--vis_num_samples", type=int, default=8)
 parser.add_argument("--final_eval_splits", nargs="*", default=["train", "val", "test"])
@@ -1533,7 +1533,7 @@ def _build_loaders(device: torch.device, image_mode: str):
         pin_memory=device.type == "cuda",
         worker_init_fn=worker_init_fn,
     )
-    valloader = DataLoader(db_val, batch_size=1, shuffle=False, num_workers=1, pin_memory=device.type == "cuda")
+    valloader = DataLoader(db_val, batch_size=1, shuffle=False, num_workers=args.num_workers, pin_memory=device.type == "cuda")
     return db_train, db_val, trainloader, valloader
 
 
@@ -1636,7 +1636,7 @@ def _export_phase_outputs(run_dir: Path, model, checkpoint_path: Path, phase: st
         except Exception as error:
             logging.warning("Skip %s/%s: %s", phase, split, error)
             continue
-        dataloader = DataLoader(dataset, batch_size=1, shuffle=False, num_workers=1, pin_memory=device.type == "cuda")
+        dataloader = DataLoader(dataset, batch_size=1, shuffle=False, num_workers=args.num_workers, pin_memory=device.type == "cuda")
         output_dir = build_evaluation_output_dir(run_dir, args.dataset, extra["model_name"], checkpoint_path, split)
         start = time.perf_counter()
         result = evaluate_segmentation_dataset(

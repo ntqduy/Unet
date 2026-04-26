@@ -51,7 +51,7 @@ def _build_help_parser() -> argparse.ArgumentParser:
     parser.add_argument("--seed", type=int, default=1337)
     parser.add_argument("--deterministic", type=int, default=1)
     parser.add_argument("--gpu", type=str, default="0")
-    parser.add_argument("--num_workers", type=int, default=4)
+    parser.add_argument("--num_workers", type=int, default=0)
     parser.add_argument("--save_visualizations", type=int, default=1)
     parser.add_argument("--vis_num_samples", type=int, default=8)
     parser.add_argument("--final_eval_splits", nargs="*", default=["train", "val", "test"])
