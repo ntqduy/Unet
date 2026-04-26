@@ -521,6 +521,82 @@ def figure10_boundary(outputs_root: Path, dataset: str, dataset_dir: Path) -> No
     _save_pdf(fig, dataset_dir / "figure10_boundary_comparison.pdf")
 
 
+def _method_from_output_dir(output_dir: Path) -> tuple[str, float]:
+    parts = output_dir.name.split("_")
+    if output_dir.name.startswith("output_middle_") and len(parts) >= 3:
+        method = f"middle_{parts[2]}"
+        ratio = _safe_float(parts[3]) if len(parts) >= 5 and parts[3] != "auto" else np.nan
+        return method, ratio
+    if output_dir.name.startswith("output_") and len(parts) >= 2:
+        method = parts[1]
+        ratio = _safe_float(parts[2]) if len(parts) >= 4 and parts[2] != "auto" else np.nan
+        return method, ratio
+    return output_dir.name, np.nan
+
+
+def _student_metric_score(student_dir: Path) -> float:
+    metrics_path = student_dir / "metrics" / "student_metrics.csv"
+    frame = _read_csv(metrics_path)
+    if frame.empty or "dice" not in frame.columns:
+        return -np.inf
+    if "split" in frame.columns:
+        test_frame = frame[frame["split"].fillna("").astype(str).str.lower().eq("test")]
+        if not test_frame.empty:
+            frame = test_frame
+    scores = pd.to_numeric(frame["dice"], errors="coerce").dropna()
+    return float(scores.max()) if not scores.empty else -np.inf
+
+
+def _student_channel_context_from_output_dirs(outputs_root: Path, dataset: str) -> tuple[str, Path | None, Path | None]:
+    focus_root = _pgd_focus_root(outputs_root, dataset)
+    if not focus_root.exists():
+        logging.warning("PGD focus root is missing for %s: %s", dataset, focus_root)
+        return "best student", None, None
+
+    candidates: List[tuple[float, int, str, Path, Path]] = []
+    method_priority = {
+        "middle_kneedle": 0,
+        "middle_otsu": 1,
+        "middle_gmm": 2,
+        "kneedle": 3,
+        "otsu": 4,
+        "gmm": 5,
+        "middle_static": 6,
+        "static": 7,
+    }
+    for output_dir in sorted(path for path in focus_root.iterdir() if path.is_dir() and path.name.startswith("output_")):
+        student_dir = output_dir / "3_student"
+        summary_path = _student_final_channel_summary_path(student_dir)
+        if summary_path is None:
+            continue
+        raw_method, ratio = _method_from_output_dir(output_dir)
+        label = _display_method(raw_method, ratio)
+        score = _student_metric_score(student_dir)
+        priority = method_priority.get(raw_method, 99)
+        candidates.append((score, -priority, label, student_dir, summary_path))
+
+    if not candidates:
+        logging.warning("No student channel-analysis candidates found under %s", focus_root)
+        return "best student", None, None
+
+    score, _, label, student_dir, summary_path = max(candidates, key=lambda item: (item[0], item[1]))
+    logging.info("Selected student channel source for %s | method=%s | dice=%.6f | dir=%s", dataset, label, score, student_dir)
+    return label, student_dir, summary_path
+
+
+def _pruning_analysis_paths_from_student_dir(student_dir: Path | None) -> tuple[Path | None, Path | None]:
+    if student_dir is None:
+        return None, None
+    output_dir = student_dir.parent
+    analysis_dir = output_dir / "2_pruning" / "artifacts" / "pruning_analysis"
+    comparison_path = analysis_dir / "teacher_vs_student_channels.csv"
+    summary_path = analysis_dir / "pruning_summary.csv"
+    return (
+        comparison_path if comparison_path.is_file() else None,
+        summary_path if summary_path.is_file() else None,
+    )
+
+
 def _best_student_channel_context(outputs_root: Path, dataset: str) -> tuple[str, Path | None]:
     best_score = -np.inf
     best_label = "best student"
@@ -597,55 +673,59 @@ def _student_final_channel_summary_path(student_phase_dir: Path | None) -> Path 
 
 
 def figure11_12(outputs_root: Path, dataset: str, dataset_dir: Path) -> None:
-    best_label, best_metric_path = _best_student_channel_context(outputs_root, dataset)
-    student_phase_dir = _phase_dir_from_metric_path(best_metric_path)
-    teacher_summary_path = _teacher_channel_summary_path(outputs_root, dataset)
-    student_summary_path = _student_final_channel_summary_path(student_phase_dir)
-    teacher_frame = _read_csv(teacher_summary_path) if teacher_summary_path is not None else pd.DataFrame()
-    student_frame = _read_csv(student_summary_path) if student_summary_path is not None else pd.DataFrame()
-    logging.info("Figure11/12 teacher channel source for %s: %s", dataset, teacher_summary_path or "missing")
-    logging.info("Figure11/12 student channel source for %s: %s", dataset, student_summary_path or "missing")
+    best_label, student_phase_dir, student_summary_path = _student_channel_context_from_output_dirs(outputs_root, dataset)
+    comparison_path, pruning_summary_path = _pruning_analysis_paths_from_student_dir(student_phase_dir)
+    comparison_frame = _read_csv(comparison_path) if comparison_path is not None else pd.DataFrame()
+    pruning_summary = _read_csv(pruning_summary_path) if pruning_summary_path is not None else pd.DataFrame()
+    logging.info("Figure11/12 student phase dir for %s: %s", dataset, student_phase_dir or "missing")
+    logging.info("Figure11/12 teacher-vs-student source for %s: %s", dataset, comparison_path or "missing")
+    logging.info("Figure11/12 pruning summary source for %s: %s", dataset, pruning_summary_path or "missing")
+    logging.info("Figure11/12 raw student channel source for %s: %s", dataset, student_summary_path or "not used")
 
-    if teacher_frame.empty or student_frame.empty:
-        _placeholder(dataset_dir / "figure11_output_channels_per_layer_pruned_student.pdf", f"No channel summary found for {dataset}.")
-        _placeholder(dataset_dir / "figure12_mean_channel_importance_per_layer_pruned_student.pdf", f"No channel summary found for {dataset}.")
+    if comparison_frame.empty:
+        _placeholder(dataset_dir / "figure11_output_channels_per_layer_pruned_student.pdf", f"No teacher-vs-student pruning rows found for {dataset}.")
+        _placeholder(dataset_dir / "figure12_mean_channel_importance_per_layer_pruned_student.pdf", f"No pruning summary rows found for {dataset}.")
         return
 
     method_slug = _method_slug(best_label)
-    plot_specs = (
-        ("figure11_output_channels_per_layer_pruned_student.pdf", "out_channels", "teacher_out_channels", "student_out_channels", "Output channels"),
-        ("figure12_mean_channel_importance_per_layer_pruned_student.pdf", "importance_mean", "importance_mean", "importance_mean", "Mean channel importance"),
-    )
-    for filename, fallback_column, teacher_column, student_column, ylabel in plot_specs:
-        fig, axes = plt.subplots(1, 2, figsize=(9.2, 4.0), sharey=False)
-        teacher_values = pd.Series(dtype=float)
-        if not teacher_frame.empty:
-            teacher_values = pd.to_numeric(
-                teacher_frame[teacher_column] if teacher_column in teacher_frame.columns else teacher_frame.get(fallback_column, pd.Series(dtype=float)),
-                errors="coerce",
-            ).dropna()
-        student_values = pd.to_numeric(
-            student_frame[student_column] if student_column in student_frame.columns else student_frame.get(fallback_column, pd.Series(dtype=float)),
-            errors="coerce",
-        ).dropna()
+    comparison_frame = comparison_frame.copy()
+    comparison_frame["_teacher"] = pd.to_numeric(comparison_frame.get("teacher_out_channels"), errors="coerce")
+    comparison_frame["_student"] = pd.to_numeric(comparison_frame.get("student_out_channels"), errors="coerce")
+    comparison_frame = comparison_frame.dropna(subset=["_teacher", "_student"])
+    if comparison_frame.empty:
+        _placeholder(dataset_dir / "figure11_output_channels_per_layer_pruned_student.pdf", f"No valid teacher/student channel columns found for {dataset}.")
+        return
 
-        if not teacher_values.empty:
-            axes[0].bar(np.arange(1, len(teacher_values) + 1), teacher_values, color="#8da0cb")
-        else:
-            axes[0].text(0.5, 0.5, "Teacher\nnot found", ha="center", va="center", transform=axes[0].transAxes)
-        axes[0].set_xlabel("Teacher layer index")
-        axes[0].set_ylabel(ylabel)
-        axes[0].set_xticks([])
-        axes[0].grid(alpha=0.22, axis="y")
+    x = np.arange(1, len(comparison_frame) + 1)
+    width = 0.42
+    fig, ax = plt.subplots(figsize=(9.2, 4.2))
+    ax.bar(x - width / 2, comparison_frame["_teacher"], width=width, label="Teacher", color="#8da0cb")
+    ax.bar(x + width / 2, comparison_frame["_student"], width=width, label=f"Student ({best_label})", color="#66c2a5")
+    ax.set_xlabel("Pruned layer index (1, 2, 3, ...)")
+    ax.set_ylabel("Output channels")
+    ax.set_xticks([])
+    ax.grid(alpha=0.22, axis="y")
+    ax.legend(loc="upper right", fontsize=8, frameon=True, framealpha=0.9)
+    base_path = dataset_dir / "figure11_output_channels_per_layer_pruned_student.pdf"
+    alias_path = dataset_dir / f"figure11_output_channels_per_layer_pruned_student_best_student_{method_slug}.pdf"
+    _save_pdf_multi(fig, [base_path, alias_path])
 
-        axes[1].bar(np.arange(1, len(student_values) + 1), student_values, color="#66c2a5")
-        axes[1].set_xlabel(f"Student layer index\n{best_label}")
-        axes[1].set_xticks([])
-        axes[1].grid(alpha=0.22, axis="y")
-
-        base_path = dataset_dir / filename
-        alias_path = dataset_dir / filename.replace(".pdf", f"_best_student_{method_slug}.pdf")
-        _save_pdf_multi(fig, [base_path, alias_path])
+    if pruning_summary.empty or "importance_mean" not in pruning_summary.columns:
+        _placeholder(dataset_dir / "figure12_mean_channel_importance_per_layer_pruned_student.pdf", f"No pruning importance summary found for {dataset}.")
+        return
+    importance = pd.to_numeric(pruning_summary["importance_mean"], errors="coerce").dropna()
+    if importance.empty:
+        _placeholder(dataset_dir / "figure12_mean_channel_importance_per_layer_pruned_student.pdf", f"No valid importance values found for {dataset}.")
+        return
+    fig, ax = plt.subplots(figsize=(9.2, 4.2))
+    ax.bar(np.arange(1, len(importance) + 1), importance, color="#6baed6")
+    ax.set_xlabel("Pruned layer index (1, 2, 3, ...)")
+    ax.set_ylabel("Mean channel importance")
+    ax.set_xticks([])
+    ax.grid(alpha=0.22, axis="y")
+    base_path = dataset_dir / "figure12_mean_channel_importance_per_layer_pruned_student.pdf"
+    alias_path = dataset_dir / f"figure12_mean_channel_importance_per_layer_pruned_student_best_student_{method_slug}.pdf"
+    _save_pdf_multi(fig, [base_path, alias_path])
 
 
 def figure13_search(dataset_dir: Path) -> None:
