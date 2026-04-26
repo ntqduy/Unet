@@ -561,26 +561,52 @@ def _read_first_channel_table(paths: Sequence[Path]) -> pd.DataFrame:
     return pd.DataFrame()
 
 
+def _read_first_channel_table_with_path(paths: Sequence[Path]) -> tuple[pd.DataFrame, Path | None]:
+    for path in paths:
+        frame = _read_csv(path)
+        if not frame.empty:
+            return frame, path
+    return pd.DataFrame(), None
+
+
+def _teacher_channel_summary_path(outputs_root: Path, dataset: str) -> Path | None:
+    channel_root = _pgd_teacher_phase_root(outputs_root, dataset) / "artifacts" / "channel_analysis"
+    candidates = [
+        channel_root / "channel_summary.csv",
+        channel_root / "teacher_channel_summary.csv",
+    ]
+    for candidate in candidates:
+        if candidate.is_file():
+            return candidate
+    logging.warning("Teacher channel summary not found for %s under %s", dataset, channel_root)
+    return None
+
+
+def _student_final_channel_summary_path(student_phase_dir: Path | None) -> Path | None:
+    if student_phase_dir is None:
+        return None
+    channel_root = student_phase_dir / "artifacts" / "channel_analysis"
+    candidates = [
+        channel_root / "student_final_channel_summary.csv",
+    ]
+    for candidate in candidates:
+        if candidate.is_file():
+            return candidate
+    logging.warning("Student channel summary not found under %s", channel_root)
+    return None
+
+
 def figure11_12(outputs_root: Path, dataset: str, dataset_dir: Path) -> None:
     best_label, best_metric_path = _best_student_channel_context(outputs_root, dataset)
     student_phase_dir = _phase_dir_from_metric_path(best_metric_path)
-    if student_phase_dir and student_phase_dir.exists():
-        student_frame = _read_first_channel_table(list(student_phase_dir.rglob("student_final_channel_summary.csv")))
-    else:
-        student_frame = pd.DataFrame()
-    if student_frame.empty:
-        student_frame = _read_first_channel_table(_find_dataset_files(outputs_root, dataset, "student_final_channel_summary.csv"))
-    teacher_frame = _read_first_channel_table(
-        _find_teacher_channel_files(
-            outputs_root,
-            dataset,
-            [
-                "teacher_channel_summary.csv",
-                "channel_summary.csv",
-            ],
-        )
-    )
-    if student_frame.empty:
+    teacher_summary_path = _teacher_channel_summary_path(outputs_root, dataset)
+    student_summary_path = _student_final_channel_summary_path(student_phase_dir)
+    teacher_frame = _read_csv(teacher_summary_path) if teacher_summary_path is not None else pd.DataFrame()
+    student_frame = _read_csv(student_summary_path) if student_summary_path is not None else pd.DataFrame()
+    logging.info("Figure11/12 teacher channel source for %s: %s", dataset, teacher_summary_path or "missing")
+    logging.info("Figure11/12 student channel source for %s: %s", dataset, student_summary_path or "missing")
+
+    if teacher_frame.empty or student_frame.empty:
         _placeholder(dataset_dir / "figure11_output_channels_per_layer_pruned_student.pdf", f"No channel summary found for {dataset}.")
         _placeholder(dataset_dir / "figure12_mean_channel_importance_per_layer_pruned_student.pdf", f"No channel summary found for {dataset}.")
         return
