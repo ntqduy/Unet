@@ -58,10 +58,16 @@ def _dataset_from_path(path: Path, outputs_root: Path) -> str:
 
 
 def _datasets(outputs_root: Path, save_root: Path) -> List[str]:
-    names = {path.name for path in save_root.iterdir() if path.is_dir() and path.name != "paper_figures"} if save_root.exists() else set()
+    names = set()
+    if save_root.exists():
+        for path in save_root.iterdir():
+            if path.is_dir() and path.name != "paper_figures" and not Path(path.name).suffix:
+                names.add(path.name)
     if outputs_root.exists():
         for csv_path in outputs_root.rglob("*.csv"):
-            names.add(_dataset_from_path(csv_path, outputs_root))
+            dataset = _dataset_from_path(csv_path, outputs_root)
+            if dataset != "unknown" and not Path(dataset).suffix:
+                names.add(dataset)
     return sorted(name for name in names if name and name != "unknown")
 
 

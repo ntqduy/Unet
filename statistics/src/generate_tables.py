@@ -322,7 +322,8 @@ def main() -> int:
         _mean_std_table([]).to_csv(save_root / "table_mean_std_across_datasets.csv", index=False)
         return 0
 
-    datasets = sorted(set(metrics.get("dataset", pd.Series(dtype=str)).dropna().astype(str)) | set(timing.get("dataset", pd.Series(dtype=str)).dropna().astype(str)))
+    raw_datasets = set(metrics.get("dataset", pd.Series(dtype=str)).dropna().astype(str)) | set(timing.get("dataset", pd.Series(dtype=str)).dropna().astype(str))
+    datasets = sorted(dataset for dataset in raw_datasets if dataset != "unknown" and not Path(dataset).suffix)
     all_performance_tables: List[pd.DataFrame] = []
     for dataset in datasets:
         dataset_dir = save_root / dataset
