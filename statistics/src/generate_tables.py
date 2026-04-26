@@ -38,6 +38,25 @@ MEAN_STD_COLUMNS = [
     "Std Search Time (s)",
 ]
 
+PGD_TEACHER_DIR = "unet_resnet152_teacher"
+PGD_LOSS_TAG = "loss_seg_kd_sparsity"
+
+
+def _is_pgd_focus_path(path: Path, outputs_root: Path) -> bool:
+    try:
+        parts = path.relative_to(outputs_root).parts
+    except ValueError:
+        parts = path.parts
+    return len(parts) >= 5 and parts[0] == "pgd_unet" and parts[2] == PGD_TEACHER_DIR and parts[3] == PGD_LOSS_TAG
+
+
+def _is_basic_metric_path(path: Path, outputs_root: Path) -> bool:
+    try:
+        parts = path.relative_to(outputs_root).parts
+    except ValueError:
+        parts = path.parts
+    return not parts or parts[0] != "pgd_unet"
+
 
 def _read_json(path: Path) -> Dict[str, Any]:
     try:
@@ -98,6 +117,12 @@ def _read_metrics_rows(outputs_root: Path) -> pd.DataFrame:
             if csv_path in seen:
                 continue
             seen.add(csv_path)
+            if csv_path.name != "basic_metrics.csv" and not _is_pgd_focus_path(csv_path, outputs_root):
+                logging.info("Skip non-target PGD metrics CSV: %s", csv_path)
+                continue
+            if csv_path.name == "basic_metrics.csv" and not _is_basic_metric_path(csv_path, outputs_root):
+                logging.info("Skip PGD basic_metrics outside baseline table: %s", csv_path)
+                continue
             logging.info("Reading metrics CSV: %s", csv_path)
             try:
                 frame = pd.read_csv(csv_path)
@@ -122,6 +147,9 @@ def _read_timing_rows(outputs_root: Path) -> pd.DataFrame:
     rows: List[Dict[str, Any]] = []
     logging.info("Scanning timing summaries under: %s", outputs_root)
     for csv_path in outputs_root.rglob("timing_summary.csv"):
+        if not _is_pgd_focus_path(csv_path, outputs_root):
+            logging.info("Skip timing outside target PGD loss tag: %s", csv_path)
+            continue
         logging.info("Reading timing CSV: %s", csv_path)
         try:
             frame = pd.read_csv(csv_path)
@@ -134,6 +162,9 @@ def _read_timing_rows(outputs_root: Path) -> pd.DataFrame:
             row["dataset"] = _infer_dataset(csv_path, row, outputs_root)
             rows.append(row)
     for json_path in outputs_root.rglob("pruning_search_time.json"):
+        if not _is_pgd_focus_path(json_path, outputs_root):
+            logging.info("Skip search-time JSON outside target PGD loss tag: %s", json_path)
+            continue
         logging.info("Reading pruning search-time JSON: %s", json_path)
         payload = _read_json(json_path)
         if not payload:

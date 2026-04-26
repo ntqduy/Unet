@@ -14,6 +14,9 @@ try:
 except ImportError as error:  # pragma: no cover - dependency guard
     raise SystemExit("Missing dependency: pandas/matplotlib. Install project requirements with `pip install -r requirements.txt`.") from error
 
+PGD_TEACHER_DIR = "unet_resnet152_teacher"
+PGD_LOSS_TAG = "loss_seg_kd_sparsity"
+
 
 def _save_pdf(fig, path: Path) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -57,6 +60,18 @@ def _dataset_from_path(path: Path, outputs_root: Path) -> str:
     return "unknown"
 
 
+def _pgd_focus_root(outputs_root: Path, dataset: str) -> Path:
+    return outputs_root / "pgd_unet" / dataset / PGD_TEACHER_DIR / PGD_LOSS_TAG
+
+
+def _is_pgd_focus_path(path: Path, outputs_root: Path, dataset: str) -> bool:
+    try:
+        relative = path.relative_to(_pgd_focus_root(outputs_root, dataset))
+    except ValueError:
+        return False
+    return bool(relative.parts)
+
+
 def _datasets(outputs_root: Path, save_root: Path) -> List[str]:
     names = set()
     if save_root.exists():
@@ -64,6 +79,11 @@ def _datasets(outputs_root: Path, save_root: Path) -> List[str]:
             if path.is_dir() and path.name != "paper_figures" and not Path(path.name).suffix:
                 names.add(path.name)
     if outputs_root.exists():
+        pgd_root = outputs_root / "pgd_unet"
+        if pgd_root.exists():
+            for dataset_dir in pgd_root.iterdir():
+                if (_pgd_focus_root(outputs_root, dataset_dir.name)).exists():
+                    names.add(dataset_dir.name)
         for csv_path in outputs_root.rglob("*.csv"):
             dataset = _dataset_from_path(csv_path, outputs_root)
             if dataset != "unknown" and not Path(dataset).suffix:
@@ -74,7 +94,16 @@ def _datasets(outputs_root: Path, save_root: Path) -> List[str]:
 def _find_dataset_files(outputs_root: Path, dataset: str, filename: str) -> List[Path]:
     if not outputs_root.exists():
         return []
-    return [path for path in outputs_root.rglob(filename) if dataset in path.parts]
+    focus_root = _pgd_focus_root(outputs_root, dataset)
+    if focus_root.exists():
+        focused = [path for path in focus_root.rglob(filename)]
+        if focused:
+            logging.info("Found %d target PGD files for %s/%s under %s", len(focused), dataset, filename, focus_root)
+            return focused
+    fallback = [path for path in outputs_root.rglob(filename) if dataset in path.parts and not Path(dataset).suffix]
+    if fallback:
+        logging.warning("Using fallback files for %s/%s because target PGD path has no matches.", dataset, filename)
+    return fallback
 
 
 def _concat_csvs(paths: Sequence[Path]) -> pd.DataFrame:
@@ -235,6 +264,19 @@ def _read_image(path_value) -> np.ndarray | None:
         return None
 
 
+def _as_2d_mask(image: np.ndarray | None) -> np.ndarray | None:
+    if image is None:
+        return None
+    array = np.asarray(image)
+    array = np.squeeze(array)
+    if array.ndim == 3:
+        # Masks may be saved as RGB/RGBA PNGs. Contour needs a single 2D plane.
+        array = array[..., :3].mean(axis=2)
+    if array.ndim != 2:
+        return None
+    return array
+
+
 def _sample_metrics(outputs_root: Path, dataset: str) -> pd.DataFrame:
     return _concat_csvs(_find_dataset_files(outputs_root, dataset, "sample_metrics.csv"))
 
@@ -299,15 +341,15 @@ def figure10_boundary(outputs_root: Path, dataset: str, dataset_dir: Path) -> No
         return
     row = frame.sort_values("dice", ascending=True, na_position="last").iloc[0]
     image = _read_image(row.get("image_path"))
-    gt = _read_image(row.get("mask_path"))
-    pred = _read_image(row.get("prediction_path"))
+    gt = _as_2d_mask(_read_image(row.get("mask_path")))
+    pred = _as_2d_mask(_read_image(row.get("prediction_path")))
     if image is None or gt is None or pred is None:
         logging.warning("Skip figure10 for %s because boundary masks cannot be loaded.", dataset)
         return
     fig, ax = plt.subplots(figsize=(4.8, 4.8))
     ax.imshow(image, cmap="gray")
-    ax.contour(np.squeeze(gt), levels=[0.5], colors="lime", linewidths=1)
-    ax.contour(np.squeeze(pred), levels=[0.5], colors="red", linewidths=1)
+    ax.contour(gt, levels=[0.5], colors="lime", linewidths=1)
+    ax.contour(pred, levels=[0.5], colors="red", linewidths=1)
     ax.axis("off")
     _save_pdf(fig, dataset_dir / "figure10_boundary_comparison.pdf")
 
