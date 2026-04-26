@@ -9,7 +9,6 @@ from typing import Dict, List
 
 
 MAIN_FIGURES = [
-    ("figure1", "paper_figures/figure1_overall_framework.pdf"),
     ("figure3", "{dataset}/figure3_thresholding_methods.pdf"),
     ("figure4", "paper_figures/figure4_block_pruning_strategy.pdf"),
     ("figure5", "{dataset}/figure5_layerwise_pruning_ratio.pdf"),

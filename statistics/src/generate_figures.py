@@ -400,7 +400,8 @@ def main() -> int:
     save_root = Path(args.save_root)
     save_root.mkdir(parents=True, exist_ok=True)
 
-    figure1(save_root)
+    # Figure 1 is intentionally not exported by default because the pipeline
+    # diagram is prepared manually. Other paper figures are generated as usual.
     figure4(save_root)
 
     for dataset in _datasets(outputs_root, save_root):
