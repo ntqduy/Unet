@@ -127,6 +127,10 @@ def _pgd_focus_root(outputs_root: Path, dataset: str) -> Path:
     return outputs_root / "pgd_unet" / dataset / PGD_TEACHER_DIR / PGD_LOSS_TAG
 
 
+def _pgd_teacher_phase_root(outputs_root: Path, dataset: str) -> Path:
+    return outputs_root / "pgd_unet" / dataset / PGD_TEACHER_DIR / "1_teacher"
+
+
 def _is_pgd_focus_path(path: Path, outputs_root: Path, dataset: str) -> bool:
     try:
         relative = path.relative_to(_pgd_focus_root(outputs_root, dataset))
@@ -167,6 +171,24 @@ def _find_dataset_files(outputs_root: Path, dataset: str, filename: str) -> List
     if fallback:
         logging.warning("Using fallback files for %s/%s because target PGD path has no matches.", dataset, filename)
     return fallback
+
+
+def _find_teacher_channel_files(outputs_root: Path, dataset: str, filenames: Sequence[str]) -> List[Path]:
+    teacher_root = _pgd_teacher_phase_root(outputs_root, dataset)
+    if not teacher_root.exists():
+        logging.warning("Teacher phase root is missing for %s: %s", dataset, teacher_root)
+        return []
+    channel_root = teacher_root / "artifacts" / "channel_analysis"
+    search_root = channel_root if channel_root.exists() else teacher_root
+    paths: List[Path] = []
+    for filename in filenames:
+        matches = list(search_root.rglob(filename))
+        if matches:
+            logging.info("Found %d teacher channel files for %s/%s under %s", len(matches), dataset, filename, search_root)
+            paths.extend(matches)
+    if not paths:
+        logging.warning("No teacher channel files found for %s under %s", dataset, search_root)
+    return paths
 
 
 def _concat_csvs(paths: Sequence[Path]) -> pd.DataFrame:
@@ -266,13 +288,19 @@ def figure3_thresholds(outputs_root: Path, dataset: str, dataset_dir: Path) -> N
         if "layer_name" in layer_summaries.columns:
             layer_summaries = layer_summaries[layer_summaries["layer_name"].astype(str).eq(layer)]
         method_series = layer_summaries.get("prune_method", pd.Series(["Method"] * len(layer_summaries))).astype(str).str.lower()
+        threshold_styles = {
+            "static": {"color": "#d62728", "linestyle": "--"},
+            "kneedle": {"color": "#2ca02c", "linestyle": "-."},
+            "otsu": {"color": "#ff7f0e", "linestyle": ":"},
+            "gmm": {"color": "#9467bd", "linestyle": (0, (5, 1))},
+        }
         for method in ("static", "kneedle", "otsu", "gmm"):
             group = layer_summaries[method_series.eq(method)]
             threshold = pd.to_numeric(group["pruning_threshold"], errors="coerce").dropna()
             if not threshold.empty:
                 value = float(threshold.median())
                 if x_low <= value <= x_high:
-                    ax.axvline(value, linestyle="--", linewidth=1.4, label=_display_method(method))
+                    ax.axvline(value, linewidth=1.7, label=_display_method(method), **threshold_styles[method])
                 else:
                     logging.info("Skip out-of-range threshold line for %s/%s: %.6f", dataset, method, value)
     ax.set_xlim(x_low, x_high)
@@ -542,9 +570,16 @@ def figure11_12(outputs_root: Path, dataset: str, dataset_dir: Path) -> None:
         student_frame = pd.DataFrame()
     if student_frame.empty:
         student_frame = _read_first_channel_table(_find_dataset_files(outputs_root, dataset, "student_final_channel_summary.csv"))
-    teacher_frame = _read_first_channel_table(_find_dataset_files(outputs_root, dataset, "teacher_channel_summary.csv"))
-    if teacher_frame.empty:
-        teacher_frame = _read_first_channel_table(_find_dataset_files(outputs_root, dataset, "channel_summary.csv"))
+    teacher_frame = _read_first_channel_table(
+        _find_teacher_channel_files(
+            outputs_root,
+            dataset,
+            [
+                "teacher_channel_summary.csv",
+                "channel_summary.csv",
+            ],
+        )
+    )
     if student_frame.empty:
         _placeholder(dataset_dir / "figure11_output_channels_per_layer_pruned_student.pdf", f"No channel summary found for {dataset}.")
         _placeholder(dataset_dir / "figure12_mean_channel_importance_per_layer_pruned_student.pdf", f"No channel summary found for {dataset}.")
@@ -583,7 +618,7 @@ def figure11_12(outputs_root: Path, dataset: str, dataset_dir: Path) -> None:
         axes[1].grid(alpha=0.22, axis="y")
 
         base_path = dataset_dir / filename
-        alias_path = dataset_dir / filename.replace(".pdf", f"_{method_slug}.pdf")
+        alias_path = dataset_dir / filename.replace(".pdf", f"_best_student_{method_slug}.pdf")
         _save_pdf_multi(fig, [base_path, alias_path])
 
 

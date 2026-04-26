@@ -43,19 +43,37 @@ PGD_TEACHER_DIR = "unet_resnet152_teacher"
 PGD_LOSS_TAG = "loss_seg_kd_sparsity"
 
 
-def _is_pgd_focus_path(path: Path, outputs_root: Path) -> bool:
+def _path_parts(path: Path, outputs_root: Path) -> tuple[str, ...]:
     try:
-        parts = path.relative_to(outputs_root).parts
+        return path.relative_to(outputs_root).parts
     except ValueError:
-        parts = path.parts
+        return path.parts
+
+
+def _is_pgd_focus_path(path: Path, outputs_root: Path) -> bool:
+    parts = _path_parts(path, outputs_root)
     return len(parts) >= 5 and parts[0] == "pgd_unet" and parts[2] == PGD_TEACHER_DIR and parts[3] == PGD_LOSS_TAG
 
 
+def _is_pgd_loss_metric_path(path: Path, outputs_root: Path) -> bool:
+    parts = _path_parts(path, outputs_root)
+    return len(parts) >= 5 and parts[0] == "pgd_unet" and parts[2] == PGD_TEACHER_DIR and str(parts[3]).startswith("loss_")
+
+
+def _is_pgd_teacher_phase_metric_path(path: Path, outputs_root: Path) -> bool:
+    parts = _path_parts(path, outputs_root)
+    return len(parts) >= 5 and parts[0] == "pgd_unet" and parts[2] == PGD_TEACHER_DIR and parts[3] == "1_teacher"
+
+
+def _loss_scope_from_path(path: Path, outputs_root: Path) -> str:
+    parts = _path_parts(path, outputs_root)
+    if len(parts) >= 4 and parts[0] == "pgd_unet" and parts[2] == PGD_TEACHER_DIR:
+        return parts[3]
+    return ""
+
+
 def _is_basic_metric_path(path: Path, outputs_root: Path) -> bool:
-    try:
-        parts = path.relative_to(outputs_root).parts
-    except ValueError:
-        parts = path.parts
+    parts = _path_parts(path, outputs_root)
     return not parts or parts[0] != "pgd_unet"
 
 
@@ -201,7 +219,9 @@ def _read_metrics_rows(outputs_root: Path) -> pd.DataFrame:
             if csv_path in seen:
                 continue
             seen.add(csv_path)
-            if csv_path.name != "basic_metrics.csv" and not _is_pgd_focus_path(csv_path, outputs_root):
+            allow_loss_table_metric = csv_path.name == "student_metrics.csv" and _is_pgd_loss_metric_path(csv_path, outputs_root)
+            allow_teacher_metric = csv_path.name == "teacher_metrics.csv" and _is_pgd_teacher_phase_metric_path(csv_path, outputs_root)
+            if csv_path.name != "basic_metrics.csv" and not _is_pgd_focus_path(csv_path, outputs_root) and not allow_loss_table_metric and not allow_teacher_metric:
                 logging.info("Skip non-target PGD metrics CSV: %s", csv_path)
                 continue
             if csv_path.name == "basic_metrics.csv" and not _is_basic_metric_path(csv_path, outputs_root):
@@ -218,6 +238,8 @@ def _read_metrics_rows(outputs_root: Path) -> pd.DataFrame:
                 row = row_series.to_dict()
                 row["source_path"] = str(csv_path)
                 row["source_file"] = csv_path.name
+                row["is_focus_loss"] = bool(_is_pgd_focus_path(csv_path, outputs_root) or allow_teacher_metric)
+                row["loss_scope"] = _loss_scope_from_path(csv_path, outputs_root)
                 row["dataset"] = _infer_dataset(csv_path, row, outputs_root)
                 for key, value in config.items():
                     row.setdefault(key, value)
@@ -295,12 +317,15 @@ def _metric_row(row: Dict[str, Any], name_key: str, name: str) -> Dict[str, Any]
 
 
 def _loss_method(row: Dict[str, Any]) -> str:
-    display_name = str(row.get("loss_method") or row.get("config_loss_method") or "").strip()
+    display_name = str(row.get("loss_method") or row.get("config_loss_method") or row.get("distill_loss_method") or row.get("config_distill_loss_method") or "").strip()
     if display_name and display_name.lower() != "nan":
-        return display_name
-    loss_tag = str(row.get("loss_tag") or row.get("config_loss_tag") or "").lower()
+        label = display_name.upper() if display_name.lower() in {"ce", "dice", "kl", "mse"} else display_name.replace("_", " + ").title()
+        kd = _safe_int(row.get("use_kd_output", row.get("config_use_kd_output", 0)))
+        return f"Proposed + {label} KD" if kd else label
+    loss_tag = str(row.get("loss_tag") or row.get("config_loss_tag") or row.get("loss_scope") or "").lower()
     if loss_tag and loss_tag != "nan":
-        return loss_tag.replace("loss_", "").replace("_", " + ")
+        label = loss_tag.replace("loss_", "").replace("_", " + ")
+        return label.title()
     kd = _safe_int(row.get("use_kd_output", row.get("config_use_kd_output", 0)))
     feat = _safe_int(row.get("use_feature_distill", row.get("config_use_feature_distill", 0)))
     aux = _safe_int(row.get("use_aux_loss", row.get("config_use_aux_loss", 0)))
@@ -462,6 +487,9 @@ def _build_pruning_table2_rows(dataset_metrics: pd.DataFrame, dataset_timing: pd
 
 def _tables_for_dataset(dataset: str, metrics: pd.DataFrame, timing: pd.DataFrame) -> Dict[str, pd.DataFrame]:
     dataset_metrics = _test_rows(metrics[metrics["dataset"].astype(str).eq(dataset)]) if not metrics.empty else pd.DataFrame()
+    focus_metrics = dataset_metrics[
+        dataset_metrics.get("is_focus_loss", pd.Series([False] * len(dataset_metrics))).astype(bool)
+    ].copy() if not dataset_metrics.empty else pd.DataFrame()
     table1_rows = []
     table3_rows = []
     table4_rows = []
@@ -469,6 +497,8 @@ def _tables_for_dataset(dataset: str, metrics: pd.DataFrame, timing: pd.DataFram
     preferred_sources = {"teacher_metrics.csv", "pruning_metrics.csv", "student_metrics.csv", "basic_metrics.csv"}
     if "source_file" in dataset_metrics.columns and dataset_metrics["source_file"].isin(preferred_sources).any():
         dataset_metrics = dataset_metrics[dataset_metrics["source_file"].isin(preferred_sources)].copy()
+    if "source_file" in focus_metrics.columns and focus_metrics["source_file"].isin(preferred_sources).any():
+        focus_metrics = focus_metrics[focus_metrics["source_file"].isin(preferred_sources)].copy()
 
     for _, row_series in dataset_metrics.iterrows():
         row = row_series.to_dict()
@@ -479,10 +509,16 @@ def _tables_for_dataset(dataset: str, metrics: pd.DataFrame, timing: pd.DataFram
             table1_rows.append({key: value for key, value in _metric_row(row, "Model", model_name).items() if key in TABLE1_COLUMNS})
         if prune_method and phase == "student":
             table3_rows.append(_metric_row(row, "Method", _loss_method(row)))
+
+    for _, row_series in focus_metrics.iterrows():
+        row = row_series.to_dict()
+        phase = str(row.get("phase") or "").lower()
+        prune_method = _row_prune_method(row)
+        if prune_method and phase == "student":
             table4_rows.append(_metric_row(row, "Component", _component(row)))
 
     dataset_timing = timing[timing["dataset"].astype(str).eq(dataset)] if not timing.empty else pd.DataFrame()
-    table2_rows = _build_pruning_table2_rows(dataset_metrics, dataset_timing)
+    table2_rows = _build_pruning_table2_rows(focus_metrics, dataset_timing)
     table5_rows = []
     for _, row_series in dataset_timing.iterrows():
         row = row_series.to_dict()
@@ -543,6 +579,45 @@ def _mean_std_table(all_tables: List[pd.DataFrame]) -> pd.DataFrame:
     return pd.DataFrame(rows).reindex(columns=MEAN_STD_COLUMNS)
 
 
+def _format_mean_std(mean_value: float, std_value: float) -> str:
+    if np.isnan(mean_value):
+        return "NaN"
+    if np.isnan(std_value):
+        std_value = 0.0
+    return f"{mean_value:.4f} +/- {std_value:.4f}"
+
+
+def _table1_baseline_mean_std(table1_tables: List[pd.DataFrame]) -> tuple[pd.DataFrame, pd.DataFrame]:
+    frames = [frame.copy() for frame in table1_tables if not frame.empty]
+    if not frames:
+        formatted_columns = ["Model", "Datasets", *TABLE1_COLUMNS[1:]]
+        numeric_columns = ["Model", "Datasets"]
+        for metric in TABLE1_COLUMNS[1:]:
+            numeric_columns.extend([f"Mean {metric}", f"Std {metric}"])
+        return pd.DataFrame(columns=formatted_columns), pd.DataFrame(columns=numeric_columns)
+
+    combined = pd.concat(frames, ignore_index=True)
+    rows_formatted: List[Dict[str, Any]] = []
+    rows_numeric: List[Dict[str, Any]] = []
+    for model, group in combined.groupby("Model", dropna=True):
+        dataset_count = int(group["Dataset"].nunique()) if "Dataset" in group.columns else int(len(group))
+        formatted_row: Dict[str, Any] = {"Model": model, "Datasets": dataset_count}
+        numeric_row: Dict[str, Any] = {"Model": model, "Datasets": dataset_count}
+        for metric in TABLE1_COLUMNS[1:]:
+            values = pd.to_numeric(group.get(metric, pd.Series(dtype=float)), errors="coerce").dropna()
+            mean_value = float(values.mean()) if not values.empty else float("nan")
+            std_value = float(values.std()) if len(values) > 1 else 0.0 if len(values) == 1 else float("nan")
+            formatted_row[metric] = _format_mean_std(mean_value, std_value)
+            numeric_row[f"Mean {metric}"] = mean_value
+            numeric_row[f"Std {metric}"] = std_value
+        rows_formatted.append(formatted_row)
+        rows_numeric.append(numeric_row)
+
+    formatted = pd.DataFrame(rows_formatted).sort_values("Model").reset_index(drop=True)
+    numeric = pd.DataFrame(rows_numeric).sort_values("Model").reset_index(drop=True)
+    return formatted, numeric
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Generate paper-ready tables from existing outputs.")
     parser.add_argument("--outputs-root", type=str, default="outputs")
@@ -567,6 +642,7 @@ def main() -> int:
     raw_datasets = set(metrics.get("dataset", pd.Series(dtype=str)).dropna().astype(str)) | set(timing.get("dataset", pd.Series(dtype=str)).dropna().astype(str))
     datasets = sorted(dataset for dataset in raw_datasets if dataset != "unknown" and not Path(dataset).suffix)
     all_performance_tables: List[pd.DataFrame] = []
+    table1_tables: List[pd.DataFrame] = []
     for dataset in datasets:
         dataset_dir = save_root / dataset
         dataset_dir.mkdir(parents=True, exist_ok=True)
@@ -576,9 +652,22 @@ def main() -> int:
             output_path = dataset_dir / filename
             logging.info("Processing table: %s rows=%d -> %s", filename, len(table), output_path)
             table.to_csv(output_path, index=False)
+            if filename == "table1_baseline.csv" and not table.empty:
+                table_for_mean = table.copy()
+                table_for_mean.insert(0, "Dataset", dataset)
+                table1_tables.append(table_for_mean)
             if filename != "table5_computational_cost.csv":
                 all_performance_tables.append(table)
             logging.info("Saved table: %s", output_path)
+
+    table1_mean_std, table1_numeric = _table1_baseline_mean_std(table1_tables)
+    table1_mean_std_path = save_root / "table_mean_baseline.csv"
+    table1_numeric_path = save_root / "table_mean_baseline_numeric.csv"
+    logging.info("Processing table: table_mean_baseline.csv mean+std rows=%d -> %s", len(table1_mean_std), table1_mean_std_path)
+    table1_mean_std.to_csv(table1_mean_std_path, index=False)
+    table1_numeric.to_csv(table1_numeric_path, index=False)
+    logging.info("Saved table: %s", table1_mean_std_path)
+    logging.info("Saved table: %s", table1_numeric_path)
 
     mean_std = _mean_std_table(all_performance_tables)
     mean_std_path = save_root / "table_mean_std_across_datasets.csv"
