@@ -33,7 +33,7 @@ parser.add_argument("--split", type=str, default="test", choices=["train", "val"
 parser.add_argument("--checkpoint_path", type=str, default="", help="optional checkpoint path; defaults to the best checkpoint under the experiment")
 parser.add_argument("--num_classes", type=int, default=2)
 parser.add_argument("--in_channels", type=int, default=3)
-parser.add_argument("--encoder_pretrained", type=int, default=0, help="only used by unet_resnet152")
+parser.add_argument("--encoder_pretrained", type=int, default=1, help="only used by unet_resnet152")
 parser.add_argument("--gpu", type=str, default="0")
 parser.add_argument("--patch_size", nargs=2, type=int, default=[256, 256])
 parser.add_argument("--save_visualizations", type=int, default=1)

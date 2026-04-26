@@ -105,6 +105,10 @@ def _build_command(args: argparse.Namespace, dataset: str, model: str, root_path
         args.output_root,
         "--batch_size",
         str(args.batch_size),
+        "--base_lr",
+        str(args.base_lr),
+        "--num_workers",
+        str(args.num_workers),
         "--gpu",
         str(args.device).replace("cuda:", ""),
         "--encoder_pretrained",
@@ -112,6 +116,8 @@ def _build_command(args: argparse.Namespace, dataset: str, model: str, root_path
     ]
     if args.epochs is not None:
         command.extend(["--max_epochs", str(args.epochs)])
+    if args.force_retrain:
+        command.extend(["--force_retrain", "1"])
     command.extend(passthrough)
     return command
 
@@ -125,7 +131,10 @@ def parse_args() -> tuple[argparse.Namespace, List[str]]:
     parser.add_argument("--device", type=str, default="0", help="GPU id, cuda:0, or cpu.")
     parser.add_argument("--epochs", type=int, default=50)
     parser.add_argument("--batch-size", type=int, default=8)
-    parser.add_argument("--encoder-pretrained", type=int, default=0, help="Use 1 for pretrained ResNet teacher if weights are available.")
+    parser.add_argument("--base-lr", type=float, default=0.01)
+    parser.add_argument("--num-workers", type=int, default=4)
+    parser.add_argument("--encoder-pretrained", type=int, default=1, help="Use 1 for pretrained ResNet152 encoder when model=unet_resnet152.")
+    parser.add_argument("--force-retrain", action="store_true", help="Ignore compatible existing checkpoints and train again.")
     parser.add_argument("--summary-csv", type=str, default="", help="Optional path for aggregate summary CSV.")
     parser.add_argument("--stop-on-error", action="store_true")
     return parser.parse_known_args()

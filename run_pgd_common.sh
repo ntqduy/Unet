@@ -74,6 +74,9 @@ OUTPUT_ROOT="${OUTPUT_ROOT:-$TEACHER_OUTPUT_ROOT}"
 # TEACHER_MODEL choices come from networks/net_factory.py:
 #   unet, resunet, vnet, unetr, unet_resnet152
 TEACHER_MODEL="${TEACHER_MODEL:-unet_resnet152}"
+# Pretrained weights are currently used by unet_resnet152. Keep this enabled
+# by default for all PGD scripts; unsupported models simply ignore it.
+ENCODER_PRETRAINED="${ENCODER_PRETRAINED:-1}"
 MAX_EPOCHS_TEACHER="${MAX_EPOCHS_TEACHER:-50}"
 MAX_EPOCHS_STUDENT="${MAX_EPOCHS_STUDENT:-50}"
 BATCH_SIZE="${BATCH_SIZE:-8}"
@@ -235,6 +238,7 @@ esac
 OUTPUT_DIR="output_${PRUNE_METHOD}_${RATE_TAG}_${STEP3_TAG}"
 
 echo "Teacher model: $TEACHER_MODEL"
+echo "Encoder pretrained: $ENCODER_PRETRAINED"
 echo "Pruning strategy: $PRUNE_METHOD"
 if [ "$PRUNE_METHOD" = "static" ] || [ "$PRUNE_METHOD" = "middle_static" ]; then
   echo "Static prune ratio: $PRUNE_RATE_TAG"
@@ -261,6 +265,7 @@ python run_pgd.py \
   --dataset "$DATASET_KEY" \
   --root_path "$ROOT_PATH" \
   --teacher_model "$TEACHER_MODEL" \
+  --encoder_pretrained "$ENCODER_PRETRAINED" \
   --exp "$EXP_NAME" \
   --max_epochs_teacher "$MAX_EPOCHS_TEACHER" \
   --max_epochs_student "$MAX_EPOCHS_STUDENT" \

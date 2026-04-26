@@ -453,6 +453,18 @@ def train(args, snapshot_path):
         image_mode=image_mode,
     )
     logging.info(
+        "Dataset sizes | train=%d (%s) | val=%d (%s)",
+        len(db_train),
+        args.train_split,
+        len(db_val),
+        args.val_split,
+    )
+    logging.info(
+        "Split manifests | train=%s | val=%s",
+        project_relative_path(getattr(db_train, "manifest_path", None), PROJECT_ROOT),
+        project_relative_path(getattr(db_val, "manifest_path", None), PROJECT_ROOT),
+    )
+    logging.info(
         "Binary mask normalization | train: %s | val: %s",
         getattr(db_train, "force_binary_masks", False),
         getattr(db_val, "force_binary_masks", False),
