@@ -155,6 +155,23 @@ def main() -> int:
         if not Path(root_path).exists():
             logging.warning("Dataset root does not exist yet: %s", root_path)
         for model in args.models:
+            run_dir = build_basic_run_dir(
+                project_root=PROJECT_ROOT,
+                dataset=dataset,
+                model_name=model,
+                output_root=args.output_root or None,
+            )
+            last_checkpoint_path = run_dir / "checkpoints" / "last.pth"
+            if last_checkpoint_path.is_file() and not args.force_retrain:
+                logging.info(
+                    "Skip basic model because last checkpoint already exists | dataset=%s | model=%s | checkpoint=%s",
+                    dataset,
+                    model,
+                    last_checkpoint_path,
+                )
+                summary_rows.extend(_summarize_run(dataset, model, args.output_root))
+                continue
+
             command = _build_command(args, dataset, model, root_path, passthrough)
             logging.info("Run basic model | dataset=%s | model=%s", dataset, model)
             result = subprocess.run(command, cwd=PROJECT_ROOT, env=env)

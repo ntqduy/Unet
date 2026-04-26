@@ -397,6 +397,14 @@ def _phase_dir(phase: str) -> Path:
     return _proposal_root_dir() / phase_dir_name
 
 
+def _completed_pipeline_checkpoint() -> Path:
+    return _phase_dir("student") / "checkpoints" / "last.pth"
+
+
+def _force_pipeline_rerun_requested() -> bool:
+    return bool(args.force_retrain_teacher) or bool(args.force_reprune) or bool(args.force_retrain_student)
+
+
 def _pruning_metadata() -> dict:
     static_ratio = args.static_prune_ratio if uses_static_prune_ratio(args.prune_method) else None
     return {
@@ -2972,6 +2980,14 @@ if __name__ == "__main__":
     logging.info("Output dir: %s", project_relative_path(proposal_root_dir, PROJECT_ROOT))
     logging.info("Teacher output root: %s", args.teacher_output_root or args.output_root or "outputs")
     logging.info("Teacher run dir: %s", project_relative_path(_phase_dir("teacher"), PROJECT_ROOT))
+
+    completed_checkpoint_path = _completed_pipeline_checkpoint()
+    if completed_checkpoint_path.is_file() and not _force_pipeline_rerun_requested():
+        logging.info(
+            "Skip PGD pipeline because student last checkpoint already exists: %s",
+            project_relative_path(completed_checkpoint_path, PROJECT_ROOT),
+        )
+        raise SystemExit(0)
 
     db_train, db_val, trainloader, valloader = _build_loaders(device, image_mode)
     logging.info("Dataset summary | train=%d | val=%d", len(db_train), len(db_val))

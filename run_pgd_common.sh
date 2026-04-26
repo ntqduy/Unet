@@ -70,6 +70,10 @@ STEP3_PRUNING="$(echo "$STEP3_PRUNING" | tr '[:upper:]' '[:lower:]')"
 STEP3_PRUNING_EPOCHS="${STEP3_PRUNING_EPOCHS:-0}"
 TEACHER_OUTPUT_ROOT="${TEACHER_OUTPUT_ROOT:-outputs}"
 OUTPUT_ROOT="${OUTPUT_ROOT:-$TEACHER_OUTPUT_ROOT}"
+SKIP_IF_LAST_EXISTS="${SKIP_IF_LAST_EXISTS:-1}"
+FORCE_RETRAIN_TEACHER="${FORCE_RETRAIN_TEACHER:-0}"
+FORCE_REPRUNE="${FORCE_REPRUNE:-0}"
+FORCE_RETRAIN_STUDENT="${FORCE_RETRAIN_STUDENT:-0}"
 
 # TEACHER_MODEL choices come from networks/net_factory.py:
 #   unet, resunet, vnet, unetr, unet_resnet152
@@ -258,9 +262,20 @@ echo "Loss output tag: $LOSS_TAG"
 echo "Output root: $OUTPUT_ROOT"
 echo "Teacher output root: $TEACHER_OUTPUT_ROOT"
 echo "Proposal output path: $OUTPUT_ROOT/pgd_unet/$DATASET_KEY/${TEACHER_MODEL}_teacher/$LOSS_TAG/$OUTPUT_DIR"
+FINAL_LAST_CHECKPOINT="$OUTPUT_ROOT/pgd_unet/$DATASET_KEY/${TEACHER_MODEL}_teacher/$LOSS_TAG/$OUTPUT_DIR/3_student/checkpoints/last.pth"
+echo "Final last checkpoint: $FINAL_LAST_CHECKPOINT"
 echo "Loss ablation: kd=$USE_KD_OUTPUT sparsity=$USE_SPARSITY feat=$USE_FEATURE_DISTILL aux=$USE_AUX_LOSS"
 echo "Loss weights: kd=$LAMBDA_DISTILL sparsity=$LAMBDA_SPARSITY feat=$LAMBDA_FEAT aux=$LAMBDA_AUX"
 echo "Loss methods: seg=$SEG_LOSS_METHOD distill=$DISTILL_LOSS_METHOD label=${LOSS_METHOD:-auto}"
+
+if [ "$SKIP_IF_LAST_EXISTS" = "1" ] \
+  && [ -f "$FINAL_LAST_CHECKPOINT" ] \
+  && [ "$FORCE_RETRAIN_TEACHER" != "1" ] \
+  && [ "$FORCE_REPRUNE" != "1" ] \
+  && [ "$FORCE_RETRAIN_STUDENT" != "1" ]; then
+  echo "Skip existing completed PGD run because last checkpoint exists: $FINAL_LAST_CHECKPOINT"
+  exit 0
+fi
 
 python run_pgd.py \
   --dataset "$DATASET_KEY" \
@@ -272,6 +287,9 @@ python run_pgd.py \
   --max_epochs_student "$MAX_EPOCHS_STUDENT" \
   --output_root "$OUTPUT_ROOT" \
   --teacher_output_root "$TEACHER_OUTPUT_ROOT" \
+  --force_retrain_teacher "$FORCE_RETRAIN_TEACHER" \
+  --force_reprune "$FORCE_REPRUNE" \
+  --force_retrain_student "$FORCE_RETRAIN_STUDENT" \
   "${PRUNE_ARGS[@]}" \
   "${STEP3_ARGS[@]}" \
   --use_kd_output "$USE_KD_OUTPUT" \
