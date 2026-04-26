@@ -33,16 +33,21 @@ if [ -f "$HOME/miniconda3/etc/profile.d/conda.sh" ]; then
   conda activate "$CONDA_ENV"
 fi
 
+echo "[RUN] Step 1/3: generate tables -> $SAVE_ROOT"
 python statistics/src/generate_tables.py \
   --outputs-root "$OUTPUTS_ROOT" \
   --save-root "$SAVE_ROOT"
 
+echo "[RUN] Step 2/3: generate figures -> $SAVE_ROOT"
 python statistics/src/generate_figures.py \
   --outputs-root "$OUTPUTS_ROOT" \
   --save-root "$SAVE_ROOT"
 
+echo "[RUN] Step 3/3: collect paper-ready artifacts -> statistics/paper_ready"
 python statistics/src/collect_paper_artifacts.py \
   --outputs-root "$OUTPUTS_ROOT" \
   --statistics-root "$SAVE_ROOT" \
   --save-root "statistics/paper_ready" \
   --dataset-main "$DATASET_MAIN"
+
+echo "[RUN] Done."
