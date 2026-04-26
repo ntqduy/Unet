@@ -19,6 +19,7 @@ def _save_pdf(fig, path: Path) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     fig.savefig(path, bbox_inches="tight")
     plt.close(fig)
+    logging.info("Saved figure: %s", path)
 
 
 def _placeholder(path: Path, message: str) -> None:
@@ -27,6 +28,11 @@ def _placeholder(path: Path, message: str) -> None:
     ax.axis("off")
     ax.text(0.5, 0.5, message, ha="center", va="center", wrap=True)
     _save_pdf(fig, path)
+
+
+def _run_figure(name: str, output_hint: Path, func, *args, **kwargs) -> None:
+    logging.info("Processing %s -> %s", name, output_hint)
+    func(*args, **kwargs)
 
 
 def _read_csv(path: Path) -> pd.DataFrame:
@@ -400,26 +406,31 @@ def main() -> int:
     save_root = Path(args.save_root)
     save_root.mkdir(parents=True, exist_ok=True)
 
-    # Figure 1 is intentionally not exported by default because the pipeline
-    # diagram is prepared manually. Other paper figures are generated as usual.
-    figure4(save_root)
+    logging.info("Figure 1 is disabled by request; remaining figures will be generated normally.")
+    _run_figure(
+        "figure4_block_pruning_strategy",
+        save_root / "paper_figures" / "figure4_block_pruning_strategy.pdf",
+        figure4,
+        save_root,
+    )
 
     for dataset in _datasets(outputs_root, save_root):
         dataset_dir = save_root / dataset
         dataset_dir.mkdir(parents=True, exist_ok=True)
-        figure2_importance(outputs_root, dataset, dataset_dir)
-        figure3_thresholds(outputs_root, dataset, dataset_dir)
-        figure5_layerwise(outputs_root, dataset, dataset_dir)
-        figure6_tradeoff(dataset_dir)
-        figure7_training(outputs_root, dataset, dataset_dir)
-        figure8_visual(outputs_root, dataset, dataset_dir)
-        figure9_failures(outputs_root, dataset, dataset_dir, topk=args.failure_topk)
-        figure10_boundary(outputs_root, dataset, dataset_dir)
-        figure11_12(outputs_root, dataset, dataset_dir)
-        figure13_search(dataset_dir)
-        figure14_cost(dataset_dir)
+        logging.info("Processing dataset figures: %s -> %s", dataset, dataset_dir)
+        _run_figure("figure2_importance_distribution", dataset_dir / "figure2_importance_distribution.pdf", figure2_importance, outputs_root, dataset, dataset_dir)
+        _run_figure("figure3_thresholding_methods", dataset_dir / "figure3_thresholding_methods.pdf", figure3_thresholds, outputs_root, dataset, dataset_dir)
+        _run_figure("figure5_layerwise_pruning_ratio", dataset_dir / "figure5_layerwise_pruning_ratio.pdf", figure5_layerwise, outputs_root, dataset, dataset_dir)
+        _run_figure("figure6_accuracy_efficiency_tradeoff", dataset_dir / "figure6_accuracy_efficiency_tradeoff.pdf", figure6_tradeoff, dataset_dir)
+        _run_figure("figure7_training_curve", dataset_dir / "figure7_training_curve.pdf", figure7_training, outputs_root, dataset, dataset_dir)
+        _run_figure("figure8_visual_comparison", dataset_dir / "figure8_visual_comparison.pdf", figure8_visual, outputs_root, dataset, dataset_dir)
+        _run_figure("figure9_failure_cases", dataset_dir / "figure9_failure_cases.pdf", figure9_failures, outputs_root, dataset, dataset_dir, topk=args.failure_topk)
+        _run_figure("figure10_boundary_comparison", dataset_dir / "figure10_boundary_comparison.pdf", figure10_boundary, outputs_root, dataset, dataset_dir)
+        _run_figure("figure11_12_channel_analysis", dataset_dir / "figure11/figure12 channel-analysis PDFs", figure11_12, outputs_root, dataset, dataset_dir)
+        _run_figure("figure13_search_time_comparison", dataset_dir / "figure13_search_time_comparison.pdf", figure13_search, dataset_dir)
+        _run_figure("figure14_computational_cost_breakdown", dataset_dir / "figure14_computational_cost_breakdown.pdf", figure14_cost, dataset_dir)
 
-    figure15(save_root)
+    _run_figure("figure15_mean_performance_across_datasets", save_root / "figure15_mean_performance_across_datasets.pdf", figure15, save_root)
     return 0
 
 

@@ -93,10 +93,12 @@ def _read_metrics_rows(outputs_root: Path) -> pd.DataFrame:
     patterns = ["basic_metrics.csv", "teacher_metrics.csv", "pruning_metrics.csv", "student_metrics.csv", "pipeline_metrics.csv", "metrics_summary.csv"]
     seen = set()
     for pattern in patterns:
+        logging.info("Scanning metrics pattern: %s/%s", outputs_root, pattern)
         for csv_path in outputs_root.rglob(pattern):
             if csv_path in seen:
                 continue
             seen.add(csv_path)
+            logging.info("Reading metrics CSV: %s", csv_path)
             try:
                 frame = pd.read_csv(csv_path)
             except Exception as error:
@@ -118,7 +120,9 @@ def _read_metrics_rows(outputs_root: Path) -> pd.DataFrame:
 
 def _read_timing_rows(outputs_root: Path) -> pd.DataFrame:
     rows: List[Dict[str, Any]] = []
+    logging.info("Scanning timing summaries under: %s", outputs_root)
     for csv_path in outputs_root.rglob("timing_summary.csv"):
+        logging.info("Reading timing CSV: %s", csv_path)
         try:
             frame = pd.read_csv(csv_path)
         except Exception as error:
@@ -130,6 +134,7 @@ def _read_timing_rows(outputs_root: Path) -> pd.DataFrame:
             row["dataset"] = _infer_dataset(csv_path, row, outputs_root)
             rows.append(row)
     for json_path in outputs_root.rglob("pruning_search_time.json"):
+        logging.info("Reading pruning search-time JSON: %s", json_path)
         payload = _read_json(json_path)
         if not payload:
             continue
@@ -322,16 +327,21 @@ def main() -> int:
     for dataset in datasets:
         dataset_dir = save_root / dataset
         dataset_dir.mkdir(parents=True, exist_ok=True)
+        logging.info("Processing tables for dataset: %s -> %s", dataset, dataset_dir)
         tables = _tables_for_dataset(dataset, metrics, timing)
         for filename, table in tables.items():
-            table.to_csv(dataset_dir / filename, index=False)
+            output_path = dataset_dir / filename
+            logging.info("Processing table: %s rows=%d -> %s", filename, len(table), output_path)
+            table.to_csv(output_path, index=False)
             if filename != "table5_computational_cost.csv":
                 all_performance_tables.append(table)
-            logging.info("Saved %s", dataset_dir / filename)
+            logging.info("Saved table: %s", output_path)
 
     mean_std = _mean_std_table(all_performance_tables)
-    mean_std.to_csv(save_root / "table_mean_std_across_datasets.csv", index=False)
-    logging.info("Saved %s", save_root / "table_mean_std_across_datasets.csv")
+    mean_std_path = save_root / "table_mean_std_across_datasets.csv"
+    logging.info("Processing table: table_mean_std_across_datasets.csv rows=%d -> %s", len(mean_std), mean_std_path)
+    mean_std.to_csv(mean_std_path, index=False)
+    logging.info("Saved table: %s", mean_std_path)
     return 0
 
 

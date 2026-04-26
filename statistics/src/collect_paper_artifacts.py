@@ -38,9 +38,11 @@ def _copy_figure(statistics_root: Path, save_root: Path, dataset: str, section: 
     target_dir.mkdir(parents=True, exist_ok=True)
     target = target_dir / f"{figure_id}_{source.name}"
     status = "missing"
+    logging.info("Collecting figure: %s dataset=%s section=%s source=%s target=%s", figure_id, dataset, section, source, target)
     if source.is_file():
         shutil.copy2(source, target)
         status = "copied"
+        logging.info("Copied figure: %s -> %s", source, target)
     else:
         logging.warning("Missing figure for paper collection: %s", source)
     return {
@@ -55,6 +57,7 @@ def _copy_figure(statistics_root: Path, save_root: Path, dataset: str, section: 
 
 def _write_manifest(path: Path, rows: List[Dict[str, str]]) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
+    logging.info("Writing paper-ready manifest rows=%d -> %s", len(rows), path)
     fieldnames = ["figure_id", "source_path", "target_path", "dataset", "section", "status"]
     with path.open("w", encoding="utf-8", newline="") as file:
         writer = csv.DictWriter(file, fieldnames=fieldnames)
