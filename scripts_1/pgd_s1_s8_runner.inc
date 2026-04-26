@@ -17,9 +17,9 @@ PROJECT_DIR="${PROJECT_DIR:-$PROJECT_ROOT}"
 OUTPUT_ROOT="${OUTPUT_ROOT:-outputs}"
 TEACHER_OUTPUT_ROOT="${TEACHER_OUTPUT_ROOT:-$OUTPUT_ROOT}"
 
-# These batch scripts are meant to test recovery/distillation losses, so step 3
-# is enabled by default. Override STEP3_PRUNING=0 if you need pruning-only runs.
-STEP3_PRUNING="${STEP3_PRUNING:-1}"
+# Keep step-3 pruning/recovery disabled by default for all S1-S8 batch runs.
+# Override STEP3_PRUNING=1 and set STEP3_PRUNING_EPOCHS>0 only when needed.
+STEP3_PRUNING="${STEP3_PRUNING:-0}"
 
 # S1 and S5 static strategies run all these ratios. Override with:
 # STATIC_PRUNE_RATES="0.2 0.4" bash scripts/run_....sh

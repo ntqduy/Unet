@@ -261,10 +261,10 @@ parser.add_argument(
 parser.add_argument(
     "--warmup_pruning_epochs",
     type=int,
-    default=4,
+    default=0,
     help="number of final step-3 epochs reserved for late hard pruning and compact-student distillation",
 )
-parser.add_argument("--enable_step3_pruning", type=int, default=1, help="set to 1 to enable step-3 soft/late hard pruning, or 0 to train without step-3 pruning")
+parser.add_argument("--enable_step3_pruning", type=int, default=0, help="set to 1 to enable step-3 soft/late hard pruning, or 0 to train without step-3 pruning")
 parser.add_argument("--step3_pruning_epochs", type=int, default=None, help="number of final student epochs reserved for step-3 late hard pruning; alias for --warmup_pruning_epochs")
 parser.add_argument("--student_gate_near_off_threshold", type=float, default=0.10, help="gate value threshold used to flag channels as nearly switched off")
 parser.add_argument("--student_gate_open_value", type=float, default=0.999, help="gate probability used when student_variant disables gating")
