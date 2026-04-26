@@ -14,8 +14,9 @@ except ImportError as error:  # pragma: no cover - dependency guard
 
 
 TABLE1_COLUMNS = ["Model", "Dice", "IoU", "HD95", "Params", "FLOPs", "FPS", "Inf (s)"]
-TABLE2_COLUMNS = ["Method", "Dice", "IoU", "HD95", "Params", "FLOPs", "FPS", "Inf (s)", "Search Time (s)"]
-TABLE3_COLUMNS = TABLE2_COLUMNS
+PERFORMANCE_COLUMNS = ["Dice", "IoU", "HD95", "Params", "FLOPs", "FPS", "Inf (s)", "Search Time (s)"]
+TABLE2_COLUMNS = ["Group", "Method", *PERFORMANCE_COLUMNS, "Source Phase", "Raw Method", "Static Ratio"]
+TABLE3_COLUMNS = ["Method", *PERFORMANCE_COLUMNS]
 TABLE4_COLUMNS = ["Component", "Dice", "IoU", "HD95", "Params", "FLOPs", "FPS", "Inf (s)", "Search Time (s)"]
 TABLE5_COLUMNS = ["Method", "Pruning Time (s)", "Search Time (s)", "Training Time (s)", "Inference Time (s)", "Total Time (s)"]
 MEAN_STD_COLUMNS = [
@@ -83,6 +84,89 @@ def _safe_int(value: Any, default: int = 0) -> int:
     return int(number)
 
 
+def _clean_text(value: Any) -> str:
+    text = str(value or "").strip()
+    return "" if text.lower() in {"", "nan", "none"} else text
+
+
+def _fmt_ratio(value: Any) -> str:
+    number = _safe_float(value)
+    if np.isnan(number):
+        return "auto"
+    return f"{number:.2f}".rstrip("0").rstrip(".")
+
+
+def _row_prune_method(row: Dict[str, Any]) -> str:
+    return _clean_text(row.get("prune_method") or row.get("config_prune_method") or row.get("method")).lower()
+
+
+def _row_static_ratio(row: Dict[str, Any]) -> float:
+    return _safe_float(
+        row.get(
+            "static_prune_ratio",
+            row.get("config_static_prune_ratio", row.get("pruning_ratio", row.get("prune_ratio"))),
+        )
+    )
+
+
+def _method_display(raw_method: str, ratio: Any = np.nan, *, kd: bool = False, summary: str = "") -> str:
+    raw_method = str(raw_method or "").lower()
+    if summary:
+        label = summary
+    elif raw_method == "static":
+        label = f"Static r={_fmt_ratio(ratio)}"
+    elif raw_method == "middle_static":
+        label = f"Middle static r={_fmt_ratio(ratio)}"
+    elif raw_method == "kneedle":
+        label = "Kneedle"
+    elif raw_method == "otsu":
+        label = "Otsu"
+    elif raw_method == "gmm":
+        label = "GMM"
+    elif raw_method == "middle_kneedle":
+        label = "Middle-Kneedle"
+    elif raw_method == "middle_otsu":
+        label = "Middle-Otsu"
+    elif raw_method == "middle_gmm":
+        label = "Middle-GMM"
+    else:
+        label = raw_method.replace("_", " ").title() if raw_method else "Unknown"
+    return f"{label} + KD" if kd and "KD" not in label else label
+
+
+def _metric_from_row(row: Dict[str, Any], name_key: str, name: str) -> Dict[str, Any]:
+    metric = _metric_row(row, name_key, name)
+    return metric
+
+
+def _best_by_dice(rows: List[Dict[str, Any]]) -> Dict[str, Any] | None:
+    if not rows:
+        return None
+    def score(item: Dict[str, Any]) -> tuple[float, float]:
+        dice = _safe_float(item.get("dice"))
+        hd95 = _safe_float(item.get("hd95"))
+        return (-np.inf if np.isnan(dice) else dice, -np.inf if np.isnan(hd95) else -hd95)
+
+    return max(rows, key=score)
+
+
+def _search_time_for(raw_method: str, ratio: float, timing: pd.DataFrame) -> float:
+    if timing.empty:
+        return float("nan")
+    frame = timing.copy()
+    if "method" in frame.columns:
+        frame = frame[frame["method"].fillna("").astype(str).str.lower().eq(str(raw_method).lower())]
+    if frame.empty:
+        return float("nan")
+    if str(raw_method).lower() in {"static", "middle_static"} and "static_prune_ratio" in frame.columns and not np.isnan(ratio):
+        ratios = pd.to_numeric(frame["static_prune_ratio"], errors="coerce")
+        ratio_frame = frame[(ratios - ratio).abs() < 1e-9]
+        if not ratio_frame.empty:
+            frame = ratio_frame
+    values = pd.to_numeric(frame.get("search_time_seconds", pd.Series(dtype=float)), errors="coerce").dropna()
+    return float(values.iloc[0]) if not values.empty else float("nan")
+
+
 def _infer_dataset(path: Path, row: Dict[str, Any], outputs_root: Path) -> str:
     dataset = str(row.get("dataset") or "").strip()
     if dataset:
@@ -133,6 +217,7 @@ def _read_metrics_rows(outputs_root: Path) -> pd.DataFrame:
             for _, row_series in frame.iterrows():
                 row = row_series.to_dict()
                 row["source_path"] = str(csv_path)
+                row["source_file"] = csv_path.name
                 row["dataset"] = _infer_dataset(csv_path, row, outputs_root)
                 for key, value in config.items():
                     row.setdefault(key, value)
@@ -173,6 +258,7 @@ def _read_timing_rows(outputs_root: Path) -> pd.DataFrame:
             {
                 "dataset": _infer_dataset(json_path, payload, outputs_root),
                 "method": payload.get("prune_method") or payload.get("prune_strategy") or "pruning",
+                "static_prune_ratio": payload.get("static_prune_ratio", np.nan),
                 "phase": "pruning_search",
                 "search_time_seconds": payload.get("search_time_seconds", np.nan),
                 "pruning_time_seconds": np.nan,
@@ -255,32 +341,153 @@ def _dedupe_best(rows: Iterable[Dict[str, Any]], key_name: str) -> pd.DataFrame:
     return frame.drop_duplicates(subset=[key_name], keep="first").reset_index(drop=True)
 
 
+def _table2_entry(
+    row: Dict[str, Any],
+    group: str,
+    method: str,
+    timing: pd.DataFrame,
+    *,
+    raw_method: str | None = None,
+    source_phase: str | None = None,
+    ratio: float | None = None,
+) -> Dict[str, Any]:
+    resolved_raw_method = raw_method or _row_prune_method(row)
+    resolved_ratio = _row_static_ratio(row) if ratio is None else ratio
+    entry = _metric_row(row, "Method", method)
+    entry["Group"] = group
+    entry["Source Phase"] = source_phase or _clean_text(row.get("phase"))
+    entry["Raw Method"] = resolved_raw_method
+    entry["Static Ratio"] = _fmt_ratio(resolved_ratio)
+    if np.isnan(entry.get("Search Time (s)", np.nan)):
+        entry["Search Time (s)"] = _search_time_for(resolved_raw_method, resolved_ratio, timing)
+    if group == "Reference":
+        entry["Search Time (s)"] = 0.0
+        entry["Static Ratio"] = "not used"
+    return entry
+
+
+def _build_pruning_table2_rows(dataset_metrics: pd.DataFrame, dataset_timing: pd.DataFrame) -> List[Dict[str, Any]]:
+    if dataset_metrics.empty:
+        return []
+
+    records = [row.to_dict() for _, row in dataset_metrics.iterrows()]
+    teacher_rows = [row for row in records if str(row.get("phase") or "").lower() == "teacher"]
+    pruning_rows = [row for row in records if str(row.get("phase") or "").lower() == "pruning" and _row_prune_method(row)]
+    student_rows = [row for row in records if str(row.get("phase") or "").lower() == "student" and _row_prune_method(row)]
+
+    rows: List[Dict[str, Any]] = []
+    teacher = _best_by_dice(teacher_rows)
+    if teacher:
+        rows.append(_table2_entry(teacher, "Reference", "Teacher (UNet-ResNet152)", dataset_timing, raw_method="teacher", source_phase="teacher"))
+
+    static_rows = [row for row in pruning_rows if _row_prune_method(row) == "static"]
+    static_rows = sorted(static_rows, key=lambda row: (_row_static_ratio(row), -_safe_float(row.get("dice"))))
+    seen_static = set()
+    for row in static_rows:
+        ratio = _row_static_ratio(row)
+        ratio_key = _fmt_ratio(ratio)
+        if ratio_key in seen_static:
+            continue
+        seen_static.add(ratio_key)
+        rows.append(
+            _table2_entry(
+                row,
+                "Static pruning",
+                _method_display("static", ratio),
+                dataset_timing,
+                raw_method="static",
+                source_phase="pruning",
+                ratio=ratio,
+            )
+        )
+
+    for raw_method in ("kneedle", "otsu", "gmm"):
+        best = _best_by_dice([row for row in pruning_rows if _row_prune_method(row) == raw_method])
+        if best:
+            rows.append(_table2_entry(best, "Adaptive threshold", _method_display(raw_method), dataset_timing, raw_method=raw_method, source_phase="pruning"))
+
+    channel_adaptive = [row for row in pruning_rows if _row_prune_method(row) in {"kneedle", "otsu", "gmm"}]
+    block_adaptive = [row for row in pruning_rows if _row_prune_method(row) in {"middle_kneedle", "middle_otsu", "middle_gmm"}]
+    best_channel = _best_by_dice(channel_adaptive)
+    best_block = _best_by_dice(block_adaptive)
+    if best_channel:
+        rows.append(
+            _table2_entry(
+                best_channel,
+                "Pruning granularity",
+                "Channel-wise (best adaptive)",
+                dataset_timing,
+                raw_method=_row_prune_method(best_channel),
+                source_phase="pruning",
+            )
+        )
+    if best_block:
+        rows.append(
+            _table2_entry(
+                best_block,
+                "Pruning granularity",
+                "Block-level (middle, best adaptive)",
+                dataset_timing,
+                raw_method=_row_prune_method(best_block),
+                source_phase="pruning",
+            )
+        )
+        rows.append(
+            _table2_entry(
+                best_block,
+                "Proposed system",
+                "Proposed (Adaptive + Block)",
+                dataset_timing,
+                raw_method=_row_prune_method(best_block),
+                source_phase="pruning",
+            )
+        )
+
+    best_student = _best_by_dice([row for row in student_rows if _row_prune_method(row) in {"middle_kneedle", "middle_otsu", "middle_gmm"}])
+    if best_student is None:
+        best_student = _best_by_dice(student_rows)
+    if best_student:
+        rows.append(
+            _table2_entry(
+                best_student,
+                "Proposed system",
+                "Proposed + KD",
+                dataset_timing,
+                raw_method=_row_prune_method(best_student),
+                source_phase="student",
+            )
+        )
+    return rows
+
+
 def _tables_for_dataset(dataset: str, metrics: pd.DataFrame, timing: pd.DataFrame) -> Dict[str, pd.DataFrame]:
     dataset_metrics = _test_rows(metrics[metrics["dataset"].astype(str).eq(dataset)]) if not metrics.empty else pd.DataFrame()
     table1_rows = []
-    table2_rows = []
     table3_rows = []
     table4_rows = []
+
+    preferred_sources = {"teacher_metrics.csv", "pruning_metrics.csv", "student_metrics.csv", "basic_metrics.csv"}
+    if "source_file" in dataset_metrics.columns and dataset_metrics["source_file"].isin(preferred_sources).any():
+        dataset_metrics = dataset_metrics[dataset_metrics["source_file"].isin(preferred_sources)].copy()
 
     for _, row_series in dataset_metrics.iterrows():
         row = row_series.to_dict()
         phase = str(row.get("phase") or "").lower()
         model_name = str(row.get("model_name") or row.get("model") or "unknown")
-        prune_method = str(row.get("prune_method") or row.get("config_prune_method") or "").lower()
+        prune_method = _row_prune_method(row)
         if phase == "basic" or (not prune_method and "pgd_unet" not in str(row.get("source_path", ""))):
             table1_rows.append({key: value for key, value in _metric_row(row, "Model", model_name).items() if key in TABLE1_COLUMNS})
-        if prune_method:
-            method_name = prune_method if phase != "student" else f"{prune_method} + KD"
-            table2_rows.append(_metric_row(row, "Method", method_name))
-            if phase == "student":
-                table3_rows.append(_metric_row(row, "Method", _loss_method(row)))
-                table4_rows.append(_metric_row(row, "Component", _component(row)))
+        if prune_method and phase == "student":
+            table3_rows.append(_metric_row(row, "Method", _loss_method(row)))
+            table4_rows.append(_metric_row(row, "Component", _component(row)))
 
     dataset_timing = timing[timing["dataset"].astype(str).eq(dataset)] if not timing.empty else pd.DataFrame()
+    table2_rows = _build_pruning_table2_rows(dataset_metrics, dataset_timing)
     table5_rows = []
     for _, row_series in dataset_timing.iterrows():
         row = row_series.to_dict()
-        method = row.get("method") or row.get("phase") or "unknown"
+        raw_method = _clean_text(row.get("method") or row.get("prune_method") or row.get("phase") or "unknown").lower()
+        method = _method_display(raw_method, row.get("static_prune_ratio", np.nan))
         table5_rows.append(
             {
                 "Method": method,
@@ -292,9 +499,13 @@ def _tables_for_dataset(dataset: str, metrics: pd.DataFrame, timing: pd.DataFram
             }
         )
 
+    table2 = pd.DataFrame(table2_rows)
+    if not table2.empty:
+        table2 = table2.drop_duplicates(subset=["Group", "Method"], keep="first")
+
     return {
         "table1_baseline.csv": _dedupe_best(table1_rows, "Model").reindex(columns=TABLE1_COLUMNS),
-        "table2_pruning.csv": _dedupe_best(table2_rows, "Method").reindex(columns=TABLE2_COLUMNS),
+        "table2_pruning.csv": table2.reindex(columns=TABLE2_COLUMNS),
         "table3_loss.csv": _dedupe_best(table3_rows, "Method").reindex(columns=TABLE3_COLUMNS),
         "table4_ablation.csv": _dedupe_best(table4_rows, "Component").reindex(columns=TABLE4_COLUMNS),
         "table5_computational_cost.csv": _dedupe_best(table5_rows, "Method").reindex(columns=TABLE5_COLUMNS),
