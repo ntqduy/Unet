@@ -1,0 +1,17 @@
+{
+  "checkpoint_path": "outputs/pgd_unet/kvasir_seg/unet_resnet152_teacher/loss_seg_kd_sparsity/output_kneedle_auto_no/3_student/checkpoints/last.pth",
+  "checkpoint_name": "last.pth",
+  "epoch": 50,
+  "global_step": null,
+  "best_metric": 0.9817815451657324,
+  "metrics": {
+    "val_macro_dice": 0.9814456346069853,
+    "val_total_loss": 0.09806367452256382,
+    "val_segmentation_loss": 0.0067416333635760975,
+    "val_distillation_loss": 0.3044067927720872,
+    "val_sparsity_loss": 0.0,
+    "val_feature_distill_loss": 0.0,
+    "val_auxiliary_loss": 0.0
+  },
+  "phase": "student"
+}
