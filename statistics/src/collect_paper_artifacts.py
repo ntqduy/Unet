@@ -14,7 +14,7 @@ MAIN_FIGURES = [
     ("figure5", "{dataset}/figure5_layerwise_pruning_ratio.pdf"),
     ("figure6", "{dataset}/figure6_accuracy_efficiency_tradeoff.pdf"),
     ("figure8", "{dataset}/figure8_visual_comparison.pdf"),
-    ("figure15", "figure15_mean_performance_across_datasets.pdf"),
+    ("figure15", "figure15_params_dice_tradeoff.pdf"),
 ]
 
 APPENDIX_FIGURES = [

@@ -20,6 +20,18 @@ PGD_TEACHER_DIR = "unet_resnet152_teacher"
 PGD_LOSS_TAG = "loss_seg_kd_sparsity"
 CHANNEL_METHODS = {"static", "kneedle", "otsu", "gmm"}
 MIDDLE_METHODS = {"middle_static", "middle_kneedle", "middle_otsu", "middle_gmm"}
+FIGURE15_DATASET = "cvc_clinicdb"
+FIGURE15_METHOD_DIRS = [
+    ("Teacher", Path("1_teacher")),
+    ("Static r=0.5", Path(PGD_LOSS_TAG) / "output_static_0.5_no" / "3_student"),
+    ("Kneedle", Path(PGD_LOSS_TAG) / "output_kneedle_auto_no" / "3_student"),
+    ("Otsu", Path(PGD_LOSS_TAG) / "output_otsu_auto_no" / "3_student"),
+    ("GMM", Path(PGD_LOSS_TAG) / "output_gmm_auto_no" / "3_student"),
+    ("Middle Static", Path(PGD_LOSS_TAG) / "output_middle_static_0.5_no" / "3_student"),
+    ("Middle Kneedle", Path(PGD_LOSS_TAG) / "output_middle_kneedle_auto_no" / "3_student"),
+    ("Middle Otsu", Path(PGD_LOSS_TAG) / "output_middle_otsu_auto_no" / "3_student"),
+    ("Middle GMM", Path(PGD_LOSS_TAG) / "output_middle_gmm_auto_no" / "3_student"),
+]
 
 
 def _safe_float(value, default: float = np.nan) -> float:
@@ -109,6 +121,31 @@ def _read_csv(path: Path) -> pd.DataFrame:
     except Exception as error:
         logging.warning("Cannot read CSV %s | %s", path, error)
         return pd.DataFrame()
+
+
+def _best_test_row(path: Path) -> pd.Series | None:
+    frame = _read_csv(path)
+    if frame.empty:
+        logging.warning("Missing or empty Figure 15 metrics CSV: %s", path)
+        return None
+    if "split" in frame.columns:
+        test_frame = frame[frame["split"].fillna("").astype(str).str.lower().eq("test")]
+        if not test_frame.empty:
+            frame = test_frame
+    if "dice" not in frame.columns:
+        logging.warning("Figure 15 metrics CSV has no dice column: %s", path)
+        return None
+    scores = pd.to_numeric(frame["dice"], errors="coerce").fillna(-np.inf)
+    if scores.empty or float(scores.max()) == -np.inf:
+        return None
+    return frame.loc[scores.idxmax()]
+
+
+def _params_to_millions(value) -> float:
+    number = _safe_float(value)
+    if np.isnan(number):
+        return number
+    return number / 1e6 if abs(number) > 1e5 else number
 
 
 def _dataset_from_path(path: Path, outputs_root: Path) -> str:
@@ -781,25 +818,43 @@ def figure14_cost(dataset_dir: Path) -> None:
     _save_pdf(fig, dataset_dir / "figure14_computational_cost_breakdown.pdf")
 
 
-def figure15(save_root: Path) -> None:
-    table = _read_csv(save_root / "table_mean_std_across_datasets.csv")
-    path = save_root / "figure15_mean_performance_across_datasets.pdf"
-    if table.empty:
-        _placeholder(path, "No mean/std table available.")
+def figure15(outputs_root: Path, save_root: Path, dataset: str = FIGURE15_DATASET) -> None:
+    path = save_root / "figure15_params_dice_tradeoff.pdf"
+    base_root = outputs_root / "pgd_unet" / dataset / PGD_TEACHER_DIR
+    rows = []
+    for label, relative_dir in FIGURE15_METHOD_DIRS:
+        row = _best_test_row(base_root / relative_dir / "metrics_summary.csv")
+        if row is None:
+            continue
+        rows.append(
+            {
+                "Method": label,
+                "Params (M)": _params_to_millions(row.get("params")),
+                "Dice": _safe_float(row.get("dice")),
+            }
+        )
+    frame = pd.DataFrame(rows, columns=["Method", "Params (M)", "Dice"]).dropna(subset=["Params (M)", "Dice"])
+    if frame.empty:
+        _placeholder(path, f"No valid Params/Dice rows found for Figure 15 ({dataset}).")
         return
-    labels = table["Method"].astype(str).tolist()
-    mean = pd.to_numeric(table["Mean Dice"], errors="coerce")
-    std = pd.to_numeric(table["Std Dice"], errors="coerce").fillna(0.0)
-    fig, ax = plt.subplots(figsize=(8, 4.6))
-    ax.bar(np.arange(len(labels)), mean, yerr=std, capsize=3)
-    ax.set_xlabel("Method")
-    ax.set_ylabel("Mean Dice")
-    if len(labels) > 8:
-        ax.set_xticks([])
-    else:
-        ax.set_xticks(np.arange(len(labels)))
-        ax.set_xticklabels(labels, rotation=25, ha="right")
-    ax.grid(alpha=0.25, axis="y")
+
+    x = np.arange(len(frame))
+    labels = frame["Method"].astype(str).tolist()
+    fig_width = max(8.5, min(13.5, 0.72 * len(labels) + 4.0))
+    fig, ax_params = plt.subplots(figsize=(fig_width, 4.8))
+    ax_dice = ax_params.twinx()
+
+    params_line = ax_params.plot(x, frame["Params (M)"], marker="o", linewidth=1.9, color="#4c78a8", label="Params (M)")
+    dice_line = ax_dice.plot(x, frame["Dice"], marker="s", linewidth=1.9, color="#f58518", label="Dice")
+
+    ax_params.set_xlabel("Method")
+    ax_params.set_ylabel("Params (M)")
+    ax_dice.set_ylabel("Dice")
+    ax_params.set_xticks(x)
+    ax_params.set_xticklabels(_wrap_labels(labels, width=13), rotation=25, ha="right", fontsize=8)
+    ax_params.grid(alpha=0.25, axis="y")
+    lines = params_line + dice_line
+    ax_params.legend(lines, [line.get_label() for line in lines], loc="best", fontsize=8, frameon=True, framealpha=0.9)
     _save_pdf(fig, path)
 
 
@@ -842,7 +897,7 @@ def main() -> int:
         _run_figure("figure13_search_time_comparison", dataset_dir / "figure13_search_time_comparison.pdf", figure13_search, dataset_dir)
         _run_figure("figure14_computational_cost_breakdown", dataset_dir / "figure14_computational_cost_breakdown.pdf", figure14_cost, dataset_dir)
 
-    _run_figure("figure15_mean_performance_across_datasets", save_root / "figure15_mean_performance_across_datasets.pdf", figure15, save_root)
+    _run_figure("figure15_params_dice_tradeoff", save_root / "figure15_params_dice_tradeoff.pdf", figure15, outputs_root, save_root)
     return 0
 
 

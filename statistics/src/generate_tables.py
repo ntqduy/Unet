@@ -19,6 +19,26 @@ TABLE2_COLUMNS = ["Group", "Method", *PERFORMANCE_COLUMNS, "Source Phase", "Raw 
 TABLE3_COLUMNS = ["Method", *PERFORMANCE_COLUMNS]
 TABLE4_COLUMNS = ["Component", "Dice", "IoU", "HD95", "Params", "FLOPs", "FPS", "Inf (s)", "Search Time (s)"]
 TABLE5_COLUMNS = ["Method", "Pruning Time (s)", "Search Time (s)", "Training Time (s)", "Inference Time (s)", "Total Time (s)"]
+TABLE6_COLUMNS = [
+    "Phương pháp",
+    "Dice $\\uparrow$",
+    "IoU $\\uparrow$",
+    "HD95 $\\downarrow$",
+    "Params (M)",
+    "FPS $\\uparrow$",
+    "Inf (s) $\\downarrow$",
+]
+TABLE6_METHOD_DIRS = [
+    ("Giáo viên (UNet-ResNet152)", Path("1_teacher")),
+    ("Static pruning r = 0.5", Path("loss_seg_kd_sparsity") / "output_static_0.5_no" / "3_student"),
+    ("Kneedle", Path("loss_seg_kd_sparsity") / "output_kneedle_auto_no" / "3_student"),
+    ("Otsu", Path("loss_seg_kd_sparsity") / "output_otsu_auto_no" / "3_student"),
+    ("GMM", Path("loss_seg_kd_sparsity") / "output_gmm_auto_no" / "3_student"),
+    ("Middle Static Pruning", Path("loss_seg_kd_sparsity") / "output_middle_static_0.5_no" / "3_student"),
+    ("Middle Kneedle", Path("loss_seg_kd_sparsity") / "output_middle_kneedle_auto_no" / "3_student"),
+    ("Middle Otsu", Path("loss_seg_kd_sparsity") / "output_middle_otsu_auto_no" / "3_student"),
+    ("Middle GMM", Path("loss_seg_kd_sparsity") / "output_middle_gmm_auto_no" / "3_student"),
+]
 MEAN_STD_COLUMNS = [
     "Method",
     "Mean Dice",
@@ -314,6 +334,64 @@ def _metric_row(row: Dict[str, Any], name_key: str, name: str) -> Dict[str, Any]
         "Inf (s)": _safe_float(row.get("inference_time_seconds", row.get("Inf (s)"))),
         "Search Time (s)": _safe_float(row.get("search_time_seconds", row.get("Search Time (s)"))),
     }
+
+
+def _params_to_millions(value: Any) -> float:
+    number = _safe_float(value)
+    if np.isnan(number):
+        return number
+    return number / 1e6 if abs(number) > 1e5 else number
+
+
+def _best_test_row_from_csv(csv_path: Path) -> Dict[str, Any] | None:
+    if not csv_path.is_file():
+        logging.warning("Missing Table 6 metrics CSV: %s", csv_path)
+        return None
+    try:
+        frame = pd.read_csv(csv_path)
+    except Exception as error:
+        logging.warning("Cannot read Table 6 metrics CSV: %s | %s", csv_path, error)
+        return None
+    if frame.empty:
+        logging.warning("Table 6 metrics CSV is empty: %s", csv_path)
+        return None
+    if "split" in frame.columns:
+        test_frame = frame[frame["split"].fillna("").astype(str).str.lower().eq("test")]
+        if not test_frame.empty:
+            frame = test_frame
+    rows = [row.to_dict() for _, row in frame.iterrows()]
+    return _best_by_dice(rows)
+
+
+def _table6_row(method: str, row: Dict[str, Any] | None) -> Dict[str, Any]:
+    if row is None:
+        return {
+            "Phương pháp": method,
+            "Dice $\\uparrow$": np.nan,
+            "IoU $\\uparrow$": np.nan,
+            "HD95 $\\downarrow$": np.nan,
+            "Params (M)": np.nan,
+            "FPS $\\uparrow$": np.nan,
+            "Inf (s) $\\downarrow$": np.nan,
+        }
+    return {
+        "Phương pháp": method,
+        "Dice $\\uparrow$": _safe_float(row.get("dice")),
+        "IoU $\\uparrow$": _safe_float(row.get("iou")),
+        "HD95 $\\downarrow$": _safe_float(row.get("hd95")),
+        "Params (M)": _params_to_millions(row.get("params")),
+        "FPS $\\uparrow$": _safe_float(row.get("fps")),
+        "Inf (s) $\\downarrow$": _safe_float(row.get("inference_time_seconds", row.get("Inf (s)"))),
+    }
+
+
+def _table6_method_comparison(outputs_root: Path, dataset: str) -> pd.DataFrame:
+    base_root = outputs_root / "pgd_unet" / dataset / PGD_TEACHER_DIR
+    rows = []
+    for method, relative_dir in TABLE6_METHOD_DIRS:
+        metrics_path = base_root / relative_dir / "metrics_summary.csv"
+        rows.append(_table6_row(method, _best_test_row_from_csv(metrics_path)))
+    return pd.DataFrame(rows).reindex(columns=TABLE6_COLUMNS)
 
 
 def _loss_method(row: Dict[str, Any]) -> str:
@@ -648,6 +726,7 @@ def main() -> int:
         dataset_dir.mkdir(parents=True, exist_ok=True)
         logging.info("Processing tables for dataset: %s -> %s", dataset, dataset_dir)
         tables = _tables_for_dataset(dataset, metrics, timing)
+        tables["table6_method_comparison.csv"] = _table6_method_comparison(outputs_root, dataset)
         for filename, table in tables.items():
             output_path = dataset_dir / filename
             logging.info("Processing table: %s rows=%d -> %s", filename, len(table), output_path)
