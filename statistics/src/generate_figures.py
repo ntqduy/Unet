@@ -863,20 +863,24 @@ def figure15(outputs_root: Path, save_root: Path, dataset: str = FIGURE15_DATASE
     if frame.empty:
         _placeholder(path, f"No valid Params/Dice rows found for Figure 15 ({dataset}).")
         return
-    frame = frame.sort_values(["Params (M)", "Dice"], ascending=[True, False]).reset_index(drop=True)
 
-    x = frame["Params (M)"].to_numpy(dtype=float)
-    labels = [f"{params:.2f}\n({method})" for params, method in zip(frame["Params (M)"], frame["Method"].astype(str))]
+    x = np.arange(len(frame))
+    labels = frame["Method"].astype(str).tolist()
     fig_width = max(8.5, min(13.5, 0.72 * len(labels) + 4.0))
-    fig, ax = plt.subplots(figsize=(fig_width, 4.8))
-    ax.plot(x, frame["Dice"], marker="o", linewidth=1.9, color="#4c78a8")
-    ax.set_xlabel("Params (M) (method)")
-    ax.set_ylabel("Dice")
-    ax.set_xticks(x)
-    ax.set_xticklabels(labels, rotation=25, ha="right", fontsize=8)
-    ax.grid(alpha=0.25)
-    for params, dice in zip(frame["Params (M)"], frame["Dice"]):
-        ax.annotate(f"{dice:.4f}", (params, dice), xytext=(0, 7), textcoords="offset points", ha="center", fontsize=7)
+    fig, ax_params = plt.subplots(figsize=(fig_width, 4.8))
+    ax_dice = ax_params.twinx()
+
+    params_line = ax_params.plot(x, frame["Params (M)"], marker="o", linewidth=1.9, color="#4c78a8", label="Params (M)")
+    dice_line = ax_dice.plot(x, frame["Dice"], marker="s", linewidth=1.9, color="#f58518", label="Dice")
+
+    ax_params.set_xlabel("Method")
+    ax_params.set_ylabel("Params (M)")
+    ax_dice.set_ylabel("Dice")
+    ax_params.set_xticks(x)
+    ax_params.set_xticklabels(_wrap_labels(labels, width=13), rotation=25, ha="right", fontsize=8)
+    ax_params.grid(alpha=0.25, axis="y")
+    lines = params_line + dice_line
+    ax_params.legend(lines, [line.get_label() for line in lines], loc="best", fontsize=8, frameon=True, framealpha=0.9)
     _save_pdf(fig, path)
 
 
