@@ -386,11 +386,24 @@ def figure6_tradeoff(dataset_dir: Path) -> None:
     if frame.empty:
         _placeholder(path, "No table metrics available for trade-off figure.")
         return
-    x_col = "FLOPs" if "FLOPs" in frame.columns and pd.to_numeric(frame["FLOPs"], errors="coerce").notna().any() else "Params"
+    method_col = "Method" if "Method" in frame.columns else "Phương pháp" if "Phương pháp" in frame.columns else frame.columns[0]
+    dice_col = "Dice" if "Dice" in frame.columns else "Dice $\\uparrow$"
+    if dice_col not in frame.columns:
+        _placeholder(path, "No Dice column available for trade-off figure.")
+        return
+    if "FLOPs" in frame.columns and pd.to_numeric(frame["FLOPs"], errors="coerce").notna().any():
+        x_col = "FLOPs"
+    elif "Params" in frame.columns:
+        x_col = "Params"
+    else:
+        x_col = "Params (M)"
+    if x_col not in frame.columns:
+        _placeholder(path, "No Params/FLOPs column available for trade-off figure.")
+        return
     x_values = pd.to_numeric(frame[x_col], errors="coerce")
-    scale = 1e6 if x_values.max(skipna=True) > 1e5 else 1.0
+    scale = 1e6 if x_col != "Params (M)" and x_values.max(skipna=True) > 1e5 else 1.0
     xlabel = f"{x_col} (M)" if scale == 1e6 else x_col
-    frame = frame.assign(_x=x_values / scale, _y=pd.to_numeric(frame["Dice"], errors="coerce"))
+    frame = frame.assign(_x=x_values / scale, _y=pd.to_numeric(frame[dice_col], errors="coerce"))
     frame = frame.dropna(subset=["_x", "_y"])
     if frame.empty:
         _placeholder(path, "No valid Dice/efficiency values available for trade-off figure.")
@@ -402,12 +415,12 @@ def figure6_tradeoff(dataset_dir: Path) -> None:
         ax.scatter(group_frame["_x"], group_frame["_y"], s=52, alpha=0.88, label=group)
 
     label_candidates = frame[
-        frame["Method"].astype(str).str.contains("Teacher|Proposed \\+ KD|Channel-wise|Block-level", regex=True, case=False, na=False)
+        frame[method_col].astype(str).str.contains("Teacher|Giáo viên|GMM|Middle", regex=True, case=False, na=False)
     ]
     for offset_index, (_, row) in enumerate(label_candidates.iterrows()):
         offset = (6, 6 + 5 * (offset_index % 2))
         ax.annotate(
-            str(row.get("Method", ""))[:28],
+            str(row.get(method_col, ""))[:28],
             (row["_x"], row["_y"]),
             fontsize=7,
             xytext=offset,
@@ -415,8 +428,8 @@ def figure6_tradeoff(dataset_dir: Path) -> None:
             arrowprops={"arrowstyle": "-", "lw": 0.6, "alpha": 0.55},
         )
 
-    teacher = frame[frame["Method"].astype(str).str.contains("Teacher", case=False, na=False)]
-    proposed = frame[frame["Method"].astype(str).str.contains("Proposed \\+ KD", regex=True, case=False, na=False)]
+    teacher = frame[frame[method_col].astype(str).str.contains("Teacher|Giáo viên", regex=True, case=False, na=False)]
+    proposed = frame[frame[method_col].astype(str).str.contains("Middle GMM|GMM", regex=True, case=False, na=False)]
     if not teacher.empty and not proposed.empty:
         src = teacher.iloc[0]
         dst = proposed.sort_values("_y", ascending=False, na_position="last").iloc[0]
@@ -837,24 +850,20 @@ def figure15(outputs_root: Path, save_root: Path, dataset: str = FIGURE15_DATASE
     if frame.empty:
         _placeholder(path, f"No valid Params/Dice rows found for Figure 15 ({dataset}).")
         return
+    frame = frame.sort_values(["Params (M)", "Dice"], ascending=[True, False]).reset_index(drop=True)
 
-    x = np.arange(len(frame))
-    labels = frame["Method"].astype(str).tolist()
+    x = frame["Params (M)"].to_numpy(dtype=float)
+    labels = [f"{params:.2f}\n({method})" for params, method in zip(frame["Params (M)"], frame["Method"].astype(str))]
     fig_width = max(8.5, min(13.5, 0.72 * len(labels) + 4.0))
-    fig, ax_params = plt.subplots(figsize=(fig_width, 4.8))
-    ax_dice = ax_params.twinx()
-
-    params_line = ax_params.plot(x, frame["Params (M)"], marker="o", linewidth=1.9, color="#4c78a8", label="Params (M)")
-    dice_line = ax_dice.plot(x, frame["Dice"], marker="s", linewidth=1.9, color="#f58518", label="Dice")
-
-    ax_params.set_xlabel("Method")
-    ax_params.set_ylabel("Params (M)")
-    ax_dice.set_ylabel("Dice")
-    ax_params.set_xticks(x)
-    ax_params.set_xticklabels(_wrap_labels(labels, width=13), rotation=25, ha="right", fontsize=8)
-    ax_params.grid(alpha=0.25, axis="y")
-    lines = params_line + dice_line
-    ax_params.legend(lines, [line.get_label() for line in lines], loc="best", fontsize=8, frameon=True, framealpha=0.9)
+    fig, ax = plt.subplots(figsize=(fig_width, 4.8))
+    ax.plot(x, frame["Dice"], marker="o", linewidth=1.9, color="#4c78a8")
+    ax.set_xlabel("Params (M) (method)")
+    ax.set_ylabel("Dice")
+    ax.set_xticks(x)
+    ax.set_xticklabels(labels, rotation=25, ha="right", fontsize=8)
+    ax.grid(alpha=0.25)
+    for params, dice in zip(frame["Params (M)"], frame["Dice"]):
+        ax.annotate(f"{dice:.4f}", (params, dice), xytext=(0, 7), textcoords="offset points", ha="center", fontsize=7)
     _save_pdf(fig, path)
 
 

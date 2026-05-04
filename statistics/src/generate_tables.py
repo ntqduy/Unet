@@ -15,7 +15,6 @@ except ImportError as error:  # pragma: no cover - dependency guard
 
 TABLE1_COLUMNS = ["Model", "Dice", "IoU", "HD95", "Params", "FLOPs", "FPS", "Inf (s)"]
 PERFORMANCE_COLUMNS = ["Dice", "IoU", "HD95", "Params", "FLOPs", "FPS", "Inf (s)", "Search Time (s)"]
-TABLE2_COLUMNS = ["Group", "Method", *PERFORMANCE_COLUMNS, "Source Phase", "Raw Method", "Static Ratio"]
 TABLE3_COLUMNS = ["Method", *PERFORMANCE_COLUMNS]
 TABLE4_COLUMNS = ["Component", "Dice", "IoU", "HD95", "Params", "FLOPs", "FPS", "Inf (s)", "Search Time (s)"]
 TABLE5_COLUMNS = ["Method", "Pruning Time (s)", "Search Time (s)", "Training Time (s)", "Inference Time (s)", "Total Time (s)"]
@@ -27,6 +26,18 @@ TABLE6_COLUMNS = [
     "Params (M)",
     "FPS $\\uparrow$",
     "Inf (s) $\\downarrow$",
+]
+TABLE2_COLUMNS = TABLE6_COLUMNS
+TABLE2_METHOD_DIRS = [
+    ("Giáo viên (UNet-ResNet152)", Path("1_teacher")),
+    ("Static pruning r = 0.5", Path("loss_seg_kd_sparsity") / "output_static_0.5_no" / "2_pruning"),
+    ("Kneedle", Path("loss_seg_kd_sparsity") / "output_kneedle_auto_no" / "2_pruning"),
+    ("Otsu", Path("loss_seg_kd_sparsity") / "output_otsu_auto_no" / "2_pruning"),
+    ("GMM", Path("loss_seg_kd_sparsity") / "output_gmm_auto_no" / "2_pruning"),
+    ("Middle Static Pruning", Path("loss_seg_kd_sparsity") / "output_middle_static_0.5_no" / "2_pruning"),
+    ("Middle Kneedle", Path("loss_seg_kd_sparsity") / "output_middle_kneedle_auto_no" / "2_pruning"),
+    ("Middle Otsu", Path("loss_seg_kd_sparsity") / "output_middle_otsu_auto_no" / "2_pruning"),
+    ("Middle GMM", Path("loss_seg_kd_sparsity") / "output_middle_gmm_auto_no" / "2_pruning"),
 ]
 TABLE6_METHOD_DIRS = [
     ("Giáo viên (UNet-ResNet152)", Path("1_teacher")),
@@ -394,6 +405,15 @@ def _table6_method_comparison(outputs_root: Path, dataset: str) -> pd.DataFrame:
     return pd.DataFrame(rows).reindex(columns=TABLE6_COLUMNS)
 
 
+def _table2_pruning_method_comparison(outputs_root: Path, dataset: str) -> pd.DataFrame:
+    base_root = outputs_root / "pgd_unet" / dataset / PGD_TEACHER_DIR
+    rows = []
+    for method, relative_dir in TABLE2_METHOD_DIRS:
+        metrics_path = base_root / relative_dir / "metrics_summary.csv"
+        rows.append(_table6_row(method, _best_test_row_from_csv(metrics_path)))
+    return pd.DataFrame(rows).reindex(columns=TABLE2_COLUMNS)
+
+
 def _loss_method(row: Dict[str, Any]) -> str:
     display_name = str(row.get("loss_method") or row.get("config_loss_method") or row.get("distill_loss_method") or row.get("config_distill_loss_method") or "").strip()
     if display_name and display_name.lower() != "nan":
@@ -726,6 +746,7 @@ def main() -> int:
         dataset_dir.mkdir(parents=True, exist_ok=True)
         logging.info("Processing tables for dataset: %s -> %s", dataset, dataset_dir)
         tables = _tables_for_dataset(dataset, metrics, timing)
+        tables["table2_pruning.csv"] = _table2_pruning_method_comparison(outputs_root, dataset)
         tables["table6_method_comparison.csv"] = _table6_method_comparison(outputs_root, dataset)
         for filename, table in tables.items():
             output_path = dataset_dir / filename
