@@ -21,7 +21,7 @@ PGD_LOSS_TAG = "loss_seg_kd_sparsity"
 CHANNEL_METHODS = {"static", "kneedle", "otsu", "gmm"}
 MIDDLE_METHODS = {"middle_static", "middle_kneedle", "middle_otsu", "middle_gmm"}
 FIGURE15_DATASET = "cvc_clinicdb"
-FIGURE15_METHOD_DIRS = [
+FIGURE15_FALLBACK_METHOD_DIRS = [
     ("Teacher", Path("1_teacher")),
     ("Static r=0.5", Path(PGD_LOSS_TAG) / "output_static_0.5_no" / "3_student"),
     ("Kneedle", Path(PGD_LOSS_TAG) / "output_kneedle_auto_no" / "3_student"),
@@ -146,6 +146,51 @@ def _params_to_millions(value) -> float:
     if np.isnan(number):
         return number
     return number / 1e6 if abs(number) > 1e5 else number
+
+
+def _method_sort_key(raw_method: str, ratio: float) -> tuple[int, float, str]:
+    priorities = {
+        "static": 0,
+        "kneedle": 1,
+        "otsu": 2,
+        "gmm": 3,
+        "middle_static": 4,
+        "middle_kneedle": 5,
+        "middle_otsu": 6,
+        "middle_gmm": 7,
+    }
+    method = str(raw_method or "").lower()
+    ratio_key = _safe_float(ratio)
+    if np.isnan(ratio_key):
+        ratio_key = float("inf")
+    return priorities.get(method, 99), ratio_key, method
+
+
+def _figure15_method_dirs(outputs_root: Path, dataset: str) -> List[tuple[str, Path]]:
+    base_root = outputs_root / "pgd_unet" / dataset / PGD_TEACHER_DIR
+    loss_root = base_root / PGD_LOSS_TAG
+    if not loss_root.is_dir():
+        return FIGURE15_FALLBACK_METHOD_DIRS
+
+    discovered = []
+    for output_dir in loss_root.iterdir():
+        if not output_dir.is_dir() or not output_dir.name.startswith("output_"):
+            continue
+        raw_method, ratio = _method_from_output_dir(output_dir)
+        discovered.append(
+            (
+                _method_sort_key(raw_method, ratio),
+                _display_method(raw_method, ratio),
+                Path(PGD_LOSS_TAG) / output_dir.name / "3_student",
+            )
+        )
+    if not discovered:
+        return FIGURE15_FALLBACK_METHOD_DIRS
+
+    discovered = sorted(discovered, key=lambda item: item[0])
+    method_dirs = [("Teacher", Path("1_teacher"))]
+    method_dirs.extend((label, relative_dir) for _, label, relative_dir in discovered)
+    return method_dirs
 
 
 def _method_column(frame: pd.DataFrame) -> str | None:
@@ -848,7 +893,7 @@ def figure15(outputs_root: Path, save_root: Path, dataset: str = FIGURE15_DATASE
     path = save_root / "figure15_params_dice_tradeoff.pdf"
     base_root = outputs_root / "pgd_unet" / dataset / PGD_TEACHER_DIR
     rows = []
-    for label, relative_dir in FIGURE15_METHOD_DIRS:
+    for label, relative_dir in _figure15_method_dirs(outputs_root, dataset):
         row = _best_test_row(base_root / relative_dir / "metrics_summary.csv")
         if row is None:
             continue
