@@ -18,6 +18,16 @@ PERFORMANCE_COLUMNS = ["Dice", "IoU", "HD95", "Params", "FLOPs", "FPS", "Inf (s)
 TABLE3_COLUMNS = ["Method", *PERFORMANCE_COLUMNS]
 TABLE4_COLUMNS = ["Component", "Dice", "IoU", "HD95", "Params", "FLOPs", "FPS", "Inf (s)", "Search Time (s)"]
 TABLE5_COLUMNS = ["Method", "Pruning Time (s)", "Search Time (s)", "Training Time (s)", "Inference Time (s)", "Total Time (s)"]
+TABLE5_METHOD_DIRS = [
+    ("Static pruning r = 0.5", Path("loss_seg_kd_sparsity") / "output_static_0.5_no" / "3_student"),
+    ("Kneedle", Path("loss_seg_kd_sparsity") / "output_kneedle_auto_no" / "3_student"),
+    ("Otsu", Path("loss_seg_kd_sparsity") / "output_otsu_auto_no" / "3_student"),
+    ("GMM", Path("loss_seg_kd_sparsity") / "output_gmm_auto_no" / "3_student"),
+    ("Middle Static Pruning (r = 0.5)", Path("loss_seg_kd_sparsity") / "output_middle_static_0.5_no" / "3_student"),
+    ("Middle Kneedle", Path("loss_seg_kd_sparsity") / "output_middle_kneedle_auto_no" / "3_student"),
+    ("Middle Otsu", Path("loss_seg_kd_sparsity") / "output_middle_otsu_auto_no" / "3_student"),
+    ("Middle GMM", Path("loss_seg_kd_sparsity") / "output_middle_gmm_auto_no" / "3_student"),
+]
 TABLE6_COLUMNS = [
     "Phương pháp",
     "Dice $\\uparrow$",
@@ -34,7 +44,7 @@ TABLE2_METHOD_DIRS = [
     ("Kneedle", Path("loss_seg_kd_sparsity") / "output_kneedle_auto_no" / "2_pruning"),
     ("Otsu", Path("loss_seg_kd_sparsity") / "output_otsu_auto_no" / "2_pruning"),
     ("GMM", Path("loss_seg_kd_sparsity") / "output_gmm_auto_no" / "2_pruning"),
-    ("Middle Static Pruning", Path("loss_seg_kd_sparsity") / "output_middle_static_0.5_no" / "2_pruning"),
+    ("Middle Static Pruning (r = 0.5)", Path("loss_seg_kd_sparsity") / "output_middle_static_0.5_no" / "2_pruning"),
     ("Middle Kneedle", Path("loss_seg_kd_sparsity") / "output_middle_kneedle_auto_no" / "2_pruning"),
     ("Middle Otsu", Path("loss_seg_kd_sparsity") / "output_middle_otsu_auto_no" / "2_pruning"),
     ("Middle GMM", Path("loss_seg_kd_sparsity") / "output_middle_gmm_auto_no" / "2_pruning"),
@@ -45,7 +55,7 @@ TABLE6_METHOD_DIRS = [
     ("Kneedle", Path("loss_seg_kd_sparsity") / "output_kneedle_auto_no" / "3_student"),
     ("Otsu", Path("loss_seg_kd_sparsity") / "output_otsu_auto_no" / "3_student"),
     ("GMM", Path("loss_seg_kd_sparsity") / "output_gmm_auto_no" / "3_student"),
-    ("Middle Static Pruning", Path("loss_seg_kd_sparsity") / "output_middle_static_0.5_no" / "3_student"),
+    ("Middle Static Pruning (r = 0.5)", Path("loss_seg_kd_sparsity") / "output_middle_static_0.5_no" / "3_student"),
     ("Middle Kneedle", Path("loss_seg_kd_sparsity") / "output_middle_kneedle_auto_no" / "3_student"),
     ("Middle Otsu", Path("loss_seg_kd_sparsity") / "output_middle_otsu_auto_no" / "3_student"),
     ("Middle GMM", Path("loss_seg_kd_sparsity") / "output_middle_gmm_auto_no" / "3_student"),
@@ -405,6 +415,54 @@ def _table6_method_comparison(outputs_root: Path, dataset: str) -> pd.DataFrame:
     return pd.DataFrame(rows).reindex(columns=TABLE6_COLUMNS)
 
 
+def _timing_row(method: str, row: Dict[str, Any] | None) -> Dict[str, Any]:
+    if row is None:
+        return {
+            "Method": method,
+            "Pruning Time (s)": np.nan,
+            "Search Time (s)": np.nan,
+            "Training Time (s)": np.nan,
+            "Inference Time (s)": np.nan,
+            "Total Time (s)": np.nan,
+        }
+    return {
+        "Method": method,
+        "Pruning Time (s)": _safe_float(row.get("pruning_time_seconds")),
+        "Search Time (s)": _safe_float(row.get("search_time_seconds")),
+        "Training Time (s)": _safe_float(row.get("training_time_seconds")),
+        "Inference Time (s)": _safe_float(row.get("inference_time_seconds")),
+        "Total Time (s)": _safe_float(row.get("total_time_seconds")),
+    }
+
+
+def _first_timing_row_from_csv(csv_path: Path) -> Dict[str, Any] | None:
+    if not csv_path.is_file():
+        logging.warning("Missing Table 5 timing CSV: %s", csv_path)
+        return None
+    try:
+        frame = pd.read_csv(csv_path)
+    except Exception as error:
+        logging.warning("Cannot read Table 5 timing CSV: %s | %s", csv_path, error)
+        return None
+    if frame.empty:
+        logging.warning("Table 5 timing CSV is empty: %s", csv_path)
+        return None
+    if "phase" in frame.columns:
+        student_frame = frame[frame["phase"].fillna("").astype(str).str.lower().eq("student")]
+        if not student_frame.empty:
+            frame = student_frame
+    return frame.iloc[0].to_dict()
+
+
+def _table5_timing_method_comparison(outputs_root: Path, dataset: str) -> pd.DataFrame:
+    base_root = outputs_root / "pgd_unet" / dataset / PGD_TEACHER_DIR
+    rows = []
+    for method, relative_dir in TABLE5_METHOD_DIRS:
+        timing_path = base_root / relative_dir / "timing_summary.csv"
+        rows.append(_timing_row(method, _first_timing_row_from_csv(timing_path)))
+    return pd.DataFrame(rows).reindex(columns=TABLE5_COLUMNS)
+
+
 def _table2_pruning_method_comparison(outputs_root: Path, dataset: str) -> pd.DataFrame:
     base_root = outputs_root / "pgd_unet" / dataset / PGD_TEACHER_DIR
     rows = []
@@ -747,6 +805,7 @@ def main() -> int:
         logging.info("Processing tables for dataset: %s -> %s", dataset, dataset_dir)
         tables = _tables_for_dataset(dataset, metrics, timing)
         tables["table2_pruning.csv"] = _table2_pruning_method_comparison(outputs_root, dataset)
+        tables["table5_computational_cost.csv"] = _table5_timing_method_comparison(outputs_root, dataset)
         tables["table6_method_comparison.csv"] = _table6_method_comparison(outputs_root, dataset)
         for filename, table in tables.items():
             output_path = dataset_dir / filename

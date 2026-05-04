@@ -68,7 +68,7 @@ def _display_method(raw_method: str, ratio=np.nan) -> str:
     if raw_method == "static":
         return f"Static r={_fmt_ratio(ratio)}"
     if raw_method == "middle_static":
-        return f"Middle static r={_fmt_ratio(ratio)}"
+        return f"Middle Static Pruning (r = {_fmt_ratio(ratio)})"
     return mapping.get(raw_method, raw_method.replace("_", " ").title())
 
 
