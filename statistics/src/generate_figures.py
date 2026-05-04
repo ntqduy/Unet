@@ -929,6 +929,49 @@ def figure15(outputs_root: Path, save_root: Path, dataset: str = FIGURE15_DATASE
     _save_pdf(fig, path)
 
 
+def figure16(outputs_root: Path, save_root: Path, dataset: str = "cvc_clinicdb") -> None:
+    path = save_root / "figure16_performance_clinicdb.pdf"
+    base_root = outputs_root / "pgd_unet" / dataset / PGD_TEACHER_DIR
+    rows = []
+    for label, relative_dir in _figure15_method_dirs(outputs_root, dataset):
+        metrics_path = base_root / relative_dir / "metrics_summary.csv"
+        row = _best_test_row(metrics_path)
+        if row is None:
+            continue
+        rows.append(
+            {
+                "Method": label,
+                "Params (M)": _params_to_millions(row.get("params")),
+                "Dice": _safe_float(row.get("dice")),
+            }
+        )
+
+    frame = pd.DataFrame(rows, columns=["Method", "Params (M)", "Dice"]).dropna(subset=["Params (M)", "Dice"])
+    logging.info("Figure 16 clinicdb rows loaded: %d", len(frame))
+    if frame.empty:
+        _placeholder(path, f"No valid Params/Dice rows found for Figure 16 ({dataset}).")
+        return
+
+    x = np.arange(len(frame))
+    labels = frame["Method"].astype(str).tolist()
+    fig_width = max(9.5, min(16.0, 0.78 * len(labels) + 4.0))
+    fig, ax_params = plt.subplots(figsize=(fig_width, 5.0))
+    ax_dice = ax_params.twinx()
+
+    params_line = ax_params.plot(x, frame["Params (M)"], marker="o", linewidth=1.9, color="#4c78a8", label="Params (M)")
+    dice_line = ax_dice.plot(x, frame["Dice"], marker="s", linewidth=1.9, color="#f58518", label="Dice")
+
+    ax_params.set_xlabel("Method")
+    ax_params.set_ylabel("Params (M)")
+    ax_dice.set_ylabel("Dice")
+    ax_params.set_xticks(x)
+    ax_params.set_xticklabels(_wrap_labels(labels, width=13), rotation=25, ha="right", fontsize=8)
+    ax_params.grid(alpha=0.25, axis="y")
+    lines = params_line + dice_line
+    ax_params.legend(lines, [line.get_label() for line in lines], loc="best", fontsize=8, frameon=True, framealpha=0.9)
+    _save_pdf(fig, path)
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Generate paper-ready PDF figures from outputs/statistics tables.")
     parser.add_argument("--outputs-root", type=str, default="outputs")
@@ -969,6 +1012,7 @@ def main() -> int:
         _run_figure("figure14_computational_cost_breakdown", dataset_dir / "figure14_computational_cost_breakdown.pdf", figure14_cost, dataset_dir)
 
     _run_figure("figure15_params_dice_tradeoff", save_root / "figure15_params_dice_tradeoff.pdf", figure15, outputs_root, save_root)
+    _run_figure("figure16_performance_clinicdb", save_root / "figure16_performance_clinicdb.pdf", figure16, outputs_root, save_root)
     return 0
 
 

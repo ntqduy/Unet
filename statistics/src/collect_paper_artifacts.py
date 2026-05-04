@@ -15,6 +15,7 @@ MAIN_FIGURES = [
     ("figure6", "{dataset}/figure6_accuracy_efficiency_tradeoff.pdf"),
     ("figure8", "{dataset}/figure8_visual_comparison.pdf"),
     ("figure15", "figure15_params_dice_tradeoff.pdf"),
+    ("figure16", "figure16_performance_clinicdb.pdf"),
 ]
 
 APPENDIX_FIGURES = [
