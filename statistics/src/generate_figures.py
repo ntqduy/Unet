@@ -148,6 +148,13 @@ def _params_to_millions(value) -> float:
     return number / 1e6 if abs(number) > 1e5 else number
 
 
+def _method_column(frame: pd.DataFrame) -> str | None:
+    for column in ("Method", "Phương pháp", "PhÆ°Æ¡ng phÃ¡p"):
+        if column in frame.columns:
+            return column
+    return str(frame.columns[0]) if len(frame.columns) else None
+
+
 def _dataset_from_path(path: Path, outputs_root: Path) -> str:
     try:
         parts = path.relative_to(outputs_root).parts
@@ -779,18 +786,24 @@ def figure11_12(outputs_root: Path, dataset: str, dataset_dir: Path) -> None:
 
 
 def figure13_search(dataset_dir: Path) -> None:
-    table = _read_csv(dataset_dir / "table2_pruning.csv")
+    table = _read_csv(dataset_dir / "table5_computational_cost.csv")
     if table.empty:
-        _placeholder(dataset_dir / "figure13_search_time_comparison.pdf", "No pruning table available for search-time figure.")
+        _placeholder(dataset_dir / "figure13_search_time_comparison.pdf", "No timing table available for search-time figure.")
         return
-    table = table[~table.get("Group", pd.Series([""] * len(table))).astype(str).eq("Reference")].copy()
+    method_col = _method_column(table)
+    if method_col is None or "Search Time (s)" not in table.columns:
+        _placeholder(dataset_dir / "figure13_search_time_comparison.pdf", "No Method/Search Time columns available for search-time figure.")
+        return
+    values = pd.to_numeric(table["Search Time (s)"], errors="coerce").fillna(0.0)
+    table = table.assign(_search_time=values)
+    table = table[table["_search_time"].gt(0.0)].copy()
     if table.empty:
-        _placeholder(dataset_dir / "figure13_search_time_comparison.pdf", "No pruning rows available for search-time figure.")
+        _placeholder(dataset_dir / "figure13_search_time_comparison.pdf", "No non-zero search-time rows available for search-time figure.")
         return
-    labels = table["Method"].astype(str).tolist()
+    labels = table[method_col].astype(str).tolist()
     fig_width = max(7.5, min(13.5, 0.65 * len(labels) + 4.0))
     fig, ax = plt.subplots(figsize=(fig_width, 4.5))
-    values = pd.to_numeric(table["Search Time (s)"], errors="coerce").fillna(0.0)
+    values = table["_search_time"]
     ax.bar(np.arange(len(labels)), values, color="#4c78a8")
     ax.set_xlabel("Method")
     ax.set_ylabel("Search Time (s)")
