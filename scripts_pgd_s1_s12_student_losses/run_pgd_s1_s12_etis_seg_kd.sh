@@ -1,7 +1,7 @@
 #!/bin/bash
 
 DATASET_KEY="etis"
-ROOT_PATH="data/ETIS-LaribPolypDB"
+ROOT_PATH="data/ETIS"
 EXP_NAME="pgd_etis"
 
 # Student loss: segmentation + teacher output distillation/KD.
