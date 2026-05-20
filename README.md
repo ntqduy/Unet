@@ -1047,6 +1047,19 @@ bash scripts_pgd_s1_s12_student_losses/run_pgd_s1_s12_kvasir_seg_seg_only.sh
 bash scripts_pgd_s1_s12_student_losses/run_pgd_s1_s12_kvasir_seg_seg_kd.sh
 ```
 
+Co the chia S-runs hoac basic models len nhieu GPU bang `DEVICE`:
+
+```bash
+DEVICE="0 1" bash scripts_pgd_s1_s12_student_losses/run_pgd_s1_s12_kvasir_seg_seg_kd.sh
+DEVICE="0 1" bash scripts_basic_models/run_basic_models_kvasir_seg.sh
+```
+
+Voi PGD, run dau tien se chay tuan tu de tao/reuse teacher checkpoint, sau do cac S tiep theo moi chay song song theo danh sach GPU. Neu teacher da co san, co the bo buoc nay:
+
+```bash
+DEVICE="0 1" PGD_TEACHER_PREPARE_FIRST=0 bash scripts_pgd_s1_s12_student_losses/run_pgd_s1_s12_kvasir_seg_seg_kd.sh
+```
+
 Wrapper này gọi lại `train_basic_model.py`, nên output vẫn nằm trong cấu trúc cũ:
 
 ```text

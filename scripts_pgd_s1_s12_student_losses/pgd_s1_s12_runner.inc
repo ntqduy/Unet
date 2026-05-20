@@ -21,6 +21,39 @@ TEACHER_OUTPUT_ROOT="${TEACHER_OUTPUT_ROOT:-$OUTPUT_ROOT}"
 # Override STEP3_PRUNING=1 and set STEP3_PRUNING_EPOCHS>0 only when needed.
 STEP3_PRUNING="${STEP3_PRUNING:-0}"
 
+# DEVICE can be one GPU id ("0") or multiple ids ("0 1 2 3").
+# With multiple ids, each PGD strategy/rate run is launched on the next GPU
+# and the runner keeps at most one active job per listed device.
+# By default the first run is executed synchronously to create/reuse the shared
+# teacher checkpoint before parallel S-runs start. Set PGD_TEACHER_PREPARE_FIRST=0
+# if the teacher checkpoint is already available and you want full parallelism.
+DEVICE_STRING="${DEVICE:-0}"
+DEVICE_STRING="${DEVICE_STRING//,/ }"
+read -r -a DEVICE_LIST <<< "$DEVICE_STRING"
+if [ "${#DEVICE_LIST[@]}" -eq 0 ]; then
+  DEVICE_LIST=("0")
+fi
+PGD_TEACHER_PREPARE_FIRST="${PGD_TEACHER_PREPARE_FIRST:-1}"
+PGD_RUN_INDEX=0
+PGD_ACTIVE_PIDS=()
+
+wait_for_pgd_slot() {
+  local max_jobs="${#DEVICE_LIST[@]}"
+  while [ "${#PGD_ACTIVE_PIDS[@]}" -ge "$max_jobs" ]; do
+    local pid="${PGD_ACTIVE_PIDS[0]}"
+    wait "$pid"
+    PGD_ACTIVE_PIDS=("${PGD_ACTIVE_PIDS[@]:1}")
+  done
+}
+
+wait_for_all_pgd_jobs() {
+  local pid
+  for pid in "${PGD_ACTIVE_PIDS[@]}"; do
+    wait "$pid"
+  done
+  PGD_ACTIVE_PIDS=()
+}
+
 # Main paper loss variants only:
 #   seg_only = student fine-tunes with segmentation loss only
 #   seg_kd   = student fine-tunes with segmentation + teacher output distillation
@@ -46,6 +79,7 @@ for variable_name in \
   USE_KD_OUTPUT USE_SPARSITY USE_FEATURE_DISTILL USE_AUX_LOSS \
   LAMBDA_DISTILL LAMBDA_SPARSITY LAMBDA_FEAT LAMBDA_AUX \
   FEATURE_LAYERS SEG_LOSS_METHOD DISTILL_LOSS_METHOD DISTILL_TEMPERATURE LOSS_METHOD \
+  DEVICE PGD_TEACHER_PREPARE_FIRST \
   SPLIT_SEED PREPARE_SPLITS PREPARE_SPLITS_OVERWRITE PREPARE_ANALYSIS CONDA_ENV CUDA_MODULE; do
   export_if_set "$variable_name"
 done
@@ -58,17 +92,27 @@ read -r -a STATIC_RATE_LIST <<< "$STATIC_PRUNE_RATES_STRING"
 run_pgd_strategy_once() {
   local strategy="$1"
   local ratio="${2:-}"
+  local device="${DEVICE_LIST[$((PGD_RUN_INDEX % ${#DEVICE_LIST[@]}))]}"
+  PGD_RUN_INDEX=$((PGD_RUN_INDEX + 1))
+  local run_number="$PGD_RUN_INDEX"
 
   export PRUNE_STRATEGY="$strategy"
+  export DEVICE="$device"
   if [ -n "$ratio" ]; then
     export PRUNE_RATE="$ratio"
-    echo ">>> Dataset=$DATASET_KEY strategy=$strategy prune_rate=$ratio"
+    echo ">>> Dataset=$DATASET_KEY strategy=$strategy prune_rate=$ratio device=$device"
   else
     unset PRUNE_RATE || true
-    echo ">>> Dataset=$DATASET_KEY strategy=$strategy prune_rate=auto"
+    echo ">>> Dataset=$DATASET_KEY strategy=$strategy prune_rate=auto device=$device"
   fi
 
-  bash "$PROJECT_ROOT/run_pgd_common.sh"
+  if [ "${#DEVICE_LIST[@]}" -gt 1 ] && { [ "$PGD_TEACHER_PREPARE_FIRST" != "1" ] || [ "$run_number" -gt 1 ]; }; then
+    wait_for_pgd_slot
+    DEVICE="$device" bash "$PROJECT_ROOT/run_pgd_common.sh" &
+    PGD_ACTIVE_PIDS+=("$!")
+  else
+    DEVICE="$device" bash "$PROJECT_ROOT/run_pgd_common.sh"
+  fi
 }
 
 for loss_variant in "${LOSS_VARIANT_LIST[@]}"; do
@@ -111,7 +155,8 @@ for loss_variant in "${LOSS_VARIANT_LIST[@]}"; do
         ;;
       *)
         run_pgd_strategy_once "$strategy"
-        ;;
+      ;;
     esac
   done
+  wait_for_all_pgd_jobs
 done

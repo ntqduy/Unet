@@ -91,6 +91,11 @@ BATCH_SIZE="${BATCH_SIZE:-8}"
 NUM_WORKERS="${NUM_WORKERS:-4}"
 PATCH_SIZE_H="${PATCH_SIZE_H:-256}"
 PATCH_SIZE_W="${PATCH_SIZE_W:-256}"
+DEVICE="${DEVICE:-0}"
+if [[ "$DEVICE" == *" "* ]]; then
+  read -r -a RUN_DEVICE_LIST <<< "$DEVICE"
+  DEVICE="${RUN_DEVICE_LIST[0]}"
+fi
 
 # -----------------------------
 # Optional loss-study controls
@@ -276,6 +281,7 @@ OUTPUT_DIR="output_${PRUNE_METHOD}_${RATE_TAG}_${STEP3_TAG}"
 
 echo "Teacher model: $TEACHER_MODEL"
 echo "Encoder pretrained: $ENCODER_PRETRAINED"
+echo "Device: $DEVICE"
 echo "Pruning strategy: $PRUNE_METHOD"
 if [ "$PRUNE_METHOD" = "static" ] || [ "$PRUNE_METHOD" = "middle_static" ] || [ "$PRUNE_METHOD" = "full_static" ]; then
   echo "Static prune ratio: $PRUNE_RATE_TAG"
@@ -314,6 +320,7 @@ python run_pgd.py \
   --dataset "$DATASET_KEY" \
   --root_path "$ROOT_PATH" \
   --teacher_model "$TEACHER_MODEL" \
+  --gpu "$DEVICE" \
   --encoder_pretrained "$ENCODER_PRETRAINED" \
   --exp "$EXP_NAME" \
   --max_epochs_teacher "$MAX_EPOCHS_TEACHER" \
