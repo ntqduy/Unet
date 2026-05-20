@@ -49,14 +49,14 @@ fi
 #   S2 = Kneedle adaptive threshold
 #   S3 = Otsu adaptive threshold
 #   S4 = GMM adaptive threshold
-#   S5 = middle/block static pruning, designed for TEACHER_MODEL=unet_resnet152
-#   S6 = middle/block Kneedle, designed for TEACHER_MODEL=unet_resnet152
-#   S7 = middle/block Otsu, designed for TEACHER_MODEL=unet_resnet152
-#   S8 = middle/block GMM, designed for TEACHER_MODEL=unet_resnet152
-#   S9 = full/internal block static pruning, designed for TEACHER_MODEL=unet_resnet152
-#   S10 = full/internal block Kneedle, designed for TEACHER_MODEL=unet_resnet152
-#   S11 = full/internal block Otsu, designed for TEACHER_MODEL=unet_resnet152
-#   S12 = full/internal block GMM, designed for TEACHER_MODEL=unet_resnet152
+#   S5 = middle/block static pruning, designed for ResNet152 encoder teachers such as unet_plus_plus
+#   S6 = middle/block Kneedle, designed for ResNet152 encoder teachers such as unet_plus_plus
+#   S7 = middle/block Otsu, designed for ResNet152 encoder teachers such as unet_plus_plus
+#   S8 = middle/block GMM, designed for ResNet152 encoder teachers such as unet_plus_plus
+#   S9 = full/internal block static pruning, designed for ResNet152 encoder teachers such as unet_plus_plus
+#   S10 = full/internal block Kneedle, designed for ResNet152 encoder teachers such as unet_plus_plus
+#   S11 = full/internal block Otsu, designed for ResNet152 encoder teachers such as unet_plus_plus
+#   S12 = full/internal block GMM, designed for ResNet152 encoder teachers such as unet_plus_plus
 PRUNE_STRATEGY="${PRUNE_STRATEGY:-S1}"
 PRUNE_STRATEGY="$(echo "$PRUNE_STRATEGY" | tr '[:lower:]' '[:upper:]')"
 PRUNE_ARGS=()
@@ -76,8 +76,8 @@ FORCE_RETRAIN_STUDENT="${FORCE_RETRAIN_STUDENT:-0}"
 
 # TEACHER_MODEL choices come from networks/net_factory.py:
 #   unet, resunet, vnet, unetr, unet_resnet152, att_unet, r2unet, unet_plus_plus
-TEACHER_MODEL="${TEACHER_MODEL:-unet_resnet152}"
-# Pretrained weights are currently used by unet_resnet152. Keep this enabled
+TEACHER_MODEL="${TEACHER_MODEL:-unet_plus_plus}"
+# Pretrained weights are currently used by ResNet152-backed teachers. Keep this enabled
 # by default for all PGD scripts; unsupported models simply ignore it.
 ENCODER_PRETRAINED="${ENCODER_PRETRAINED:-1}"
 MAX_EPOCHS_TEACHER="${MAX_EPOCHS_TEACHER:-50}"
@@ -88,6 +88,7 @@ EARLY_STOP_PATIENCE="${EARLY_STOP_PATIENCE:-20}"
 PATCH_SIZE_H="${PATCH_SIZE_H:-256}"
 PATCH_SIZE_W="${PATCH_SIZE_W:-256}"
 DEVICE="${DEVICE:-0}"
+DEVICE="${DEVICE//,/ }"
 if [[ "$DEVICE" == *" "* ]]; then
   read -r -a RUN_DEVICE_LIST <<< "$DEVICE"
   DEVICE="${RUN_DEVICE_LIST[0]}"

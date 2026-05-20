@@ -26,7 +26,7 @@ MODEL_METADATA: Dict[str, Dict[str, str]] = {
     "att_unet": {"branch": "basic", "model_name": "att_unet", "backbone_name": "attention_unet_encoder"},
     "r2unet": {"branch": "basic", "model_name": "r2unet", "backbone_name": "recurrent_residual_unet_encoder"},
     "unet": {"branch": "basic", "model_name": "unet", "backbone_name": "unet_encoder"},
-    "unet_plus_plus": {"branch": "basic", "model_name": "unet_plus_plus", "backbone_name": "smp_encoder"},
+    "unet_plus_plus": {"branch": "basic", "model_name": "unet_plus_plus", "backbone_name": "resnet152"},
     "unet_resnet152": {"branch": "basic", "model_name": "unet_resnet152", "backbone_name": "resnet152"},
     "resunet": {"branch": "basic", "model_name": "resunet", "backbone_name": "residual_encoder"},
     "vnet": {"branch": "basic", "model_name": "vnet", "backbone_name": "vnet_encoder"},

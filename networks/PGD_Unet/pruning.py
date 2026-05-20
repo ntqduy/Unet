@@ -34,12 +34,17 @@ PRUNE_METHODS = (
     "full_gmm",
 )
 MODULE_GROUP_CANDIDATES = (
+    ("model.encoder.conv1", "model.encoder.layer1", "model.encoder.layer2", "model.encoder.layer3", "model.encoder.layer4"),
     ("stem", "down1", "down2", "down3", "down4"),
     ("stem", "layer1", "layer2", "layer3", "layer4"),
     ("enc1", "enc2", "enc3", "enc4", "bottleneck"),
     ("encoder.block_one", "encoder.block_two", "encoder.block_three", "encoder.block_four", "encoder.block_five"),
 )
 RESNET_STAGE_MODULES = ("layer1", "layer2", "layer3", "layer4")
+
+
+def _is_resnet_stage_module(module_name: str) -> bool:
+    return str(module_name).split(".")[-1] in RESNET_STAGE_MODULES
 
 
 def _resolve_module_importance(model: nn.Module, module_name: str, module: nn.Module) -> torch.Tensor:
@@ -95,7 +100,7 @@ def _extract_middle_resnet_blueprint(
     gmm_random_state: int,
 ) -> Dict[str, object]:
     named_modules = dict(teacher_model.named_modules())
-    stage_names = [name for name in target_modules if name in RESNET_STAGE_MODULES and name in named_modules]
+    stage_names = [name for name in target_modules if _is_resnet_stage_module(name) and name in named_modules]
     if not stage_names:
         raise RuntimeError(f"{prune_method} requires ResNet stage modules layer1/layer2/layer3/layer4.")
 
@@ -315,7 +320,7 @@ def _extract_full_resnet_blueprint(
     gmm_random_state: int,
 ) -> Dict[str, object]:
     named_modules = dict(teacher_model.named_modules())
-    stage_names = [name for name in target_modules if name in RESNET_STAGE_MODULES and name in named_modules]
+    stage_names = [name for name in target_modules if _is_resnet_stage_module(name) and name in named_modules]
     if not stage_names:
         raise RuntimeError(f"{prune_method} requires ResNet stage modules layer1/layer2/layer3/layer4.")
 

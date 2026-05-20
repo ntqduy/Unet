@@ -3,8 +3,10 @@
 ## Current PGD-UNet update notes
 
 The main proposal pipeline is now focused on structural pruning plus optional
-teacher output distillation. Learnable gates are kept only as backward-compatible
-no-op methods; the default student path does not use gate sparsity.
+teacher output distillation. The default PGD teacher is `unet_plus_plus`
+(`segmentation_models_pytorch.UnetPlusPlus`) with a ResNet152 encoder. Learnable
+gates are kept only as backward-compatible no-op methods; the default student
+path does not use gate sparsity.
 
 Main student training modes:
 
@@ -28,10 +30,10 @@ The supported pruning strategies are:
 | `S11` | `full_otsu` | Full-Otsu Block |
 | `S12` | `full_gmm` | Full-GMM Block |
 
-S5-S8 keep ResNet bottleneck boundaries full and prune only `conv2`.
-S9-S12 prune the full bottleneck main path, including `conv3` output, and
-rebuild residual projections plus decoder skip inputs so tensor shapes remain
-valid.
+S5-S8 keep ResNet bottleneck boundaries full and prune only `conv2` inside the
+UNet++ ResNet152 encoder. S9-S12 prune the full bottleneck main path, including
+`conv3` output. For UNet++, the encoder is pruned and stage projection layers
+restore decoder feature widths so the UNet++ decoder remains shape-compatible.
 
 Visualization panels now include explicit `Image`, `GT`, and `PR` labels.
 Student `checkpoints/train_log.csv` includes stable validation columns for
@@ -61,7 +63,7 @@ Code_main/
 │  ├─ Basic_Model/
 │  ├─ PGD_Unet/
 │  │  ├─ gated_unet.py
-│  │  ├─ middle_pruned_resnet_unet.py
+│  │  ├─ middle_pruned_unet_plus_plus.py
 │  │  ├─ pruning.py
 │  │  ├─ pruning_algorithms/
 │  │  │  └─ Kneedle_Otsu_GMM.py
@@ -230,12 +232,12 @@ python test2d.py --dataset kvasir_seg --root_path data/Kvasir-SEG --model unet -
 ### Train full pipeline
 
 ```bash
-python run_pgd.py --dataset kvasir_seg --root_path data/Kvasir-SEG --teacher_model unet_resnet152 --exp pdg_kvasir_seg --max_epochs_teacher 50 --max_epochs_student 100 --prune_strategy S1 --prune_method static --static_prune_ratio 0.5 --use_kd_output 1 --lambda_distill 0.3 --batch_size 8 --patch_size 256 256
+python run_pgd.py --dataset kvasir_seg --root_path data/Kvasir-SEG --teacher_model unet_plus_plus --exp pdg_kvasir_seg --max_epochs_teacher 50 --max_epochs_student 100 --prune_strategy S1 --prune_method static --static_prune_ratio 0.5 --use_kd_output 1 --lambda_distill 0.3 --batch_size 8 --patch_size 256 256
 ```
 
 Lưu ý:
 
-- với `teacher_model=unet_resnet152`, `--encoder_pretrained` hiện mặc định là `1`
+- với `TEACHER_MODEL=unet_plus_plus`, `--encoder_pretrained` hiện mặc định là `1`
 - nên nếu teacher phải train lại từ đầu ở step 1, encoder ResNet152 sẽ mặc định dùng pretrained weights
 - nếu bạn muốn tắt pretrained và train teacher từ random backbone, hãy truyền `--encoder_pretrained 0`
 
@@ -266,9 +268,9 @@ ceil((1 - r) * num_channels)
 
 channel có importance score cao nhất. `static_prune_ratio` phải nằm trong `[0, 1)` và luôn giữ ít nhất 1 channel.
 
-Riêng `S5/middle_static`, `S6/middle_kneedle`, `S7/middle_otsu` và `S8/middle_gmm` hiện được thiết kế cho `teacher_model=unet_resnet152`. Với mỗi bottleneck block trong `layer1/layer2/layer3/layer4`, pipeline dùng `conv2` làm layer giữa để prune. `conv1`/`bn1`, output của `conv3`/`bn3`, downsample và shape residual được giữ full để đầu/cuối block không bị cắt. Vì `conv2` output bị prune thật, `conv3` sẽ chỉ copy input slice tương ứng các channel `conv2` được giữ, nhưng output channel của `conv3` vẫn giữ nguyên. Các strategy này dùng student kiến trúc `middle_pruned_resnet_unet`.
+Riêng `S5/middle_static`, `S6/middle_kneedle`, `S7/middle_otsu` và `S8/middle_gmm` hiện được thiết kế cho `TEACHER_MODEL=unet_plus_plus`. Với mỗi bottleneck block trong `model.encoder.layer1/layer2/layer3/layer4`, pipeline dùng `conv2` làm layer giữa để prune. `conv1`/`bn1`, output của `conv3`/`bn3`, downsample và shape residual được giữ full để đầu/cuối block không bị cắt. Vì `conv2` output bị prune thật, `conv3` sẽ chỉ copy input slice tương ứng các channel `conv2` được giữ, nhưng output channel của `conv3` vẫn giữ nguyên. Các strategy này dùng student kiến trúc `middle_pruned_unet_plus_plus`.
 
-`S9/full_static`, `S10/full_kneedle`, `S11/full_otsu` và `S12/full_gmm` cũng dành cho `teacher_model=unet_resnet152`, nhưng dùng student kiến trúc `full_pruning_resnet_unet`. Các strategy này prune full main path của bottleneck: input/output của `conv1`, `conv2`, và cả `conv3 output/bn3`. Khi output block bị đổi channel, code sẽ subset/cài projection residual và rebuild decoder skip inputs để residual add và skip connection vẫn khớp shape.
+`S9/full_static`, `S10/full_kneedle`, `S11/full_otsu` và `S12/full_gmm` cũng dành cho `TEACHER_MODEL=unet_plus_plus`, nhưng dùng student kiến trúc `full_pruning_unet_plus_plus`. Các strategy này prune full main path của bottleneck: input/output của `conv1`, `conv2`, và cả `conv3 output/bn3`. Khi output block bị đổi channel, code sẽ subset/cài projection residual và rebuild decoder skip inputs để residual add và skip connection vẫn khớp shape.
 
 Interface khuyến nghị:
 
@@ -280,36 +282,36 @@ Ví dụ chạy trực tiếp Python:
 
 ```bash
 # S1: static pruning 50%
-python run_pgd.py --dataset cvc_clinicdb --root_path data/CVC-ClinicDB --teacher_model unet_resnet152 --prune_strategy S1 --static_prune_ratio 0.5
+python run_pgd.py --dataset cvc_clinicdb --root_path data/CVC-ClinicDB --teacher_model unet_plus_plus --prune_strategy S1 --static_prune_ratio 0.5
 
 # S2: Kneedle
-python run_pgd.py --dataset cvc_clinicdb --root_path data/CVC-ClinicDB --teacher_model unet_resnet152 --prune_strategy S2
+python run_pgd.py --dataset cvc_clinicdb --root_path data/CVC-ClinicDB --teacher_model unet_plus_plus --prune_strategy S2
 
 # S3: Otsu
-python run_pgd.py --dataset cvc_clinicdb --root_path data/CVC-ClinicDB --teacher_model unet_resnet152 --prune_strategy S3
+python run_pgd.py --dataset cvc_clinicdb --root_path data/CVC-ClinicDB --teacher_model unet_plus_plus --prune_strategy S3
 
 # S4: GMM
-python run_pgd.py --dataset cvc_clinicdb --root_path data/CVC-ClinicDB --teacher_model unet_resnet152 --prune_strategy S4
+python run_pgd.py --dataset cvc_clinicdb --root_path data/CVC-ClinicDB --teacher_model unet_plus_plus --prune_strategy S4
 
 # S5: middle-static pruning 50%
-python run_pgd.py --dataset cvc_clinicdb --root_path data/CVC-ClinicDB --teacher_model unet_resnet152 --prune_strategy S5 --static_prune_ratio 0.5
+python run_pgd.py --dataset cvc_clinicdb --root_path data/CVC-ClinicDB --teacher_model unet_plus_plus --prune_strategy S5 --static_prune_ratio 0.5
 
 # S6: middle-kneedle pruning
-python run_pgd.py --dataset cvc_clinicdb --root_path data/CVC-ClinicDB --teacher_model unet_resnet152 --prune_strategy S6
+python run_pgd.py --dataset cvc_clinicdb --root_path data/CVC-ClinicDB --teacher_model unet_plus_plus --prune_strategy S6
 
 # S7: middle-otsu pruning
-python run_pgd.py --dataset cvc_clinicdb --root_path data/CVC-ClinicDB --teacher_model unet_resnet152 --prune_strategy S7
+python run_pgd.py --dataset cvc_clinicdb --root_path data/CVC-ClinicDB --teacher_model unet_plus_plus --prune_strategy S7
 
 # S8: middle-gmm pruning
-python run_pgd.py --dataset cvc_clinicdb --root_path data/CVC-ClinicDB --teacher_model unet_resnet152 --prune_strategy S8
+python run_pgd.py --dataset cvc_clinicdb --root_path data/CVC-ClinicDB --teacher_model unet_plus_plus --prune_strategy S8
 
 # S9: full-static block pruning 50%, gồm cả conv3 output
-python run_pgd.py --dataset cvc_clinicdb --root_path data/CVC-ClinicDB --teacher_model unet_resnet152 --prune_strategy S9 --static_prune_ratio 0.5
+python run_pgd.py --dataset cvc_clinicdb --root_path data/CVC-ClinicDB --teacher_model unet_plus_plus --prune_strategy S9 --static_prune_ratio 0.5
 
 # S10/S11/S12: full block dynamic pruning
-python run_pgd.py --dataset cvc_clinicdb --root_path data/CVC-ClinicDB --teacher_model unet_resnet152 --prune_strategy S10
-python run_pgd.py --dataset cvc_clinicdb --root_path data/CVC-ClinicDB --teacher_model unet_resnet152 --prune_strategy S11
-python run_pgd.py --dataset cvc_clinicdb --root_path data/CVC-ClinicDB --teacher_model unet_resnet152 --prune_strategy S12
+python run_pgd.py --dataset cvc_clinicdb --root_path data/CVC-ClinicDB --teacher_model unet_plus_plus --prune_strategy S10
+python run_pgd.py --dataset cvc_clinicdb --root_path data/CVC-ClinicDB --teacher_model unet_plus_plus --prune_strategy S11
+python run_pgd.py --dataset cvc_clinicdb --root_path data/CVC-ClinicDB --teacher_model unet_plus_plus --prune_strategy S12
 ```
 
 Khi chạy qua script theo dataset, set biến môi trường:
@@ -364,7 +366,7 @@ bash run_pgd_cvc_300.sh
 Đổi kiến trúc teacher bằng biến môi trường, ví dụ:
 
 ```bash
-TEACHER_MODEL=unet_resnet152 PRUNE_STRATEGY=S1 bash run_pgd_etis.sh
+TEACHER_MODEL=unet_plus_plus PRUNE_STRATEGY=S1 bash run_pgd_etis.sh
 ```
 
 | Strategy | Experiment folder |
@@ -445,7 +447,7 @@ outputs/pgd_unet/<dataset>/<teacher_model>_teacher/<loss_tag>/<experiment_folder
 Ví dụ:
 
 ```text
-outputs/pgd_unet/cvc_clinicdb/unet_resnet152_teacher/loss_seg_kd/output_gmm_auto_no/
+outputs/pgd_unet/cvc_clinicdb/unet_plus_plus_teacher/loss_seg_kd/output_gmm_auto_no/
 ```
 
 Teacher vẫn dùng chung ở:
@@ -507,7 +509,7 @@ Nếu reuse từ `basic branch`, checkpoint sẽ được register lại vào `1
 
 Mặc định repo **không train lại teacher nếu đã có checkpoint compatible**. Chỉ khi cả 3 nguồn trên đều không có checkpoint phù hợp, hoặc bạn bật `--force_retrain_teacher 1`, thì `1_teacher` mới train lại từ đầu.
 
-Nếu teacher phải train lại từ đầu và `teacher_model=unet_resnet152`, mặc định repo sẽ dùng `encoder_pretrained=1`.
+Nếu teacher phải train lại từ đầu và `TEACHER_MODEL=unet_plus_plus`, mặc định repo sẽ dùng `encoder_pretrained=1`.
 
 ### Cách tận dụng weight teacher để không cần train lại
 
@@ -524,14 +526,14 @@ python train_basic_model.py --dataset cvc_clinicdb --root_path data/CVC-ClinicDB
 Sau đó chạy proposal với cùng `teacher_model` và `dataset`:
 
 ```bash
-python train_pgd.py --dataset cvc_clinicdb --root_path data/CVC-ClinicDB --teacher_model unet_resnet152 --encoder_pretrained 1 --max_epochs_teacher 50 --max_epochs_student 100 --prune_strategy S1 --static_prune_ratio 0.5
+python train_pgd.py --dataset cvc_clinicdb --root_path data/CVC-ClinicDB --teacher_model unet_plus_plus --encoder_pretrained 1 --max_epochs_teacher 50 --max_epochs_student 100 --prune_strategy S1 --static_prune_ratio 0.5
 ```
 
 Khi đó `train_pgd.py` sẽ:
 
 - tìm teacher checkpoint trong `outputs/unet_resnet152/cvc_clinicdb/checkpoints/`
 - load lại weight đó
-- register/copy checkpoint vào `outputs/pgd_unet/cvc_clinicdb/unet_resnet152_teacher/1_teacher/checkpoints/`
+- register/copy checkpoint vào `outputs/pgd_unet/cvc_clinicdb/unet_plus_plus_teacher/1_teacher/checkpoints/`
 - skip teacher training nếu checkpoint compatible
 
 #### Cách 2: chỉ định trực tiếp teacher checkpoint
@@ -539,7 +541,7 @@ Khi đó `train_pgd.py` sẽ:
 Bạn cũng có thể chỉ định thẳng một checkpoint đã có:
 
 ```bash
-python train_pgd.py --dataset cvc_clinicdb --root_path data/CVC-ClinicDB --teacher_model unet_resnet152 --teacher_checkpoint outputs/unet_resnet152/cvc_clinicdb/checkpoints/best.pth --encoder_pretrained 1 --max_epochs_student 100 --prune_strategy S1 --static_prune_ratio 0.5
+python train_pgd.py --dataset cvc_clinicdb --root_path data/CVC-ClinicDB --teacher_model unet_plus_plus --teacher_checkpoint outputs/unet_resnet152/cvc_clinicdb/checkpoints/best.pth --encoder_pretrained 1 --max_epochs_student 100 --prune_strategy S1 --static_prune_ratio 0.5
 ```
 
 Repo sẽ kiểm tra compatibility của checkpoint này trước khi dùng. Nếu checkpoint này tồn tại và compatible, nó sẽ được ưu tiên dùng trước proposal outputs và basic outputs. Nếu checkpoint không tồn tại hoặc không tương thích, pipeline mới tiếp tục check các nguồn còn lại.

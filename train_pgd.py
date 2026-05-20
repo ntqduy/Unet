@@ -142,9 +142,9 @@ def _uses_full_pruned_resnet_student() -> bool:
 
 def _student_model_name() -> str:
     if _uses_middle_pruned_resnet_student():
-        return "middle_pruned_resnet_unet"
+        return "middle_pruned_unet_plus_plus" if args.teacher_model == "unet_plus_plus" else "middle_pruned_resnet_unet"
     if _uses_full_pruned_resnet_student():
-        return "full_pruning_resnet_unet"
+        return "full_pruning_unet_plus_plus" if args.teacher_model == "unet_plus_plus" else "full_pruning_resnet_unet"
     return "pdg_unet"
 
 
@@ -233,7 +233,7 @@ parser = argparse.ArgumentParser(description="Teacher -> Pruning -> Student trai
 parser.add_argument("--root_path", type=str, default=str(DEFAULT_DATA_ROOT))
 parser.add_argument("--dataset", type=str, default="kvasir_seg", choices=list_available_datasets())
 parser.add_argument("--exp", type=str, default="pdg_pipeline")
-parser.add_argument("--teacher_model", type=str, default="unet_resnet152", choices=list_models())
+parser.add_argument("--teacher_model", type=str, default="unet_plus_plus", choices=list_models())
 parser.add_argument("--teacher_checkpoint", type=str, default="")
 parser.add_argument("--train_split", type=str, default="train", choices=["train", "val", "test"])
 parser.add_argument("--val_split", type=str, default="val", choices=["train", "val", "test"])
@@ -245,7 +245,7 @@ parser.add_argument("--student_lr", type=float, default=1e-4)
 parser.add_argument("--patch_size", nargs=2, type=int, default=[256, 256])
 parser.add_argument("--num_classes", type=int, default=2)
 parser.add_argument("--in_channels", type=int, default=3)
-parser.add_argument("--encoder_pretrained", type=int, default=1, help="defaults to 1 for unet_resnet152 teacher builds")
+parser.add_argument("--encoder_pretrained", type=int, default=1, help="defaults to 1 for ResNet152-backed teacher builds such as unet_plus_plus and unet_resnet152")
 parser.add_argument("--prune_ratio", type=float, default=0.5, help="backward-compatible fixed ratio used by static pruning methods if --static_prune_ratio is omitted")
 parser.add_argument("--prune_strategy", type=str, default="", help="external pruning strategy code: S1=static, S2=kneedle, S3=otsu, S4=gmm, S5=middle_static, S6=middle_kneedle, S7=middle_otsu, S8=middle_gmm, S9=full_static, S10=full_kneedle, S11=full_otsu, S12=full_gmm")
 parser.add_argument("--prune_method", type=str, default="", help="internal pruning method: static, kneedle, otsu, gmm, middle_*, or full_*")
@@ -459,9 +459,11 @@ def _blueprint_matches_current_pruning_config(candidate_blueprint: dict) -> bool
     candidate_method = str(candidate_blueprint.get("prune_method", "static")).lower()
     if candidate_method != args.prune_method:
         return False
-    if args.prune_method in MIDDLE_PRUNED_RESNET_METHODS and str(candidate_blueprint.get("student_architecture", "")).lower() != "middle_pruned_resnet_unet":
+    middle_architectures = {"middle_pruned_resnet_unet", "middle_pruned_unet_plus_plus"}
+    full_architectures = {"full_pruning_resnet_unet", "full_pruning_unet_plus_plus"}
+    if args.prune_method in MIDDLE_PRUNED_RESNET_METHODS and str(candidate_blueprint.get("student_architecture", "")).lower() not in middle_architectures:
         return False
-    if args.prune_method in FULL_PRUNED_RESNET_METHODS and str(candidate_blueprint.get("student_architecture", "")).lower() != "full_pruning_resnet_unet":
+    if args.prune_method in FULL_PRUNED_RESNET_METHODS and str(candidate_blueprint.get("student_architecture", "")).lower() not in full_architectures:
         return False
     if uses_static_prune_ratio(args.prune_method):
         candidate_ratio = candidate_blueprint.get("static_prune_ratio", candidate_blueprint.get("prune_ratio"))
@@ -517,7 +519,7 @@ def _teacher_signature(in_channels: int) -> dict:
         num_classes=args.num_classes,
         in_channels=in_channels,
         patch_size=args.patch_size,
-        encoder_pretrained=bool(args.encoder_pretrained) if args.teacher_model == "unet_resnet152" else None,
+        encoder_pretrained=bool(args.encoder_pretrained) if args.teacher_model in {"unet_resnet152", "unet_plus_plus"} else None,
     )
 
 
@@ -756,13 +758,13 @@ def _freeze_teacher_model(teacher_model) -> None:
 
 def _build_student_from_blueprint(db_train, pruning_artifact: dict) -> nn.Module:
     blueprint = pruning_artifact["blueprint"]
-    if str(blueprint.get("student_architecture", "")).lower() == "middle_pruned_resnet_unet":
+    if str(blueprint.get("student_architecture", "")).lower() in {"middle_pruned_resnet_unet", "middle_pruned_unet_plus_plus"}:
         return build_middle_pruned_resnet_unet(
             in_channels=db_train.in_channels,
             num_classes=args.num_classes,
             blueprint=blueprint,
         )
-    if str(blueprint.get("student_architecture", "")).lower() == "full_pruning_resnet_unet":
+    if str(blueprint.get("student_architecture", "")).lower() in {"full_pruning_resnet_unet", "full_pruning_unet_plus_plus"}:
         return build_full_pruning_resnet_unet(
             in_channels=db_train.in_channels,
             num_classes=args.num_classes,
@@ -1825,7 +1827,7 @@ def _build_teacher(in_channels: int):
     kwargs = {"mode": "train"}
     if args.teacher_model == "unetr":
         kwargs["image_size"] = tuple(args.patch_size)
-    if args.teacher_model == "unet_resnet152":
+    if args.teacher_model in {"unet_resnet152", "unet_plus_plus"}:
         kwargs["encoder_pretrained"] = bool(args.encoder_pretrained)
     return net_factory(net_type=args.teacher_model, in_chns=in_channels, class_num=args.num_classes, **kwargs)
 
@@ -1844,7 +1846,7 @@ def _run_teacher(device: torch.device, image_mode: str, db_train, trainloader, v
         "in_channels": db_train.in_channels,
         "num_classes": args.num_classes,
         "image_size": list(args.patch_size) if args.teacher_model == "unetr" else None,
-        "encoder_pretrained": bool(args.encoder_pretrained) if args.teacher_model == "unet_resnet152" else None,
+        "encoder_pretrained": bool(args.encoder_pretrained) if args.teacher_model in {"unet_resnet152", "unet_plus_plus"} else None,
     }
     write_model_config(run_dir, model_info)
     teacher_signature = _teacher_signature(db_train.in_channels)
@@ -2197,6 +2199,12 @@ def _run_pruning(device: torch.device, image_mode: str, db_train, teacher_artifa
                 "search_time_note": "measured_blueprint_importance_threshold_search_only",
             }
         )
+        if args.teacher_model == "unet_plus_plus" and _uses_middle_pruned_resnet_student():
+            blueprint["student_architecture"] = "middle_pruned_unet_plus_plus"
+            blueprint["teacher_architecture"] = "unet_plus_plus_resnet152_encoder"
+        elif args.teacher_model == "unet_plus_plus" and _uses_full_pruned_resnet_student():
+            blueprint["student_architecture"] = "full_pruning_unet_plus_plus"
+            blueprint["teacher_architecture"] = "unet_plus_plus_resnet152_encoder"
         save_blueprint_artifact(blueprint, layout["artifacts_dir"])
     search_time_seconds = float(blueprint.get("search_time_seconds") or 0.0)
     search_payload = {
@@ -2239,7 +2247,7 @@ def _run_pruning(device: torch.device, image_mode: str, db_train, teacher_artifa
         )
 
     student_architecture = str(blueprint.get("student_architecture", "")).lower()
-    if student_architecture == "middle_pruned_resnet_unet":
+    if student_architecture in {"middle_pruned_resnet_unet", "middle_pruned_unet_plus_plus"}:
         pruned_student, weight_transfer = build_middle_pruned_resnet_unet_from_teacher(
             teacher_artifact["model"],
             in_channels=db_train.in_channels,
@@ -2272,7 +2280,7 @@ def _run_pruning(device: torch.device, image_mode: str, db_train, teacher_artifa
                 ",".join(row.get("protected_components", [])) if row.get("protected_components") else "none",
                 ",".join(row.get("pruned_components", [])) if row.get("pruned_components") else "none",
             )
-    elif student_architecture == "full_pruning_resnet_unet":
+    elif student_architecture in {"full_pruning_resnet_unet", "full_pruning_unet_plus_plus"}:
         pruned_student, weight_transfer = build_full_pruning_resnet_unet_from_teacher(
             teacher_artifact["model"],
             in_channels=db_train.in_channels,
@@ -2360,8 +2368,8 @@ def _run_pruning(device: torch.device, image_mode: str, db_train, teacher_artifa
     decoder_subset_transfer = weight_transfer.get("decoder_subset_transfer")
     if isinstance(decoder_subset_transfer, dict) and decoder_subset_transfer.get("rows"):
         write_metrics_rows(decoder_subset_transfer["rows"], weight_transfer_dir / "decoder_subset_transfer_rows.csv")
-    middle_static_student = student_architecture == "middle_pruned_resnet_unet"
-    full_static_student = student_architecture == "full_pruning_resnet_unet"
+    middle_static_student = student_architecture in {"middle_pruned_resnet_unet", "middle_pruned_unet_plus_plus"}
+    full_static_student = student_architecture in {"full_pruning_resnet_unet", "full_pruning_unet_plus_plus"}
     pruning_model_info = extract_model_info(pruned_student)
     pruning_elapsed_before_eval = time.perf_counter() - phase_start_time
     pruning_model_info.update(

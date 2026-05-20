@@ -1,10 +1,12 @@
 from __future__ import annotations
 
+import types
 from typing import List, Mapping, Sequence, Tuple
 
 import torch
 from torch import nn
 
+from networks.Basic_Model.unet_plus_plus import UNetPlusPlus2D
 from networks.Basic_Model.Unet_restnet import DecoderBlock, FinalUpBlock, UNetResNet152
 from networks.Basic_Model.common import DoubleConv2d
 from utils.model_output import BaseSegmentationModel, extract_features, extract_logits
@@ -325,6 +327,54 @@ def _copy_decoder_input_subsets(source_model: UNetResNet152, target_model: UNetR
     return {"decoder_subset_rows": rows}
 
 
+def _blueprint_uses_unet_plus_plus(blueprint: Mapping[str, object]) -> bool:
+    return str(blueprint.get("teacher_model", "")).lower() == "unet_plus_plus"
+
+
+def _stage_alias(stage_name: str) -> str:
+    return str(stage_name).split(".")[-1]
+
+
+def _patch_unet_plus_plus_encoder_expanders(base_model: UNetPlusPlus2D, blueprint: Mapping[str, object]) -> None:
+    encoder = base_model.model.encoder
+    default_stage_channels = {"layer1": 256, "layer2": 512, "layer3": 1024, "layer4": 2048}
+    expanders = nn.ModuleDict()
+    stage_indices = dict(blueprint.get("stage_output_kept_indices", {}) or {})
+    for stage_name, original_channels in default_stage_channels.items():
+        matched_key = next((key for key in stage_indices if _stage_alias(key) == stage_name), stage_name)
+        kept_indices = _stage_output_indices(blueprint, matched_key, original_channels)
+        kept_channels = len(kept_indices)
+        if kept_channels == original_channels and kept_indices == list(range(original_channels)):
+            expanders[stage_name] = nn.Identity()
+            continue
+        projection = nn.Conv2d(kept_channels, original_channels, kernel_size=1, bias=False)
+        projection.weight.data.zero_()
+        for compact_index, original_index in enumerate(kept_indices):
+            projection.weight.data[int(original_index), int(compact_index), 0, 0] = 1.0
+        expanders[stage_name] = projection
+    encoder.pgd_stage_expanders = expanders
+
+    def forward_with_pruned_stages(self, x):
+        features = [x]
+        x = self.conv1(x)
+        x = self.bn1(x)
+        x = self.relu(x)
+        features.append(x)
+        x = self.maxpool(x)
+        x = self.layer1(x)
+        features.append(self.pgd_stage_expanders["layer1"](x))
+        x = self.layer2(x)
+        features.append(self.pgd_stage_expanders["layer2"](x))
+        x = self.layer3(x)
+        features.append(self.pgd_stage_expanders["layer3"](x))
+        x = self.layer4(x)
+        features.append(self.pgd_stage_expanders["layer4"](x))
+        depth = int(getattr(self, "_depth", len(features) - 1))
+        return features[: depth + 1]
+
+    encoder.forward = types.MethodType(forward_with_pruned_stages, encoder)
+
+
 class FullPrunedResNetUNet(BaseSegmentationModel):
     def __init__(
         self,
@@ -334,11 +384,19 @@ class FullPrunedResNetUNet(BaseSegmentationModel):
         blueprint: Mapping[str, object],
     ) -> None:
         super().__init__()
-        self.base_model = UNetResNet152(
-            in_channels=in_channels,
-            num_classes=num_classes,
-            encoder_pretrained=False,
-        )
+        self.uses_unet_plus_plus = _blueprint_uses_unet_plus_plus(blueprint)
+        if self.uses_unet_plus_plus:
+            self.base_model = UNetPlusPlus2D(
+                in_channels=in_channels,
+                num_classes=num_classes,
+                encoder_pretrained=False,
+            )
+        else:
+            self.base_model = UNetResNet152(
+                in_channels=in_channels,
+                num_classes=num_classes,
+                encoder_pretrained=False,
+            )
         self.prune_method = str(blueprint.get("prune_method", "full_static"))
         self.full_prune_plan = _iter_full_prune_plan(blueprint)
         self.channel_config = tuple(int(row.get("kept_output_channels", row.get("kept_internal_channels"))) for row in self.full_prune_plan)
@@ -354,10 +412,13 @@ class FullPrunedResNetUNet(BaseSegmentationModel):
         for row in self.full_prune_plan:
             block = _get_module(self.base_model, str(row["block_name"]))
             _replace_bottleneck_full(block, row)
-        _rebuild_decoder_for_stage_outputs(self.base_model, blueprint)
+        if self.uses_unet_plus_plus:
+            _patch_unet_plus_plus_encoder_expanders(self.base_model, blueprint)
+        else:
+            _rebuild_decoder_for_stage_outputs(self.base_model, blueprint)
 
-        self.model_name = "full_pruning_resnet_unet"
-        self.backbone_name = "resnet152_full_output_pruned"
+        self.model_name = "full_pruning_unet_plus_plus" if self.uses_unet_plus_plus else "full_pruning_resnet_unet"
+        self.backbone_name = "resnet152_unet_plus_plus_full_output_pruned" if self.uses_unet_plus_plus else "resnet152_full_output_pruned"
         self.student_name = f"{self.prune_method}_student"
         self.set_architecture_config(
             in_channels=in_channels,
@@ -369,6 +430,8 @@ class FullPrunedResNetUNet(BaseSegmentationModel):
             pruned_internal_bottleneck_width=True,
             pruned_bottleneck_output=True,
             residual_projection_inserted=True,
+            decoder_architecture="unet_plus_plus" if self.uses_unet_plus_plus else "unet",
+            decoder_channel_restore_projection=bool(self.uses_unet_plus_plus),
         )
 
     def forward(self, x: torch.Tensor, return_features: bool = False):
@@ -464,11 +527,16 @@ def build_full_pruning_resnet_unet_from_teacher(
             transfer_row["status"] = "full_block_subset_reused_output_pruned"
             copied_blocks += 1
         rows.append(transfer_row)
-    decoder_copy = _copy_decoder_input_subsets(teacher_model, student.base_model, blueprint)
+    decoder_copy = (
+        {"decoder_subset_rows": [], "note": "UNet++ decoder tensors are copied by exact key when shapes match; stage expanders restore encoder feature channels for decoder compatibility."}
+        if student.uses_unet_plus_plus
+        else _copy_decoder_input_subsets(teacher_model, student.base_model, blueprint)
+    )
 
     return student, {
         "strategy": f"resnet_bottleneck_{student.prune_method}_full_output_pruning",
-        "source": "teacher_unet_resnet152",
+        "source": "teacher_unet_plus_plus" if student.uses_unet_plus_plus else "teacher_unet_resnet152",
+        "student_architecture": student.model_name,
         "copied_blocks": int(copied_blocks),
         "requested_blocks": int(len(rows)),
         "block_transfer_ratio": float(copied_blocks / max(1, len(rows))),

@@ -1,5 +1,19 @@
 # Ý Tưởng Hiện Tại Của PGD-UNet
 
+## Cap Nhat Kien Truc S1-S12
+
+Pipeline S1-S12 mac dinh hien dung `unet_plus_plus` lam teacher chinh. `unet_plus_plus` trong code la `segmentation_models_pytorch.UnetPlusPlus` voi encoder `resnet152`. Do do importance/pruning bay gio doc cac stage encoder:
+
+```text
+model.encoder.conv1
+model.encoder.layer1
+model.encoder.layer2
+model.encoder.layer3
+model.encoder.layer4
+```
+
+S5-S8 va S9-S12 van prune ResNet bottleneck trong encoder, nhung student khi teacher la `unet_plus_plus` se giu decoder UNet++ thay vi quay ve decoder custom cua `UNetResNet152`.
+
 Tài liệu này phản ánh logic code hiện tại của project PGD-UNet. Các nội dung cũ về gate/gated UNet, sparsity là pipeline chính, hoặc S1-S8-only đã được thay bằng mô tả mới bên dưới.
 
 ## 1. Mục Tiêu Chính
@@ -183,7 +197,7 @@ Params/FLOPs/FPS/Dice tradeoff
 
 ## 8. Nhóm S5-S8: Middle Conv2 Pruning
 
-S5-S8 dành cho `teacher_model=unet_resnet152`.
+S5-S8 dành cho `teacher_model=unet_plus_plus`.
 
 Ý tưởng: giữ boundary của bottleneck an toàn, chỉ prune phần giữa `conv2`.
 
@@ -214,7 +228,7 @@ Vì sao chọn `conv2`?
 Student architecture:
 
 ```text
-middle_pruned_resnet_unet
+middle_pruned_unet_plus_plus
 ```
 
 Blueprint chính:
@@ -233,7 +247,7 @@ S9-S12 hiện đã được sửa thành full block pruning thật hơn: prune c
 Student architecture:
 
 ```text
-full_pruning_resnet_unet
+full_pruning_unet_plus_plus
 ```
 
 Pruned trong main path:
@@ -258,14 +272,14 @@ decoder skip input channels
 center/decoder input shapes
 ```
 
-Trong `full_pruning_resnet_unet.py`, decoder vẫn là U-Net style nhưng được rebuild channel để khớp stage output mới:
+Trong `full_pruning_unet_plus_plus.py`, decoder vẫn là U-Net style nhưng được rebuild channel để khớp stage output mới:
 
 ```text
-center input = output mới của layer4
-dec4 skip   = output mới của layer3
-dec3 skip   = output mới của layer2
-dec2 skip   = output mới của layer1
-dec1 skip   = stem 64 channels
+decoder input = projected output cua layer4
+skip layer3  = projected output cua layer3
+skip layer2  = projected output cua layer2
+skip layer1  = projected output cua layer1
+stem skip    = stem 64 channels
 ```
 
 Blueprint S9-S12 lưu thêm:
@@ -280,7 +294,7 @@ internal_kept_channel_indices
 output_kept_channel_indices
 teacher_vs_student_rows
 global_pruning_summary
-student_architecture = full_pruning_resnet_unet
+student_architecture = full_pruning_unet_plus_plus
 ```
 
 Câu trình bày:
@@ -422,7 +436,7 @@ outputs/pgd_unet/<dataset>/<teacher_model>_teacher/<loss_tag>/<output_dir>/
 Ví dụ:
 
 ```text
-outputs/pgd_unet/kvasir_seg/unet_resnet152_teacher/loss_seg_kd/output_otsu_auto_no/
+outputs/pgd_unet/kvasir_seg/unet_plus_plus_teacher/loss_seg_kd/output_otsu_auto_no/
 ```
 
 Loss tag chính:

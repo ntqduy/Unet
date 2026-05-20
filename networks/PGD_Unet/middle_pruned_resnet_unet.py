@@ -5,6 +5,7 @@ from typing import List, Mapping, Sequence, Tuple
 import torch
 from torch import nn
 
+from networks.Basic_Model.unet_plus_plus import UNetPlusPlus2D
 from networks.Basic_Model.Unet_restnet import UNetResNet152
 from utils.model_output import BaseSegmentationModel, extract_features, extract_logits
 
@@ -124,6 +125,10 @@ def _copy_pruned_bottleneck_middle(source_block: nn.Module, target_block: nn.Mod
     }
 
 
+def _blueprint_uses_unet_plus_plus(blueprint: Mapping[str, object]) -> bool:
+    return str(blueprint.get("teacher_model", "")).lower() == "unet_plus_plus"
+
+
 class MiddlePrunedResNetUNet(BaseSegmentationModel):
     def __init__(
         self,
@@ -133,11 +138,19 @@ class MiddlePrunedResNetUNet(BaseSegmentationModel):
         blueprint: Mapping[str, object],
     ) -> None:
         super().__init__()
-        self.base_model = UNetResNet152(
-            in_channels=in_channels,
-            num_classes=num_classes,
-            encoder_pretrained=False,
-        )
+        self.uses_unet_plus_plus = _blueprint_uses_unet_plus_plus(blueprint)
+        if self.uses_unet_plus_plus:
+            self.base_model = UNetPlusPlus2D(
+                in_channels=in_channels,
+                num_classes=num_classes,
+                encoder_pretrained=False,
+            )
+        else:
+            self.base_model = UNetResNet152(
+                in_channels=in_channels,
+                num_classes=num_classes,
+                encoder_pretrained=False,
+            )
         self.prune_method = str(blueprint.get("prune_method", "middle_static"))
         self.middle_prune_plan = _iter_middle_prune_plan(blueprint)
         self.channel_config = tuple(int(row["kept_middle_channels"]) for row in self.middle_prune_plan)
@@ -150,8 +163,8 @@ class MiddlePrunedResNetUNet(BaseSegmentationModel):
             block = _get_module(self.base_model, str(row["block_name"]))
             _replace_bottleneck_middle(block, int(row["kept_middle_channels"]))
 
-        self.model_name = "middle_pruned_resnet_unet"
-        self.backbone_name = "resnet152_middle_pruned"
+        self.model_name = "middle_pruned_unet_plus_plus" if self.uses_unet_plus_plus else "middle_pruned_resnet_unet"
+        self.backbone_name = "resnet152_unet_plus_plus_middle_pruned" if self.uses_unet_plus_plus else "resnet152_middle_pruned"
         self.student_name = f"{self.prune_method}_student"
         self.set_architecture_config(
             in_channels=in_channels,
@@ -160,6 +173,7 @@ class MiddlePrunedResNetUNet(BaseSegmentationModel):
             stage_middle_channel_config=self.stage_middle_channel_config,
             pruning_method=self.prune_method,
             protected_boundary_layers=True,
+            decoder_architecture="unet_plus_plus" if self.uses_unet_plus_plus else "unet",
         )
 
     def forward(self, x: torch.Tensor, return_features: bool = False):
@@ -253,7 +267,8 @@ def build_middle_pruned_resnet_unet_from_teacher(
 
     return student, {
         "strategy": f"resnet_bottleneck_{student.prune_method}_pruning",
-        "source": "teacher_unet_resnet152",
+        "source": "teacher_unet_plus_plus" if student.uses_unet_plus_plus else "teacher_unet_resnet152",
+        "student_architecture": student.model_name,
         "copied_blocks": int(copied_blocks),
         "requested_blocks": int(len(rows)),
         "block_transfer_ratio": float(copied_blocks / max(1, len(rows))),

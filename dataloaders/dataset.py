@@ -233,6 +233,36 @@ def _resolve_record_from_manifest(row: List[str], pair_index: Dict[str, SampleRe
     return pair_index.get(image_key) or pair_index.get(mask_key)
 
 
+def _manifest_case_ids(manifest_path: Path, pair_index: Dict[str, SampleRecord], base_dir: Path) -> set[str]:
+    case_ids: set[str] = set()
+    for row in _parse_manifest(manifest_path):
+        record = _resolve_record_from_manifest(row, pair_index, base_dir)
+        if record is not None:
+            case_ids.add(record.case_id)
+    return case_ids
+
+
+def _validate_manifest_disjoint(
+    split: str,
+    records: Sequence[SampleRecord],
+    manifests: Dict[str, Path],
+    pair_index: Dict[str, SampleRecord],
+    base_dir: Path,
+) -> None:
+    current_ids = {record.case_id for record in records}
+    for other_split, manifest_path in manifests.items():
+        if other_split == split:
+            continue
+        overlap = sorted(current_ids & _manifest_case_ids(manifest_path, pair_index, base_dir))
+        if overlap:
+            preview = ", ".join(overlap[:10])
+            suffix = "..." if len(overlap) > 10 else ""
+            raise RuntimeError(
+                f"Data leakage risk: split '{split}' overlaps with split '{other_split}' "
+                f"in {len(overlap)} case(s): {preview}{suffix}"
+            )
+
+
 def _slice_records_for_split(records: List[SampleRecord], split: str, split_ratios: Tuple[float, float, float]) -> List[SampleRecord]:
     train_ratio, val_ratio, test_ratio = split_ratios
     total_ratio = train_ratio + val_ratio + test_ratio
@@ -259,6 +289,9 @@ def _slice_records_for_split(records: List[SampleRecord], split: str, split_rati
 def _resolve_records_for_split(base_dir: Path, split: str, split_ratios: Tuple[float, float, float]) -> List[SampleRecord]:
     all_records = _scan_records(base_dir)
     pair_index = {record.case_id: record for record in all_records}
+    available_manifest_names = ("train", "val", "test")
+    manifests = {name: find_manifest_path(base_dir, name) for name in available_manifest_names}
+    manifests = {name: path for name, path in manifests.items() if path is not None}
 
     manifest_path = find_manifest_path(base_dir, split)
     if manifest_path is not None:
@@ -270,11 +303,9 @@ def _resolve_records_for_split(base_dir: Path, split: str, split_ratios: Tuple[f
             if record is not None
         ]
         if records:
+            _validate_manifest_disjoint(split, records, manifests, pair_index, base_dir)
             return records
 
-    available_manifest_names = ("train", "val", "test")
-    manifests = {name: find_manifest_path(base_dir, name) for name in available_manifest_names}
-    manifests = {name: path for name, path in manifests.items() if path is not None}
     if manifests:
         used_case_ids = set()
         for name, path in manifests.items():
