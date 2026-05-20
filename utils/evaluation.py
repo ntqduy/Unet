@@ -201,6 +201,17 @@ def _write_case_metrics_csv(case_metrics: List[Dict], output_dir: Path) -> Path:
     return csv_path
 
 
+def _relative_case_metrics(case_metrics: List[Dict], project_root: Path | str) -> List[Dict]:
+    relative_rows: List[Dict] = []
+    for row in case_metrics:
+        updated = dict(row)
+        for key in ("image_path", "mask_path", "prediction_path"):
+            if key in updated:
+                updated[key] = project_relative_path(updated.get(key), project_root)
+        relative_rows.append(updated)
+    return relative_rows
+
+
 def _method_metadata(metadata: Dict) -> Dict[str, object]:
     model_info = metadata.get("model_info", {}) if isinstance(metadata.get("model_info"), dict) else {}
     config = model_info.get("config", {}) if isinstance(model_info.get("config"), dict) else {}
@@ -364,9 +375,14 @@ def save_evaluation_artifacts(
     output_dir = Path(output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    csv_path = _write_case_metrics_csv(case_metrics, output_dir)
-    sample_metrics_path = _write_sample_metrics_csv(case_metrics, output_dir, metadata)
-    summary = build_evaluation_summary(metadata, average_metric, case_metrics)
+    resolved_case_metrics = (
+        _relative_case_metrics(case_metrics, project_root)
+        if project_root is not None
+        else case_metrics
+    )
+    csv_path = _write_case_metrics_csv(resolved_case_metrics, output_dir)
+    sample_metrics_path = _write_sample_metrics_csv(resolved_case_metrics, output_dir, metadata)
+    summary = build_evaluation_summary(metadata, average_metric, resolved_case_metrics)
     summary["case_metrics_file"] = (
         project_relative_path(csv_path, project_root)
         if project_root is not None
