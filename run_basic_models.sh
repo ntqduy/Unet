@@ -13,6 +13,7 @@ EPOCHS="${EPOCHS:-50}"
 BATCH_SIZE="${BATCH_SIZE:-8}"
 BASE_LR="${BASE_LR:-0.01}"
 NUM_WORKERS="${NUM_WORKERS:-4}"
+EARLY_STOP_PATIENCE="${EARLY_STOP_PATIENCE:-20}"
 # Keep supported pretrained encoders enabled by default. Set ENCODER_PRETRAINED=0
 # when you explicitly want to train the encoder from scratch.
 ENCODER_PRETRAINED="${ENCODER_PRETRAINED:-1}"
@@ -29,6 +30,7 @@ BASIC_ARGS=(
   --batch-size "$BATCH_SIZE"
   --base-lr "$BASE_LR"
   --num-workers "$NUM_WORKERS"
+  --early_stop_patience "$EARLY_STOP_PATIENCE"
   --encoder-pretrained "$ENCODER_PRETRAINED"
 )
 

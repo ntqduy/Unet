@@ -68,6 +68,7 @@ parser.add_argument("--save_history_checkpoints", type=int, default=0, help="set
 parser.add_argument("--save_last_checkpoint", type=int, default=1, help="set to 1 to keep an overwritten last.pth checkpoint in addition to best.pth")
 parser.add_argument("--save_optimizer_state", type=int, default=0, help="set to 1 to include optimizer/scheduler/scaler states in saved checkpoints")
 parser.add_argument("--force_retrain", type=int, default=0, help="set to 1 to ignore existing compatible checkpoints and train again")
+parser.add_argument("--early_stop_patience", type=int, default=20, help="stop if val metric does not improve for this many evals; set <=0 to disable")
 parser.add_argument(
     "--final_eval_splits",
     nargs="*",
@@ -588,9 +589,10 @@ def train(args, snapshot_path):
     best_performance = float("-inf")
     best_checkpoint_path = None
     history = {"train_total_loss": [], "val_total_loss": [], "val_macro_dice": []}
+    no_improve_epochs = 0
 
     def evaluate_and_checkpoint(metric_prefix, log_prefix):
-        nonlocal best_performance, best_checkpoint_path
+        nonlocal best_performance, best_checkpoint_path, no_improve_epochs
 
         performance, val_loss, vis_samples = run_validation(args, model, valloader, device, ce_loss)
         history["val_total_loss"].append(val_loss)
@@ -598,6 +600,9 @@ def train(args, snapshot_path):
         is_best = performance > best_performance
         if is_best:
             best_performance = performance
+            no_improve_epochs = 0
+        else:
+            no_improve_epochs += 1
 
         checkpoint_path = save_checkpoint(
             snapshot_path,
@@ -628,6 +633,10 @@ def train(args, snapshot_path):
 
         logging.info("%s : val_loss : %f | val_macro_dice : %f", log_prefix, val_loss, performance)
         model.train()
+        if args.early_stop_patience > 0 and no_improve_epochs >= args.early_stop_patience:
+            logging.info("Early stopping after %d eval(s) without improvement.", no_improve_epochs)
+            return True
+        return False
 
     if args.max_epochs is not None:
         logging.info("Training mode: epoch-based")
@@ -662,10 +671,12 @@ def train(args, snapshot_path):
 
             should_eval = (epoch_num % args.eval_interval_epochs == 0) or (epoch_num == args.max_epochs)
             if should_eval:
-                evaluate_and_checkpoint(
+                should_stop = evaluate_and_checkpoint(
                     metric_prefix=f"epoch_{epoch_num}_iter_{iter_num}",
                     log_prefix=f"epoch {epoch_num}/{args.max_epochs} iteration {iter_num}",
                 )
+                if should_stop:
+                    break
     else:
         max_epoch = (args.max_iterations + iterations_per_epoch - 1) // iterations_per_epoch
         logging.info("Training mode: iteration-based")
@@ -703,10 +714,12 @@ def train(args, snapshot_path):
 
                 should_eval = (iter_num % args.eval_interval == 0) or (iter_num == args.max_iterations)
                 if should_eval:
-                    evaluate_and_checkpoint(
+                    should_stop = evaluate_and_checkpoint(
                         metric_prefix=f"iter_{iter_num}",
                         log_prefix=f"epoch {epoch_num}/{max_epoch} iteration {iter_num}/{args.max_iterations}",
                     )
+                    if should_stop:
+                        break
 
                 if iter_num >= args.max_iterations:
                     break
@@ -715,7 +728,7 @@ def train(args, snapshot_path):
             history["train_total_loss"].append(epoch_loss)
             logging.info("epoch %d/%d : mean_loss : %f", epoch_num, max_epoch, epoch_loss)
 
-            if iter_num >= args.max_iterations:
+            if iter_num >= args.max_iterations or (args.early_stop_patience > 0 and no_improve_epochs >= args.early_stop_patience):
                 break
 
     if best_checkpoint_path is None:

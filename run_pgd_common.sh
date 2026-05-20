@@ -84,6 +84,7 @@ MAX_EPOCHS_TEACHER="${MAX_EPOCHS_TEACHER:-50}"
 MAX_EPOCHS_STUDENT="${MAX_EPOCHS_STUDENT:-50}"
 BATCH_SIZE="${BATCH_SIZE:-8}"
 NUM_WORKERS="${NUM_WORKERS:-4}"
+EARLY_STOP_PATIENCE="${EARLY_STOP_PATIENCE:-20}"
 PATCH_SIZE_H="${PATCH_SIZE_H:-256}"
 PATCH_SIZE_W="${PATCH_SIZE_W:-256}"
 DEVICE="${DEVICE:-0}"
@@ -343,6 +344,7 @@ python run_pgd.py \
   --feature_layers $FEATURE_LAYERS \
   --batch_size "$BATCH_SIZE" \
   --num_workers "$NUM_WORKERS" \
+  --early_stop_patience "$EARLY_STOP_PATIENCE" \
   --patch_size "$PATCH_SIZE_H" "$PATCH_SIZE_W"
 
 echo "=============================="

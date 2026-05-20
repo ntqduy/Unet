@@ -23,6 +23,7 @@ EPOCHS="${EPOCHS:-50}"
 BATCH_SIZE="${BATCH_SIZE:-8}"
 BASE_LR="${BASE_LR:-0.01}"
 NUM_WORKERS="${NUM_WORKERS:-4}"
+EARLY_STOP_PATIENCE="${EARLY_STOP_PATIENCE:-20}"
 ENCODER_PRETRAINED="${ENCODER_PRETRAINED:-1}"
 FORCE_RETRAIN="${FORCE_RETRAIN:-0}"
 
@@ -59,6 +60,7 @@ run_basic_model_once() {
     --batch-size "$BATCH_SIZE"
     --base-lr "$BASE_LR"
     --num-workers "$NUM_WORKERS"
+    --early_stop_patience "$EARLY_STOP_PATIENCE"
     --encoder-pretrained "$ENCODER_PRETRAINED"
   )
   if [ "$FORCE_RETRAIN" = "1" ]; then

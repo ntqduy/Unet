@@ -258,6 +258,7 @@ parser.add_argument("--use_feature_distill", type=int, default=0)
 parser.add_argument("--use_aux_loss", type=int, default=0)
 parser.add_argument("--lambda_feat", type=float, default=0.1)
 parser.add_argument("--lambda_aux", type=float, default=0.2)
+parser.add_argument("--early_stop_patience", type=int, default=20, help="stop if val metric does not improve for this many epochs; set <=0 to disable")
 parser.add_argument("--seg_loss_method", type=str, default="hybrid", choices=["ce", "dice", "hybrid"], help="student segmentation loss for loss-study runs")
 parser.add_argument("--distill_loss_method", type=str, default="mse", choices=["mse", "ce", "dice", "kl", "hybrid"], help="output distillation loss for loss-study runs; default mse is the original/old logit distillation")
 parser.add_argument("--distill_temperature", type=float, default=1.0, help="temperature for KL/soft-label distillation")
@@ -1997,6 +1998,7 @@ def _run_teacher(device: torch.device, image_mode: str, db_train, trainloader, v
         history = {"train_total_loss": [], "val_total_loss": [], "val_macro_dice": []}
         best_metric = float("-inf")
         best_path = None
+        no_improve_epochs = 0
         for epoch in tqdm(range(1, args.max_epochs_teacher + 1), desc="teacher", ncols=90):
             model.train()
             train_losses = []
@@ -2032,6 +2034,9 @@ def _run_teacher(device: torch.device, image_mode: str, db_train, trainloader, v
             is_best = val_dice > best_metric
             if is_best:
                 best_metric = val_dice
+                no_improve_epochs = 0
+            else:
+                no_improve_epochs += 1
             checkpoint_path = save_checkpoint(
                 run_dir,
                 f"epoch_{epoch:03d}",
@@ -2074,6 +2079,9 @@ def _run_teacher(device: torch.device, image_mode: str, db_train, trainloader, v
                 val_loss,
                 val_dice,
             )
+            if args.early_stop_patience > 0 and no_improve_epochs >= args.early_stop_patience:
+                logging.info("Early stopping teacher after %d epoch(s) without improvement.", no_improve_epochs)
+                break
         if best_path is None:
             best_path = resolve_phase_checkpoint(run_dir, "last")
         training_time_seconds = time.perf_counter() - training_start_time
@@ -2712,6 +2720,7 @@ def _run_student(device: torch.device, image_mode: str, db_train, trainloader, v
         }
         best_metric = float("-inf")
         best_path = None
+        no_improve_epochs = 0
         for epoch in tqdm(range(1, args.max_epochs_student + 1), desc="student", ncols=90):
             epoch_policy = _student_epoch_policy(epoch, pruning_schedule, variant_policy)
             if epoch_policy["hard_pruning_active"] and not hard_pruning_applied:
@@ -2724,6 +2733,7 @@ def _run_student(device: torch.device, image_mode: str, db_train, trainloader, v
                     hard_pruning_applied = True
                     best_metric = float("-inf")
                     best_path = None
+                    no_improve_epochs = 0
                     student_model_info = extract_model_info(student)
                     student_model_info.update(
                         {
@@ -2893,6 +2903,9 @@ def _run_student(device: torch.device, image_mode: str, db_train, trainloader, v
             is_best = val_dice > best_metric
             if is_best:
                 best_metric = val_dice
+                no_improve_epochs = 0
+            else:
+                no_improve_epochs += 1
             checkpoint_path = save_checkpoint(
                 run_dir,
                 f"epoch_{epoch:03d}",
@@ -2953,6 +2966,9 @@ def _run_student(device: torch.device, image_mode: str, db_train, trainloader, v
                 val_dice,
                 epoch_policy["lambda_distill"],
             )
+            if args.early_stop_patience > 0 and no_improve_epochs >= args.early_stop_patience:
+                logging.info("Early stopping student after %d epoch(s) without improvement.", no_improve_epochs)
+                break
         if best_path is None:
             best_path = resolve_phase_checkpoint(run_dir, "last")
         training_time_seconds = time.perf_counter() - training_start_time
