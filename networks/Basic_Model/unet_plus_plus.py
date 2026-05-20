@@ -13,7 +13,7 @@ class UNetPlusPlus2D(BaseSegmentationModel):
         self,
         in_channels: int = 3,
         num_classes: int = 2,
-        encoder_name: str = "resnet34",
+        encoder_name: str = "resnet152",
         encoder_weights: str | None = "imagenet",
         encoder_pretrained: bool | None = None,
         **kwargs: Any,
