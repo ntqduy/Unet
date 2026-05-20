@@ -11,7 +11,7 @@ cd "$PROJECT_ROOT"
 : "${DATASET:?DATASET must be set before sourcing basic_models_runner.inc}"
 
 IFS=' ' read -r -a MODELS <<< "${MODELS:-unet resunet vnet unetr unet_resnet152 att_unet r2unet unet_plus_plus}"
-DEVICE_STRING="${DEVICE:-0}"
+DEVICE_STRING="${DEVICE:-0 1 2 3 4 5 6 7}"
 DEVICE_STRING="${DEVICE_STRING//,/ }"
 read -r -a DEVICE_LIST <<< "$DEVICE_STRING"
 if [ "${#DEVICE_LIST[@]}" -eq 0 ]; then
