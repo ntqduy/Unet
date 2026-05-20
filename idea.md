@@ -184,7 +184,8 @@ S1-S4 tạo student nhỏ theo stage/channel config.
 
 - Dùng các module/stage chính để tính importance.
 - Sinh `channel_config` cho student.
-- Build `PDGUNet`, nhưng hiện tại `PDGUNet` là pruned UNet bình thường, không còn learnable gate trong pipeline chính.
+- Khi `teacher_model=unet_plus_plus`, build `blueprint_unet_plus_plus`: mini UNet++ theo `channel_config`, decoder nested UNet++, không còn learnable gate.
+- Khi teacher không phải UNet++, fallback về `PDGUNet` plain pruned UNet để giữ backward compatibility.
 - Mapping layer/block không còn 1-1 với ResNet teacher, nên không nên ép vào layerwise bottleneck plot.
 
 Phù hợp để visualize:

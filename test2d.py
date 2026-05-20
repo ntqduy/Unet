@@ -34,6 +34,13 @@ parser.add_argument("--checkpoint_path", type=str, default="", help="optional ch
 parser.add_argument("--num_classes", type=int, default=2)
 parser.add_argument("--in_channels", type=int, default=3)
 parser.add_argument("--encoder_pretrained", type=int, default=1, help="used by unet_resnet152 and unet_plus_plus")
+parser.add_argument(
+    "--vnet_normalization",
+    type=str,
+    default="groupnorm",
+    choices=["batchnorm", "instancenorm", "groupnorm", "none"],
+    help="fallback VNet normalization when checkpoint metadata does not include it",
+)
 parser.add_argument("--vnet_has_dropout", type=int, default=0, help="set to 1 to evaluate VNet with dropout modules enabled")
 parser.add_argument("--vnet_has_residual", type=int, default=1, help="set to 1 to evaluate residual VNet checkpoints")
 parser.add_argument("--gpu", type=str, default="0")
@@ -176,8 +183,10 @@ def test_calculate_metric():
         model_kwargs["encoder_pretrained"] = bool(FLAGS.encoder_pretrained)
     if FLAGS.model == "vnet":
         architecture_config = dict(checkpoint_model_info.get("architecture_config") or {})
+        normalization = checkpoint_config.get("vnet_normalization", architecture_config.get("normalization", FLAGS.vnet_normalization))
         has_dropout = checkpoint_config.get("vnet_has_dropout", architecture_config.get("has_dropout", FLAGS.vnet_has_dropout))
         has_residual = checkpoint_config.get("vnet_has_residual", architecture_config.get("has_residual", FLAGS.vnet_has_residual))
+        model_kwargs["normalization"] = normalization
         model_kwargs["has_dropout"] = bool(has_dropout)
         model_kwargs["has_residual"] = bool(has_residual)
 

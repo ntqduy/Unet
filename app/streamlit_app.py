@@ -19,7 +19,7 @@ if str(PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(PROJECT_ROOT))
 
 from networks.PGD_Unet.gated_unet import PDGUNet
-from networks.PGD_Unet.middle_pruned_resnet_unet import build_middle_pruned_resnet_unet
+from networks.PGD_Unet.middle_pruned_unet_plus_plus import build_middle_pruned_resnet_unet
 from networks.PGD_Unet.pruning import load_blueprint_artifact
 from utils.checkpoints import load_checkpoint, load_checkpoint_into_model
 from utils.model_output import extract_logits

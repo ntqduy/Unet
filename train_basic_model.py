@@ -57,6 +57,13 @@ parser.add_argument("--patch_size", nargs=2, type=int, default=[256, 256])
 parser.add_argument("--num_classes", type=int, default=2)
 parser.add_argument("--in_channels", type=int, default=3, help="number of image channels to load")
 parser.add_argument("--encoder_pretrained", type=int, default=1, help="used by unet_resnet152 and unet_plus_plus; defaults to 1")
+parser.add_argument(
+    "--vnet_normalization",
+    type=str,
+    default="groupnorm",
+    choices=["batchnorm", "instancenorm", "groupnorm", "none"],
+    help="normalization layer used by VNet; groupnorm is the default for small medical-segmentation batches",
+)
 parser.add_argument("--vnet_has_dropout", type=int, default=0, help="set to 1 to enable VNet dropout during training/evaluation")
 parser.add_argument("--vnet_has_residual", type=int, default=1, help="set to 1 to use residual convolution blocks in VNet")
 parser.add_argument("--seed", type=int, default=1337)
@@ -196,6 +203,7 @@ def _expected_basic_checkpoint_signature(in_channels: int) -> dict:
         in_channels=in_channels,
         patch_size=args.patch_size,
         encoder_pretrained=bool(args.encoder_pretrained) if args.model in {"unet_resnet152", "unet_plus_plus"} else None,
+        vnet_normalization=args.vnet_normalization if args.model == "vnet" else None,
         vnet_has_dropout=bool(args.vnet_has_dropout) if args.model == "vnet" else None,
         vnet_has_residual=bool(args.vnet_has_residual) if args.model == "vnet" else None,
     )
@@ -516,6 +524,7 @@ def train(args, snapshot_path):
     if args.model in {"unet_resnet152", "unet_plus_plus"}:
         model_kwargs["encoder_pretrained"] = bool(args.encoder_pretrained)
     if args.model == "vnet":
+        model_kwargs["normalization"] = args.vnet_normalization
         model_kwargs["has_dropout"] = bool(args.vnet_has_dropout)
         model_kwargs["has_residual"] = bool(args.vnet_has_residual)
     model = net_factory(

@@ -131,6 +131,8 @@ def _build_command(args: argparse.Namespace, dataset: str, model: str, root_path
         str(args.encoder_pretrained),
         "--reuse_min_metric",
         str(args.reuse_min_metric),
+        "--vnet_normalization",
+        args.vnet_normalization,
         "--vnet_has_dropout",
         str(args.vnet_has_dropout),
         "--vnet_has_residual",
@@ -168,6 +170,13 @@ def parse_args() -> tuple[argparse.Namespace, List[str]]:
     )
     parser.add_argument("--force-retrain", action="store_true", help="Ignore compatible existing checkpoints and train again.")
     parser.add_argument("--reuse-min-metric", type=float, default=1e-8, help="Do not skip/reuse existing zero-metric runs unless this is set <0.")
+    parser.add_argument(
+        "--vnet-normalization",
+        type=str,
+        default="groupnorm",
+        choices=["batchnorm", "instancenorm", "groupnorm", "none"],
+        help="Normalization layer for VNet.",
+    )
     parser.add_argument("--vnet-has-dropout", type=int, default=0, help="Set to 1 to enable VNet dropout.")
     parser.add_argument("--vnet-has-residual", type=int, default=1, help="Set to 1 to use residual VNet blocks.")
     parser.add_argument("--summary-csv", type=str, default="", help="Optional path for aggregate summary CSV.")

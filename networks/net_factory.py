@@ -96,6 +96,8 @@ def build_basic_model(net_type: str = "unet", in_chns: int = 3, class_num: int =
     }
 
     if model_name == "vnet":
+        if "normalization" not in kwargs:
+            model_kwargs["normalization"] = "groupnorm"
         if "has_dropout" not in kwargs:
             model_kwargs["has_dropout"] = False
         if "has_residual" not in kwargs:

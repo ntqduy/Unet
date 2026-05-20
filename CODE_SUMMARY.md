@@ -5,14 +5,6 @@ File nay tom tat nhung gi code hien tai dang lam trong repo. Muc tieu chinh cua 
 ## 1. Muc Tieu Tong Quan
 
 Codebase dang benchmark hai nhanh chinh:
-
-- Basic branch: train cac baseline segmentation nhu `unet`, `unet_resnet152`, `resunet`, `vnet`, `unetr`, `att_unet`, `r2unet`, `unet_plus_plus`.
-- Proposal branch: pipeline `teacher -> pruning -> student`, trong do teacher lon duoc prune thanh student nho hon, sau do student duoc tune/distill lai.
-
-Muc tieu cua proposal la tao student nho hon teacher nhung van giu duoc Dice/IoU tot, dong thoi giam tham so, FLOPs hoac latency inference.
-
-## 2. Dataset Va Split
-
 Code ho tro cac dataset polyp:
 
 - `kvasir_seg`
@@ -52,8 +44,8 @@ python train_basic_model.py --dataset kvasir_seg --root_path data/Kvasir-SEG --m
 
 Output cua basic branch nam o:
 
-```text
-outputs/<model_name>/<dataset>/
+ `networks/PGD_Unet/middle_pruned_unet_plus_plus.py`
+ `networks/PGD_Unet/full_pruning_unet_plus_plus.py`
 ```
 
 Moi run co checkpoint, metrics, log, reports va visualization neu duoc bat.

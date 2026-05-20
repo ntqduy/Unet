@@ -21,6 +21,7 @@ ENCODER_PRETRAINED="${ENCODER_PRETRAINED:-1}"
 # fresh run, for example after changing epochs/lr/augmentation.
 FORCE_RETRAIN="${FORCE_RETRAIN:-0}"
 REUSE_MIN_METRIC="${REUSE_MIN_METRIC:-1e-8}"
+VNET_NORMALIZATION="${VNET_NORMALIZATION:-groupnorm}"
 VNET_HAS_DROPOUT="${VNET_HAS_DROPOUT:-0}"
 VNET_HAS_RESIDUAL="${VNET_HAS_RESIDUAL:-1}"
 
@@ -36,6 +37,7 @@ BASIC_ARGS=(
   --early_stop_patience "$EARLY_STOP_PATIENCE"
   --encoder-pretrained "$ENCODER_PRETRAINED"
   --reuse-min-metric "$REUSE_MIN_METRIC"
+  --vnet-normalization "$VNET_NORMALIZATION"
   --vnet-has-dropout "$VNET_HAS_DROPOUT"
   --vnet-has-residual "$VNET_HAS_RESIDUAL"
 )

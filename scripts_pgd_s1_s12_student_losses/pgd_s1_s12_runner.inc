@@ -20,15 +20,15 @@ TEACHER_OUTPUT_ROOT="${TEACHER_OUTPUT_ROOT:-$OUTPUT_ROOT}"
 # Keep step-3 pruning/recovery disabled by default for all S1-S12 batch runs.
 # Override STEP3_PRUNING=1 and set STEP3_PRUNING_EPOCHS>0 only when needed.
 STEP3_PRUNING="${STEP3_PRUNING:-0}"
-EARLY_STOP_PATIENCE="${EARLY_STOP_PATIENCE:-20}"
+EARLY_STOP_PATIENCE="${EARLY_STOP_PATIENCE:-25}"
 
-# DEVICE can be one GPU id ("0") or multiple ids ("0 1 2 3").
+# DEVICE can be one GPU id ("0") or multiple ids ("0 1 2 3 4 5 6 7").
 # With multiple ids, each PGD strategy/rate run is launched on the next GPU
 # and the runner keeps at most one active job per listed device.
 # By default the first run is executed synchronously to create/reuse the shared
 # teacher checkpoint before parallel S-runs start. Set PGD_TEACHER_PREPARE_FIRST=0
 # if the teacher checkpoint is already available and you want full parallelism.
-DEVICE_STRING="${DEVICE:-0}"
+DEVICE_STRING="${DEVICE:-0 1 2 3 4 5 6 7}"
 DEVICE_STRING="${DEVICE_STRING//,/ }"
 read -r -a DEVICE_LIST <<< "$DEVICE_STRING"
 if [ "${#DEVICE_LIST[@]}" -eq 0 ]; then

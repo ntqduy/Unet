@@ -23,12 +23,13 @@ from torchvision import transforms
 from tqdm import tqdm
 
 from dataloaders.dataset import Normalize, RandomGenerator, ToTensor, build_dataset, list_available_datasets
+from networks.PGD_Unet.blueprint_unet_plus_plus import build_blueprint_unet_plus_plus
 from networks.PGD_Unet.gated_unet import PDGUNet
-from networks.PGD_Unet.full_pruning_resnet_unet import (
+from networks.PGD_Unet.full_pruning_unet_plus_plus import (
     build_full_pruning_resnet_unet,
     build_full_pruning_resnet_unet_from_teacher,
 )
-from networks.PGD_Unet.middle_pruned_resnet_unet import (
+from networks.PGD_Unet.middle_pruned_unet_plus_plus import (
     build_middle_pruned_resnet_unet,
     build_middle_pruned_resnet_unet_from_teacher,
 )
@@ -145,11 +146,24 @@ def _student_model_name() -> str:
         return "middle_pruned_unet_plus_plus" if args.teacher_model == "unet_plus_plus" else "middle_pruned_resnet_unet"
     if _uses_full_pruned_resnet_student():
         return "full_pruning_unet_plus_plus" if args.teacher_model == "unet_plus_plus" else "full_pruning_resnet_unet"
+    if args.teacher_model == "unet_plus_plus":
+        return "blueprint_unet_plus_plus"
     return "pdg_unet"
 
 
 def _middle_student_name(prefix: str = "student") -> str:
     return f"{args.prune_method}_{prefix}"
+
+
+def _blueprint_student_architecture(blueprint: dict) -> str:
+    architecture = str(blueprint.get("student_architecture", "")).lower()
+    if architecture:
+        return architecture
+    teacher_name = str(blueprint.get("teacher_model", args.teacher_model)).lower()
+    method = str(blueprint.get("prune_method", args.prune_method)).lower()
+    if teacher_name == "unet_plus_plus" and method not in MIDDLE_PRUNED_RESNET_METHODS and method not in FULL_PRUNED_RESNET_METHODS:
+        return "blueprint_unet_plus_plus"
+    return architecture
 
 
 def _strategy_label() -> str:
@@ -758,17 +772,24 @@ def _freeze_teacher_model(teacher_model) -> None:
 
 def _build_student_from_blueprint(db_train, pruning_artifact: dict) -> nn.Module:
     blueprint = pruning_artifact["blueprint"]
-    if str(blueprint.get("student_architecture", "")).lower() in {"middle_pruned_resnet_unet", "middle_pruned_unet_plus_plus"}:
+    student_architecture = _blueprint_student_architecture(blueprint)
+    if student_architecture in {"middle_pruned_resnet_unet", "middle_pruned_unet_plus_plus"}:
         return build_middle_pruned_resnet_unet(
             in_channels=db_train.in_channels,
             num_classes=args.num_classes,
             blueprint=blueprint,
         )
-    if str(blueprint.get("student_architecture", "")).lower() in {"full_pruning_resnet_unet", "full_pruning_unet_plus_plus"}:
+    if student_architecture in {"full_pruning_resnet_unet", "full_pruning_unet_plus_plus"}:
         return build_full_pruning_resnet_unet(
             in_channels=db_train.in_channels,
             num_classes=args.num_classes,
             blueprint=blueprint,
+        )
+    if student_architecture == "blueprint_unet_plus_plus":
+        return build_blueprint_unet_plus_plus(
+            in_channels=db_train.in_channels,
+            num_classes=args.num_classes,
+            channel_config=tuple(blueprint["channel_config"]),
         )
     return PDGUNet(
         in_channels=db_train.in_channels,
@@ -2186,12 +2207,16 @@ def _run_pruning(device: torch.device, image_mode: str, db_train, teacher_artifa
                 "teacher_run_dir": project_relative_path(teacher_artifact["run_dir"], PROJECT_ROOT),
                 "student_name": _student_model_name(),
                 "mapping_rule": (
-                    f"teacher_resnet_bottleneck_conv2 -> middle_pruned_resnet_unet ({args.prune_method})"
+                    f"teacher_resnet_bottleneck_conv2 -> {_student_model_name()} ({args.prune_method})"
                     if _uses_middle_pruned_resnet_student()
                     else (
-                        f"teacher_resnet_bottleneck_full_output -> full_pruning_resnet_unet ({args.prune_method})"
+                        f"teacher_resnet_bottleneck_full_output -> {_student_model_name()} ({args.prune_method})"
                         if _uses_full_pruned_resnet_student()
-                        else "teacher_encoder -> student_channel_config"
+                        else (
+                            "teacher_unet_plus_plus_encoder -> blueprint_unet_plus_plus_channel_config"
+                            if args.teacher_model == "unet_plus_plus"
+                            else "teacher_encoder -> student_channel_config"
+                        )
                     )
                 ),
                 **_pruning_metadata(),
@@ -2205,6 +2230,15 @@ def _run_pruning(device: torch.device, image_mode: str, db_train, teacher_artifa
         elif args.teacher_model == "unet_plus_plus" and _uses_full_pruned_resnet_student():
             blueprint["student_architecture"] = "full_pruning_unet_plus_plus"
             blueprint["teacher_architecture"] = "unet_plus_plus_resnet152_encoder"
+        elif args.teacher_model == "unet_plus_plus":
+            blueprint["student_architecture"] = "blueprint_unet_plus_plus"
+            blueprint["teacher_architecture"] = "unet_plus_plus_resnet152_encoder"
+            blueprint["decoder_architecture"] = "unet_plus_plus"
+        save_blueprint_artifact(blueprint, layout["artifacts_dir"])
+    if args.teacher_model == "unet_plus_plus" and not _uses_middle_pruned_resnet_student() and not _uses_full_pruned_resnet_student():
+        blueprint["student_architecture"] = "blueprint_unet_plus_plus"
+        blueprint["teacher_architecture"] = "unet_plus_plus_resnet152_encoder"
+        blueprint["decoder_architecture"] = "unet_plus_plus"
         save_blueprint_artifact(blueprint, layout["artifacts_dir"])
     search_time_seconds = float(blueprint.get("search_time_seconds") or 0.0)
     search_payload = {
@@ -2246,7 +2280,7 @@ def _run_pruning(device: torch.device, image_mode: str, db_train, teacher_artifa
             row["actual_prune_ratio"],
         )
 
-    student_architecture = str(blueprint.get("student_architecture", "")).lower()
+    student_architecture = _blueprint_student_architecture(blueprint)
     if student_architecture in {"middle_pruned_resnet_unet", "middle_pruned_unet_plus_plus"}:
         pruned_student, weight_transfer = build_middle_pruned_resnet_unet_from_teacher(
             teacher_artifact["model"],
@@ -2315,11 +2349,18 @@ def _run_pruning(device: torch.device, image_mode: str, db_train, teacher_artifa
                 ",".join(row.get("pruned_components", [])) if row.get("pruned_components") else "none",
             )
     else:
-        pruned_student = PDGUNet(
-            in_channels=db_train.in_channels,
-            num_classes=args.num_classes,
-            channel_config=tuple(blueprint["channel_config"]),
-        ).to(device)
+        if student_architecture == "blueprint_unet_plus_plus":
+            pruned_student = build_blueprint_unet_plus_plus(
+                in_channels=db_train.in_channels,
+                num_classes=args.num_classes,
+                channel_config=tuple(blueprint["channel_config"]),
+            ).to(device)
+        else:
+            pruned_student = PDGUNet(
+                in_channels=db_train.in_channels,
+                num_classes=args.num_classes,
+                channel_config=tuple(blueprint["channel_config"]),
+            ).to(device)
         weight_transfer = _initialize_pruned_student_from_teacher(
             teacher_artifact["model"],
             pruned_student,
@@ -2331,7 +2372,7 @@ def _run_pruning(device: torch.device, image_mode: str, db_train, teacher_artifa
         weight_transfer["copy_ratio"] = weight_transfer.get("stage_transfer_ratio")
         weight_transfer["exact_match_copy_ratio"] = exact_match_fallback.get("copy_ratio")
         weight_transfer["effective_note"] = (
-            "Step-2 pruned student is initialized from teacher channels kept by the pruning blueprint. "
+            f"Step-2 {student_architecture or 'pdg_unet'} student is initialized from teacher channels kept by the pruning blueprint. "
             "Remaining compatible tensors are then copied via exact-key fallback."
         )
         logging.info(
@@ -2572,7 +2613,11 @@ def _run_student(device: torch.device, image_mode: str, db_train, trainloader, v
                 else (
                     _middle_student_name(f"full_student_{variant_policy['variant_name']}")
                     if _uses_full_pruned_resnet_student()
-                    else f"pruned_unet_student_{variant_policy['variant_name']}"
+                    else (
+                        f"blueprint_unet_plus_plus_student_{variant_policy['variant_name']}"
+                        if _student_model_name() == "blueprint_unet_plus_plus"
+                        else f"pruned_unet_student_{variant_policy['variant_name']}"
+                    )
                 )
             ),
             "blueprint_path": project_relative_path(pruning_artifact["blueprint_path"], PROJECT_ROOT),
@@ -2586,7 +2631,11 @@ def _run_student(device: torch.device, image_mode: str, db_train, trainloader, v
                 else (
                     f"{_strategy_label()} already applies structural full-output bottleneck pruning inside ResNet; gate-based soft pruning is disabled."
                     if _uses_full_pruned_resnet_student()
-                    else "Gate-based soft pruning is disabled; the student is fine-tuned as a normal pruned UNet."
+                    else (
+                        "Gate-based soft pruning is disabled; the student is fine-tuned as a normal blueprint UNet++."
+                        if _student_model_name() == "blueprint_unet_plus_plus"
+                        else "Gate-based soft pruning is disabled; the student is fine-tuned as a normal pruned UNet."
+                    )
                 )
             ),
             "hard_pruning_definition": (
@@ -2671,11 +2720,18 @@ def _run_student(device: torch.device, image_mode: str, db_train, trainloader, v
         if reusable_channel_config:
             reusable_channel_config = tuple(int(channel) for channel in reusable_channel_config)
             if reusable_channel_config != tuple(student.channel_config) and not _uses_middle_pruned_resnet_student() and not _uses_full_pruned_resnet_student():
-                student = PDGUNet(
-                    in_channels=db_train.in_channels,
-                    num_classes=args.num_classes,
-                    channel_config=reusable_channel_config,
-                ).to(device)
+                if _student_model_name() == "blueprint_unet_plus_plus":
+                    student = build_blueprint_unet_plus_plus(
+                        in_channels=db_train.in_channels,
+                        num_classes=args.num_classes,
+                        channel_config=reusable_channel_config,
+                    ).to(device)
+                else:
+                    student = PDGUNet(
+                        in_channels=db_train.in_channels,
+                        num_classes=args.num_classes,
+                        channel_config=reusable_channel_config,
+                    ).to(device)
         best_path = Path(reusable_match["checkpoint_path"])
         payload = load_checkpoint_into_model(best_path, student, device=device)
         _configure_student_variant(student, variant_policy)

@@ -399,7 +399,7 @@ class FullPrunedResNetUNet(BaseSegmentationModel):
             )
         self.prune_method = str(blueprint.get("prune_method", "full_static"))
         self.full_prune_plan = _iter_full_prune_plan(blueprint)
-        self.channel_config = tuple(int(row.get("kept_output_channels", row.get("kept_internal_channels"))) for row in self.full_prune_plan)
+        self.channel_config = tuple(int(row.get("kept_output_channels", row.get("kept_internal_channels", 0))) for row in self.full_prune_plan)
         self.stage_full_channel_config = {
             str(stage): [int(value) for value in values]
             for stage, values in dict(blueprint.get("stage_full_channel_config", {}) or {}).items()
@@ -408,17 +408,17 @@ class FullPrunedResNetUNet(BaseSegmentationModel):
             str(stage): [int(value) for value in values]
             for stage, values in dict(blueprint.get("stage_full_output_channel_config", {}) or {}).items()
         }
+        self.stage_output_kept_indices = {
+            str(stage): [int(value) for value in values]
+            for stage, values in dict(blueprint.get("stage_output_kept_indices", {}) or {}).items()
+        }
 
         for row in self.full_prune_plan:
             block = _get_module(self.base_model, str(row["block_name"]))
             _replace_bottleneck_full(block, row)
-        if self.uses_unet_plus_plus:
-            _patch_unet_plus_plus_encoder_expanders(self.base_model, blueprint)
-        else:
-            _rebuild_decoder_for_stage_outputs(self.base_model, blueprint)
 
         self.model_name = "full_pruning_unet_plus_plus" if self.uses_unet_plus_plus else "full_pruning_resnet_unet"
-        self.backbone_name = "resnet152_unet_plus_plus_full_output_pruned" if self.uses_unet_plus_plus else "resnet152_full_output_pruned"
+        self.backbone_name = "resnet152_unet_plus_plus_full_pruned" if self.uses_unet_plus_plus else "resnet152_full_pruned"
         self.student_name = f"{self.prune_method}_student"
         self.set_architecture_config(
             in_channels=in_channels,
@@ -426,24 +426,15 @@ class FullPrunedResNetUNet(BaseSegmentationModel):
             channel_config=list(self.channel_config),
             stage_full_channel_config=self.stage_full_channel_config,
             stage_full_output_channel_config=self.stage_full_output_channel_config,
+            stage_output_kept_indices=self.stage_output_kept_indices,
             pruning_method=self.prune_method,
-            pruned_internal_bottleneck_width=True,
-            pruned_bottleneck_output=True,
-            residual_projection_inserted=True,
             decoder_architecture="unet_plus_plus" if self.uses_unet_plus_plus else "unet",
-            decoder_channel_restore_projection=bool(self.uses_unet_plus_plus),
         )
 
     def forward(self, x: torch.Tensor, return_features: bool = False):
         base_output = self.base_model(x, return_features=True)
         features = extract_features(base_output)
-        decoder_features = features.get("decoder", {}) if isinstance(features, dict) else {}
         logits = extract_logits(base_output)
-        aux_logits = {
-            name: feature.mean(dim=1, keepdim=True).repeat(1, logits.shape[1], 1, 1)
-            for name, feature in decoder_features.items()
-            if name in {"up1", "up2", "up3", "up4"} and torch.is_tensor(feature)
-        }
         output = self.build_output(
             logits,
             features=features,
@@ -451,7 +442,7 @@ class FullPrunedResNetUNet(BaseSegmentationModel):
                 "channel_config": list(self.channel_config),
                 "stage_full_channel_config": self.stage_full_channel_config,
                 "stage_full_output_channel_config": self.stage_full_output_channel_config,
-                "aux_logits": aux_logits,
+                "stage_output_kept_indices": self.stage_output_kept_indices,
             },
         )
         if return_features:
@@ -499,7 +490,6 @@ def build_full_pruning_resnet_unet_from_teacher(
     exact_copy = _copy_exact_matching_base_weights(teacher_model, student.base_model)
     teacher_modules = dict(teacher_model.named_modules())
     student_modules = dict(student.base_model.named_modules())
-
     rows = []
     copied_blocks = 0
     for row in student.full_prune_plan:
@@ -508,33 +498,40 @@ def build_full_pruning_resnet_unet_from_teacher(
         target_block = student_modules.get(block_name)
         transfer_row = {
             "block_name": block_name,
-            "full_layer_name": row.get("full_layer_name"),
             "status": "skipped",
-            "kept_input_channels": int(row.get("kept_input_channels", len(row.get("input_channel_indices", [])))),
-            "kept_internal_channels": int(row["kept_internal_channels"]),
-            "kept_output_channels": int(row.get("kept_output_channels", row["kept_internal_channels"])),
-            "original_input_channels": int(row.get("original_input_channels", 0)),
-            "original_internal_channels": int(row["original_internal_channels"]),
-            "original_output_channels": int(row.get("original_output_channels", 0)),
+            "kept_internal_channels": int(row.get("kept_internal_channels", row.get("kept_channel_indices", []).__len__())),
+            "kept_output_channels": int(row.get("kept_output_channels", row.get("kept_channel_indices", []).__len__())),
             "protected_components": ["spatial_stride", "residual_add_semantics"],
-            "pruned_components": ["conv1_in", "conv1_out", "bn1", "conv2_in", "conv2_out", "bn2", "conv3_in", "conv3_out", "bn3", "downsample_out"],
+            "pruned_components": [
+                "conv1_in",
+                "conv1_out",
+                "bn1",
+                "conv2_in",
+                "conv2_out",
+                "bn2",
+                "conv3_in",
+                "conv3_out",
+                "bn3",
+                "downsample_out",
+            ],
         }
         if source_block is None or target_block is None:
             transfer_row["status"] = "block_not_found"
         else:
             result = _copy_pruned_bottleneck_full(source_block, target_block, row)
             transfer_row.update(result)
-            transfer_row["status"] = "full_block_subset_reused_output_pruned"
+            transfer_row["status"] = "full_subset_reused"
             copied_blocks += 1
         rows.append(transfer_row)
-    decoder_copy = (
-        {"decoder_subset_rows": [], "note": "UNet++ decoder tensors are copied by exact key when shapes match; stage expanders restore encoder feature channels for decoder compatibility."}
-        if student.uses_unet_plus_plus
-        else _copy_decoder_input_subsets(teacher_model, student.base_model, blueprint)
-    )
+
+    if student.uses_unet_plus_plus:
+        _patch_unet_plus_plus_encoder_expanders(student.base_model, blueprint)
+        decoder_subset_transfer = _copy_decoder_input_subsets(teacher_model, student.base_model, blueprint)
+    else:
+        decoder_subset_transfer = _copy_decoder_input_subsets(teacher_model, student.base_model, blueprint)
 
     return student, {
-        "strategy": f"resnet_bottleneck_{student.prune_method}_full_output_pruning",
+        "strategy": f"resnet_bottleneck_{student.prune_method}_pruning",
         "source": "teacher_unet_plus_plus" if student.uses_unet_plus_plus else "teacher_unet_resnet152",
         "student_architecture": student.model_name,
         "copied_blocks": int(copied_blocks),
@@ -543,6 +540,6 @@ def build_full_pruning_resnet_unet_from_teacher(
         "exact_matching_full_weight_copy": exact_copy,
         "stage_full_channel_config": student.stage_full_channel_config,
         "stage_full_output_channel_config": student.stage_full_output_channel_config,
-        "decoder_subset_transfer": decoder_copy,
+        "decoder_subset_transfer": decoder_subset_transfer,
         "rows": rows,
     }
