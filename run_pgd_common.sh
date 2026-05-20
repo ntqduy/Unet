@@ -16,11 +16,6 @@ if command -v module >/dev/null 2>&1; then
   module load "${CUDA_MODULE:-cuda-11.8.0-gcc-11.4.0-cuusula}" || true
 fi
 
-if [ -f "$HOME/miniconda3/etc/profile.d/conda.sh" ]; then
-  source "$HOME/miniconda3/etc/profile.d/conda.sh"
-  conda activate "${CONDA_ENV:-pgdunet}"
-fi
-
 PROJECT_DIR="${PROJECT_DIR:-$HOME/PGD-UNet}"
 if [ -d "$PROJECT_DIR" ]; then
   cd "$PROJECT_DIR"

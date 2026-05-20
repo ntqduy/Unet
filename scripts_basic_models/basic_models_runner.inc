@@ -25,12 +25,6 @@ BASE_LR="${BASE_LR:-0.01}"
 NUM_WORKERS="${NUM_WORKERS:-4}"
 ENCODER_PRETRAINED="${ENCODER_PRETRAINED:-1}"
 FORCE_RETRAIN="${FORCE_RETRAIN:-0}"
-CONDA_ENV="${CONDA_ENV:-pgdunet}"
-
-if [ -f "$HOME/miniconda3/etc/profile.d/conda.sh" ]; then
-  source "$HOME/miniconda3/etc/profile.d/conda.sh"
-  conda activate "$CONDA_ENV"
-fi
 
 BASIC_PIDS=()
 MODEL_INDEX=0

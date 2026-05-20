@@ -19,12 +19,6 @@ ENCODER_PRETRAINED="${ENCODER_PRETRAINED:-1}"
 # Set FORCE_RETRAIN=1 when an old compatible checkpoint exists but you want a
 # fresh run, for example after changing epochs/lr/augmentation.
 FORCE_RETRAIN="${FORCE_RETRAIN:-0}"
-CONDA_ENV="${CONDA_ENV:-pgdunet}"
-
-if [ -f "$HOME/miniconda3/etc/profile.d/conda.sh" ]; then
-  source "$HOME/miniconda3/etc/profile.d/conda.sh"
-  conda activate "$CONDA_ENV"
-fi
 
 BASIC_ARGS=(
   --datasets "${DATASETS[@]}"

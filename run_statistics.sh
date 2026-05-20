@@ -5,7 +5,6 @@ set -euo pipefail
 OUTPUTS_ROOT="outputs"
 SAVE_ROOT="statistics/outputs"
 DATASET_MAIN="cvc_300"
-CONDA_ENV="${CONDA_ENV:-pgdunet}"
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -27,11 +26,6 @@ while [[ $# -gt 0 ]]; do
       ;;
   esac
 done
-
-if [ -f "$HOME/miniconda3/etc/profile.d/conda.sh" ]; then
-  source "$HOME/miniconda3/etc/profile.d/conda.sh"
-  conda activate "$CONDA_ENV"
-fi
 
 echo "[RUN] Step 1/3: generate tables -> $SAVE_ROOT"
 python statistics/src/generate_tables.py \
