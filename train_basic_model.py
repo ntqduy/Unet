@@ -57,6 +57,8 @@ parser.add_argument("--patch_size", nargs=2, type=int, default=[256, 256])
 parser.add_argument("--num_classes", type=int, default=2)
 parser.add_argument("--in_channels", type=int, default=3, help="number of image channels to load")
 parser.add_argument("--encoder_pretrained", type=int, default=1, help="used by unet_resnet152 and unet_plus_plus; defaults to 1")
+parser.add_argument("--vnet_has_dropout", type=int, default=0, help="set to 1 to enable VNet dropout during training/evaluation")
+parser.add_argument("--vnet_has_residual", type=int, default=1, help="set to 1 to use residual convolution blocks in VNet")
 parser.add_argument("--seed", type=int, default=1337)
 parser.add_argument("--deterministic", type=int, default=1)
 parser.add_argument("--gpu", type=str, default="0")
@@ -68,6 +70,12 @@ parser.add_argument("--save_history_checkpoints", type=int, default=0, help="set
 parser.add_argument("--save_last_checkpoint", type=int, default=1, help="set to 1 to keep an overwritten last.pth checkpoint in addition to best.pth")
 parser.add_argument("--save_optimizer_state", type=int, default=0, help="set to 1 to include optimizer/scheduler/scaler states in saved checkpoints")
 parser.add_argument("--force_retrain", type=int, default=0, help="set to 1 to ignore existing compatible checkpoints and train again")
+parser.add_argument(
+    "--reuse_min_metric",
+    type=float,
+    default=1e-8,
+    help="ignore compatible existing checkpoints with best Dice/metric at or below this value; set <0 to reuse any compatible checkpoint",
+)
 parser.add_argument("--early_stop_patience", type=int, default=20, help="stop if val metric does not improve for this many evals; set <=0 to disable")
 parser.add_argument(
     "--final_eval_splits",
@@ -77,7 +85,7 @@ parser.add_argument(
 )
 
 args = parser.parse_args()
-for _flag_name in ("save_history_checkpoints", "save_last_checkpoint", "save_optimizer_state"):
+for _flag_name in ("save_history_checkpoints", "save_last_checkpoint", "save_optimizer_state", "vnet_has_dropout", "vnet_has_residual"):
     if int(getattr(args, _flag_name)) not in (0, 1):
         parser.error(f"--{_flag_name} must be 0 or 1.")
     setattr(args, _flag_name, int(getattr(args, _flag_name)))
@@ -128,6 +136,24 @@ def _write_json(path: Path, payload: dict) -> None:
         json.dump(payload, file, indent=2)
 
 
+def _checkpoint_metric_for_reuse(payload: dict) -> float | None:
+    value = payload.get("best_metric")
+    if value is not None:
+        try:
+            return float(value)
+        except (TypeError, ValueError):
+            pass
+    metrics = dict(payload.get("metrics") or {})
+    for key in ("val_macro_dice", "val_dice", "dice"):
+        value = metrics.get(key)
+        if value is not None:
+            try:
+                return float(value)
+            except (TypeError, ValueError):
+                pass
+    return None
+
+
 def _write_timing_sidecars(run_dir: Path, timing_rows: list[dict]) -> None:
     if not timing_rows:
         return
@@ -170,6 +196,8 @@ def _expected_basic_checkpoint_signature(in_channels: int) -> dict:
         in_channels=in_channels,
         patch_size=args.patch_size,
         encoder_pretrained=bool(args.encoder_pretrained) if args.model in {"unet_resnet152", "unet_plus_plus"} else None,
+        vnet_has_dropout=bool(args.vnet_has_dropout) if args.model == "vnet" else None,
+        vnet_has_residual=bool(args.vnet_has_residual) if args.model == "vnet" else None,
     )
 
 
@@ -263,6 +291,8 @@ def run_validation(args, model, valloader, device, ce_loss):
     metric_list = []
     vis_samples = []
     val_losses = []
+    foreground_cases = 0
+    empty_foreground_predictions = 0
 
     with torch.no_grad():
         for sampled_val in valloader:
@@ -287,11 +317,17 @@ def run_validation(args, model, valloader, device, ce_loss):
                 classes=args.num_classes,
                 patch_size=args.patch_size,
                 device=device,
-                return_prediction=need_prediction,
+                return_prediction=True,
             )
+            metric_i, prediction = metric_output
+            gt_foreground_pixels = int((sampled_val["label"] > 0).sum().item())
+            pred_foreground_pixels = int((prediction > 0).sum().item())
+            if gt_foreground_pixels > 0:
+                foreground_cases += 1
+                if pred_foreground_pixels == 0:
+                    empty_foreground_predictions += 1
 
             if need_prediction:
-                metric_i, prediction = metric_output
                 case_name = sampled_val["case"][0] if isinstance(sampled_val["case"], (list, tuple)) else str(sampled_val["case"])
                 vis_samples.append(
                     {
@@ -301,9 +337,6 @@ def run_validation(args, model, valloader, device, ce_loss):
                         "prediction": prediction[0],
                     }
                 )
-            else:
-                metric_i = metric_output
-
             metric_list.append(np.array(metric_i))
 
     if not metric_list:
@@ -311,6 +344,12 @@ def run_validation(args, model, valloader, device, ce_loss):
 
     metric_array = np.stack(metric_list, axis=0).mean(axis=0)
     performance = float(np.mean(metric_array[:, 0]))
+    if foreground_cases > 0 and empty_foreground_predictions == foreground_cases:
+        logging.warning(
+            "Validation foreground collapse: all %d foreground case(s) were predicted as background. "
+            "Dice becomes 0 in this situation; consider retraining with --force_retrain 1, a lower lr, or a foreground-weighted loss.",
+            foreground_cases,
+        )
     return performance, float(np.mean(val_losses)) if val_losses else 0.0, vis_samples
 
 
@@ -476,6 +515,9 @@ def train(args, snapshot_path):
         model_kwargs["image_size"] = tuple(args.patch_size)
     if args.model in {"unet_resnet152", "unet_plus_plus"}:
         model_kwargs["encoder_pretrained"] = bool(args.encoder_pretrained)
+    if args.model == "vnet":
+        model_kwargs["has_dropout"] = bool(args.vnet_has_dropout)
+        model_kwargs["has_residual"] = bool(args.vnet_has_residual)
     model = net_factory(
         net_type=args.model,
         in_chns=db_train.in_channels,
@@ -502,48 +544,57 @@ def train(args, snapshot_path):
             expected_signature=_expected_basic_checkpoint_signature(db_train.in_channels),
         )
         if reusable_match is not None:
-            reusable_checkpoint_path = Path(reusable_match["checkpoint_path"])
-            registered_checkpoint_path = reusable_checkpoint_path
-            try:
-                reusable_checkpoint_path.resolve().relative_to((snapshot_path / "checkpoints").resolve())
-            except ValueError:
-                copied = register_reused_checkpoint(
-                    source_checkpoint_path=reusable_checkpoint_path,
-                    target_run_dir=snapshot_path,
-                    project_root=PROJECT_ROOT,
-                    source_branch="basic",
-                    source_run_dir=reusable_match.get("run_dir"),
-                    payload_updates={"phase": "basic"},
+            reusable_metric = _checkpoint_metric_for_reuse(reusable_match.get("payload", {}))
+            if args.reuse_min_metric >= 0 and reusable_metric is not None and reusable_metric <= args.reuse_min_metric:
+                logging.warning(
+                    "Found compatible checkpoint but metric is %.6f <= reuse_min_metric %.6f, so training will run again. "
+                    "Use --reuse_min_metric -1 to reuse zero-metric checkpoints.",
+                    reusable_metric,
+                    args.reuse_min_metric,
                 )
-                registered_checkpoint_path = Path(copied["best"]["checkpoint_path"])
-            payload = load_checkpoint_into_model(registered_checkpoint_path, model, device=device)
-            history = payload.get("extra_state", {}).get("history", {})
-            logging.info(
-                "Found compatible checkpoint for basic branch. Skip training and reuse: %s",
-                project_relative_path(registered_checkpoint_path, PROJECT_ROOT),
-            )
-            _restore_loss_report_from_history(snapshot_path, history)
-            profile = _compute_model_profile(model, device)
-            metrics_rows = _run_final_evaluations(snapshot_path, registered_checkpoint_path, model, device, image_mode, profile, model_info, training_time_seconds=0.0)
-            _write_timing_sidecars(
-                snapshot_path,
-                [
-                    {
-                        "phase": "basic",
-                        "dataset": args.dataset,
-                        "method": args.model,
-                        "pruning_time_seconds": 0.0,
-                        "search_time_seconds": 0.0,
-                        "training_time_seconds": 0.0,
-                        "inference_time_seconds": profile.get("inference_time_seconds"),
-                        "evaluation_time_seconds": float(sum(float(row.get("evaluation_time_seconds") or 0.0) for row in metrics_rows)),
-                        "total_time_seconds": float(time.perf_counter() - phase_start_time),
-                        "reused_from": "basic",
-                    }
-                ],
-            )
-            _export_basic_channel_analysis(snapshot_path, registered_checkpoint_path, model, device)
-            return
+            else:
+                reusable_checkpoint_path = Path(reusable_match["checkpoint_path"])
+                registered_checkpoint_path = reusable_checkpoint_path
+                try:
+                    reusable_checkpoint_path.resolve().relative_to((snapshot_path / "checkpoints").resolve())
+                except ValueError:
+                    copied = register_reused_checkpoint(
+                        source_checkpoint_path=reusable_checkpoint_path,
+                        target_run_dir=snapshot_path,
+                        project_root=PROJECT_ROOT,
+                        source_branch="basic",
+                        source_run_dir=reusable_match.get("run_dir"),
+                        payload_updates={"phase": "basic"},
+                    )
+                    registered_checkpoint_path = Path(copied["best"]["checkpoint_path"])
+                payload = load_checkpoint_into_model(registered_checkpoint_path, model, device=device)
+                history = payload.get("extra_state", {}).get("history", {})
+                logging.info(
+                    "Found compatible checkpoint for basic branch. Skip training and reuse: %s",
+                    project_relative_path(registered_checkpoint_path, PROJECT_ROOT),
+                )
+                _restore_loss_report_from_history(snapshot_path, history)
+                profile = _compute_model_profile(model, device)
+                metrics_rows = _run_final_evaluations(snapshot_path, registered_checkpoint_path, model, device, image_mode, profile, model_info, training_time_seconds=0.0)
+                _write_timing_sidecars(
+                    snapshot_path,
+                    [
+                        {
+                            "phase": "basic",
+                            "dataset": args.dataset,
+                            "method": args.model,
+                            "pruning_time_seconds": 0.0,
+                            "search_time_seconds": 0.0,
+                            "training_time_seconds": 0.0,
+                            "inference_time_seconds": profile.get("inference_time_seconds"),
+                            "evaluation_time_seconds": float(sum(float(row.get("evaluation_time_seconds") or 0.0) for row in metrics_rows)),
+                            "total_time_seconds": float(time.perf_counter() - phase_start_time),
+                            "reused_from": "basic",
+                        }
+                    ],
+                )
+                _export_basic_channel_analysis(snapshot_path, registered_checkpoint_path, model, device)
+                return
 
     def worker_init_fn(worker_id):
         random.seed(args.seed + worker_id)

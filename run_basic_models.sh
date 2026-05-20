@@ -20,6 +20,9 @@ ENCODER_PRETRAINED="${ENCODER_PRETRAINED:-1}"
 # Set FORCE_RETRAIN=1 when an old compatible checkpoint exists but you want a
 # fresh run, for example after changing epochs/lr/augmentation.
 FORCE_RETRAIN="${FORCE_RETRAIN:-0}"
+REUSE_MIN_METRIC="${REUSE_MIN_METRIC:-1e-8}"
+VNET_HAS_DROPOUT="${VNET_HAS_DROPOUT:-0}"
+VNET_HAS_RESIDUAL="${VNET_HAS_RESIDUAL:-1}"
 
 BASIC_ARGS=(
   --datasets "${DATASETS[@]}"
@@ -32,6 +35,9 @@ BASIC_ARGS=(
   --num-workers "$NUM_WORKERS"
   --early_stop_patience "$EARLY_STOP_PATIENCE"
   --encoder-pretrained "$ENCODER_PRETRAINED"
+  --reuse-min-metric "$REUSE_MIN_METRIC"
+  --vnet-has-dropout "$VNET_HAS_DROPOUT"
+  --vnet-has-residual "$VNET_HAS_RESIDUAL"
 )
 
 if [ "$FORCE_RETRAIN" = "1" ]; then

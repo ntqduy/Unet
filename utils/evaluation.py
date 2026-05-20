@@ -94,6 +94,12 @@ def evaluate_segmentation_dataset(
             sample_elapsed = time.perf_counter() - sample_start
             metric_array = np.array(metric_i, dtype=np.float64)
             total_metric.append(metric_array)
+            prediction_np = prediction.detach().cpu().numpy()
+            label_np = sample["label"].detach().cpu().numpy()
+            pred_foreground_pixels = int((prediction_np > 0).sum())
+            gt_foreground_pixels = int((label_np > 0).sum())
+            pred_foreground_ratio = float(pred_foreground_pixels / max(1, prediction_np.size))
+            gt_foreground_ratio = float(gt_foreground_pixels / max(1, label_np.size))
 
             case_name = _normalize_case_name(sample)
             image_path = _sample_value(sample, "image_path")
@@ -134,6 +140,11 @@ def evaluate_segmentation_dataset(
                         "mask_path": mask_path,
                         "prediction_path": prediction_path,
                         "inference_time_s": float(sample_elapsed),
+                        "pred_foreground_pixels": pred_foreground_pixels,
+                        "gt_foreground_pixels": gt_foreground_pixels,
+                        "pred_foreground_ratio": pred_foreground_ratio,
+                        "gt_foreground_ratio": gt_foreground_ratio,
+                        "empty_foreground_prediction": int(pred_foreground_pixels == 0 and gt_foreground_pixels > 0),
                         "dice": float(metric_row[0]),
                         "iou": float(metric_row[1]),
                         "hd95": float(metric_row[2]),

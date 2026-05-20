@@ -9,7 +9,7 @@ from torchvision import transforms
 
 from dataloaders.dataset import Normalize, ToTensor, build_dataset, list_available_datasets
 from networks.net_factory import get_model_metadata, list_models, net_factory
-from utils.checkpoints import load_checkpoint_into_model
+from utils.checkpoints import load_checkpoint, load_checkpoint_into_model
 from utils.evaluation import (
     build_evaluation_output_dir,
     checkpoint_label,
@@ -34,6 +34,8 @@ parser.add_argument("--checkpoint_path", type=str, default="", help="optional ch
 parser.add_argument("--num_classes", type=int, default=2)
 parser.add_argument("--in_channels", type=int, default=3)
 parser.add_argument("--encoder_pretrained", type=int, default=1, help="used by unet_resnet152 and unet_plus_plus")
+parser.add_argument("--vnet_has_dropout", type=int, default=0, help="set to 1 to evaluate VNet with dropout modules enabled")
+parser.add_argument("--vnet_has_residual", type=int, default=1, help="set to 1 to evaluate residual VNet checkpoints")
 parser.add_argument("--gpu", type=str, default="0")
 parser.add_argument("--num_workers", type=int, default=4)
 parser.add_argument("--patch_size", nargs=2, type=int, default=[256, 256])
@@ -163,12 +165,21 @@ def test_calculate_metric():
         snapshot_path = legacy_snapshot_path
     image_mode = "grayscale" if FLAGS.in_channels == 1 else "rgb"
     checkpoint_path = _resolve_checkpoint_path(snapshot_path)
+    checkpoint_metadata = load_checkpoint(checkpoint_path)
+    checkpoint_model_info = checkpoint_metadata.get("model_info", {})
+    checkpoint_config = checkpoint_metadata.get("config", {})
 
     model_kwargs = {"mode": "test"}
     if FLAGS.model == "unetr":
         model_kwargs["image_size"] = tuple(FLAGS.patch_size)
     if FLAGS.model in {"unet_resnet152", "unet_plus_plus"}:
         model_kwargs["encoder_pretrained"] = bool(FLAGS.encoder_pretrained)
+    if FLAGS.model == "vnet":
+        architecture_config = dict(checkpoint_model_info.get("architecture_config") or {})
+        has_dropout = checkpoint_config.get("vnet_has_dropout", architecture_config.get("has_dropout", FLAGS.vnet_has_dropout))
+        has_residual = checkpoint_config.get("vnet_has_residual", architecture_config.get("has_residual", FLAGS.vnet_has_residual))
+        model_kwargs["has_dropout"] = bool(has_dropout)
+        model_kwargs["has_residual"] = bool(has_residual)
 
     reference_dataset = build_dataset(
         dataset_name=FLAGS.dataset,
@@ -184,7 +195,7 @@ def test_calculate_metric():
         **model_kwargs,
     ).to(device)
     checkpoint_payload = load_checkpoint_into_model(checkpoint_path, model, device=device)
-    checkpoint_model_info = checkpoint_payload.get("model_info", {})
+    checkpoint_model_info = checkpoint_payload.get("model_info", checkpoint_model_info)
     model.eval()
 
     split_summaries = {}

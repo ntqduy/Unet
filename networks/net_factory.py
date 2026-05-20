@@ -95,8 +95,11 @@ def build_basic_model(net_type: str = "unet", in_chns: int = 3, class_num: int =
         "num_classes": class_num,
     }
 
-    if model_name == "vnet" and "has_dropout" not in kwargs:
-        model_kwargs["has_dropout"] = mode.lower() == "train"
+    if model_name == "vnet":
+        if "has_dropout" not in kwargs:
+            model_kwargs["has_dropout"] = False
+        if "has_residual" not in kwargs:
+            model_kwargs["has_residual"] = True
     if model_name == "unetr":
         if "img_size" in kwargs and "image_size" not in kwargs:
             kwargs["image_size"] = kwargs.pop("img_size")

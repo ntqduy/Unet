@@ -26,6 +26,9 @@ NUM_WORKERS="${NUM_WORKERS:-4}"
 EARLY_STOP_PATIENCE="${EARLY_STOP_PATIENCE:-20}"
 ENCODER_PRETRAINED="${ENCODER_PRETRAINED:-1}"
 FORCE_RETRAIN="${FORCE_RETRAIN:-0}"
+REUSE_MIN_METRIC="${REUSE_MIN_METRIC:-1e-8}"
+VNET_HAS_DROPOUT="${VNET_HAS_DROPOUT:-0}"
+VNET_HAS_RESIDUAL="${VNET_HAS_RESIDUAL:-1}"
 
 BASIC_PIDS=()
 MODEL_INDEX=0
@@ -62,6 +65,9 @@ run_basic_model_once() {
     --num-workers "$NUM_WORKERS"
     --early_stop_patience "$EARLY_STOP_PATIENCE"
     --encoder-pretrained "$ENCODER_PRETRAINED"
+    --reuse-min-metric "$REUSE_MIN_METRIC"
+    --vnet-has-dropout "$VNET_HAS_DROPOUT"
+    --vnet-has-residual "$VNET_HAS_RESIDUAL"
   )
   if [ "$FORCE_RETRAIN" = "1" ]; then
     args+=(--force-retrain)
