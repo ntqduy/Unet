@@ -56,7 +56,7 @@ parser.add_argument("--base_lr", type=float, default=0.01)
 parser.add_argument("--patch_size", nargs=2, type=int, default=[256, 256])
 parser.add_argument("--num_classes", type=int, default=2)
 parser.add_argument("--in_channels", type=int, default=3, help="number of image channels to load")
-parser.add_argument("--encoder_pretrained", type=int, default=1, help="only used by unet_resnet152; defaults to 1")
+parser.add_argument("--encoder_pretrained", type=int, default=1, help="used by unet_resnet152 and unet_plus_plus; defaults to 1")
 parser.add_argument("--seed", type=int, default=1337)
 parser.add_argument("--deterministic", type=int, default=1)
 parser.add_argument("--gpu", type=str, default="0")
@@ -168,7 +168,7 @@ def _expected_basic_checkpoint_signature(in_channels: int) -> dict:
         num_classes=args.num_classes,
         in_channels=in_channels,
         patch_size=args.patch_size,
-        encoder_pretrained=bool(args.encoder_pretrained) if args.model == "unet_resnet152" else None,
+        encoder_pretrained=bool(args.encoder_pretrained) if args.model in {"unet_resnet152", "unet_plus_plus"} else None,
     )
 
 
@@ -473,7 +473,7 @@ def train(args, snapshot_path):
     model_kwargs = {"mode": "train"}
     if args.model == "unetr":
         model_kwargs["image_size"] = tuple(args.patch_size)
-    if args.model == "unet_resnet152":
+    if args.model in {"unet_resnet152", "unet_plus_plus"}:
         model_kwargs["encoder_pretrained"] = bool(args.encoder_pretrained)
     model = net_factory(
         net_type=args.model,
@@ -790,6 +790,10 @@ if __name__ == "__main__":
         format="[%(asctime)s.%(msecs)03d] %(message)s",
         datefmt="%H:%M:%S",
     )
+    file_formatter = logging.Formatter("[%(asctime)s.%(msecs)03d] %(message)s", datefmt="%H:%M:%S")
+    log_txt_handler = logging.FileHandler(str(snapshot_path / "log.txt"), mode="a", encoding="utf-8")
+    log_txt_handler.setFormatter(file_formatter)
+    logging.getLogger().addHandler(log_txt_handler)
     logging.getLogger().addHandler(logging.StreamHandler(sys.stdout))
     logging.info(str(args))
 

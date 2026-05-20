@@ -8,14 +8,17 @@ import torch.nn as nn
 
 # Small helpers for pruning method normalization.
 #
-# The production S5/S6/S7/S8 path for ResNet152 bottlenecks is implemented in
-# `networks/PGD_Unet/pruning.py`, where every block prunes only `conv2` and keeps
-# the block boundary outputs full. The generic middle-layer selector below is kept
+# The production S5-S12 paths for ResNet152 bottlenecks are implemented in
+# `networks/PGD_Unet/pruning.py`, where S5-S8 prune only `conv2` and keep
+# block boundary outputs full, while S9-S12 prune the full bottleneck path
+# including `conv3` output and rebuild residual/decoder shapes. The generic
+# middle-layer selector below is kept
 # for backward-compatible imports and non-ResNet experiments.
 
-STATIC_RATIO_PRUNE_METHODS = {"static", "middle_static"}
+STATIC_RATIO_PRUNE_METHODS = {"static", "middle_static", "full_static"}
 MIDDLE_STATIC_PRUNE_METHOD = "middle_static"
 MIDDLE_RESNET_PRUNE_METHODS = {"middle_static", "middle_kneedle", "middle_otsu", "middle_gmm"}
+FULL_RESNET_PRUNE_METHODS = {"full_static", "full_kneedle", "full_otsu", "full_gmm"}
 CHANNEL_LAYER_TYPES = (nn.Conv2d, nn.ConvTranspose2d)
 PROJECTION_LAYER_TOKENS = ("downsample", "skip", "shortcut", "projection", "proj")
 
@@ -41,6 +44,10 @@ def is_middle_static_pruning(prune_method: str) -> bool:
 
 def is_middle_resnet_pruning(prune_method: str) -> bool:
     return str(prune_method).lower() in MIDDLE_RESNET_PRUNE_METHODS
+
+
+def is_full_resnet_pruning(prune_method: str) -> bool:
+    return str(prune_method).lower() in FULL_RESNET_PRUNE_METHODS
 
 
 def _is_projection_layer(layer_name: str) -> bool:

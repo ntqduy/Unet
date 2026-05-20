@@ -4,7 +4,9 @@ from pathlib import Path
 from typing import Sequence
 
 import torch
+from PIL import Image, ImageDraw, ImageFont
 from torchvision.utils import save_image
+from torchvision.transforms.functional import to_pil_image
 
 
 DEFAULT_PALETTE = (
@@ -48,6 +50,33 @@ def colorize_mask(mask: torch.Tensor, palette: Sequence[Sequence[int]] = DEFAULT
     return color
 
 
+def _label_strip(width: int, height: int = 28, labels: Sequence[str] = ("Image", "GT", "PR")) -> Image.Image:
+    strip = Image.new("RGB", (int(width), int(height)), color=(255, 255, 255))
+    draw = ImageDraw.Draw(strip)
+    font = ImageFont.load_default()
+    column_width = int(width) / max(1, len(labels))
+    for index, label in enumerate(labels):
+        try:
+            bbox = draw.textbbox((0, 0), label, font=font)
+            text_width = bbox[2] - bbox[0]
+            text_height = bbox[3] - bbox[1]
+        except AttributeError:
+            text_width, text_height = draw.textsize(label, font=font)
+        x = int(index * column_width + (column_width - text_width) / 2)
+        y = int((height - text_height) / 2)
+        draw.text((x, y), label, fill=(0, 0, 0), font=font)
+    return strip
+
+
+def _save_labeled_triplet_panel(panel: torch.Tensor, output_path: Path) -> None:
+    panel_image = to_pil_image(panel.detach().cpu().clamp(0.0, 1.0))
+    strip = _label_strip(panel_image.width)
+    canvas = Image.new("RGB", (panel_image.width, panel_image.height + strip.height), color=(255, 255, 255))
+    canvas.paste(strip, (0, 0))
+    canvas.paste(panel_image.convert("RGB"), (0, strip.height))
+    canvas.save(output_path)
+
+
 def save_triplet_visualization(
     image: torch.Tensor,
     label: torch.Tensor,
@@ -71,4 +100,4 @@ def save_triplet_visualization(
     save_image(image_vis, image_dir / f"{case_name}.png")
     save_image(label_vis, gt_dir / f"{case_name}.png")
     save_image(pred_vis, pred_dir / f"{case_name}.png")
-    save_image(torch.cat([image_vis, label_vis, pred_vis], dim=2), panel_dir / f"{case_name}.png")
+    _save_labeled_triplet_panel(torch.cat([image_vis, label_vis, pred_vis], dim=2), panel_dir / f"{case_name}.png")

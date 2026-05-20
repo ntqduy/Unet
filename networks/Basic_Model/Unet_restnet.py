@@ -9,11 +9,21 @@ from torchvision import models
 
 from networks.Basic_Model.common import DoubleConv2d
 from utils.model_output import BaseSegmentationModel
+from utils.pretrained_cache import ensure_pretrain_cache, find_cached_checkpoint
 
 
 def _build_resnet152(encoder_pretrained: bool):
+    if not encoder_pretrained:
+        return models.resnet152(weights=None)
+    ensure_pretrain_cache()
     try:
-        weights = models.ResNet152_Weights.DEFAULT if encoder_pretrained else None
+        weights = models.ResNet152_Weights.DEFAULT
+        cached_path = find_cached_checkpoint(weights.url, min_bytes=100_000_000)
+        if cached_path is not None:
+            model = models.resnet152(weights=None)
+            state_dict = torch.load(cached_path, map_location="cpu")
+            model.load_state_dict(state_dict)
+            return model
         return models.resnet152(weights=weights)
     except AttributeError:
         return models.resnet152(pretrained=encoder_pretrained)

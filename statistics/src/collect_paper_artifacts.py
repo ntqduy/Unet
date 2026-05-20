@@ -12,10 +12,14 @@ MAIN_FIGURES = [
     ("figure3", "{dataset}/figure3_thresholding_methods.pdf"),
     ("figure4", "paper_figures/figure4_block_pruning_strategy.pdf"),
     ("figure5", "{dataset}/figure5_layerwise_pruning_ratio.pdf"),
+    ("figure5_s1_s4", "{dataset}/figure5_s1_s4_blueprint_stage_pruning_ratio.pdf"),
+    ("figure5_s5_s8", "{dataset}/figure5_s5_s8_middle_conv2_layerwise_pruning_ratio.pdf"),
+    ("figure5_s9_s12", "{dataset}/figure5_s9_s12_full_block_layerwise_pruning_ratio.pdf"),
     ("figure6", "{dataset}/figure6_accuracy_efficiency_tradeoff.pdf"),
     ("figure8", "{dataset}/figure8_visual_comparison.pdf"),
     ("figure15", "figure15_params_dice_tradeoff.pdf"),
     ("figure16", "figure16_performance_clinicdb.pdf"),
+    ("figure17", "{dataset}/figure17_kd_vs_seg_validation_dice.pdf"),
 ]
 
 APPENDIX_FIGURES = [

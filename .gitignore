@@ -79,3 +79,5 @@ dataset/
 venv/
 .venv/
 outputs/
+
+pretrain/

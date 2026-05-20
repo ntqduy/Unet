@@ -8,6 +8,7 @@ import pickle
 import random
 import sys
 import time
+from contextlib import contextmanager
 from pathlib import Path
 
 import numpy as np
@@ -23,6 +24,10 @@ from tqdm import tqdm
 
 from dataloaders.dataset import Normalize, RandomGenerator, ToTensor, build_dataset, list_available_datasets
 from networks.PGD_Unet.gated_unet import PDGUNet
+from networks.PGD_Unet.full_pruning_resnet_unet import (
+    build_full_pruning_resnet_unet,
+    build_full_pruning_resnet_unet_from_teacher,
+)
 from networks.PGD_Unet.middle_pruned_resnet_unet import (
     build_middle_pruned_resnet_unet,
     build_middle_pruned_resnet_unet_from_teacher,
@@ -35,7 +40,6 @@ from utils.channel_analysis import (
     extract_channel_analysis,
     save_channel_analysis_artifacts,
     save_comparison_artifacts,
-    save_gating_analysis_artifacts,
     save_pruning_analysis_artifacts,
 )
 from utils.checkpoints import (
@@ -90,9 +94,14 @@ PRUNE_STRATEGY_TO_METHOD = {
     "S6": "middle_kneedle",
     "S7": "middle_otsu",
     "S8": "middle_gmm",
+    "S9": "full_static",
+    "S10": "full_kneedle",
+    "S11": "full_otsu",
+    "S12": "full_gmm",
 }
 PRUNE_METHOD_TO_STRATEGY = {method: strategy for strategy, method in PRUNE_STRATEGY_TO_METHOD.items()}
 MIDDLE_PRUNED_RESNET_METHODS = {"middle_static", "middle_kneedle", "middle_otsu", "middle_gmm"}
+FULL_PRUNED_RESNET_METHODS = {"full_static", "full_kneedle", "full_otsu", "full_gmm"}
 
 
 def _format_float_for_path(value: float) -> str:
@@ -106,7 +115,7 @@ def build_pruning_output_dir_name(prune_method: str, static_prune_ratio: float |
         if static_prune_ratio is None:
             raise ValueError(f"static_prune_ratio is required for {prune_method} output directory naming.")
         return f"output_{prune_method}_{_format_float_for_path(static_prune_ratio)}"
-    if prune_method in {"kneedle", "otsu", "gmm", "middle_kneedle", "middle_otsu", "middle_gmm"}:
+    if prune_method in {"kneedle", "otsu", "gmm", "middle_kneedle", "middle_otsu", "middle_gmm", "full_kneedle", "full_otsu", "full_gmm"}:
         return f"output_{prune_method}"
     raise ValueError(f"Unsupported prune_method: {prune_method}")
 
@@ -127,8 +136,16 @@ def _uses_middle_pruned_resnet_student() -> bool:
     return str(args.prune_method).lower() in MIDDLE_PRUNED_RESNET_METHODS
 
 
+def _uses_full_pruned_resnet_student() -> bool:
+    return str(args.prune_method).lower() in FULL_PRUNED_RESNET_METHODS
+
+
 def _student_model_name() -> str:
-    return "middle_pruned_resnet_unet" if _uses_middle_pruned_resnet_student() else "pdg_unet"
+    if _uses_middle_pruned_resnet_student():
+        return "middle_pruned_resnet_unet"
+    if _uses_full_pruned_resnet_student():
+        return "full_pruning_resnet_unet"
+    return "pdg_unet"
 
 
 def _middle_student_name(prefix: str = "student") -> str:
@@ -230,13 +247,13 @@ parser.add_argument("--num_classes", type=int, default=2)
 parser.add_argument("--in_channels", type=int, default=3)
 parser.add_argument("--encoder_pretrained", type=int, default=1, help="defaults to 1 for unet_resnet152 teacher builds")
 parser.add_argument("--prune_ratio", type=float, default=0.5, help="backward-compatible fixed ratio used by static pruning methods if --static_prune_ratio is omitted")
-parser.add_argument("--prune_strategy", type=str, default="", help="external pruning strategy code: S1=static, S2=kneedle, S3=otsu, S4=gmm, S5=middle_static, S6=middle_kneedle, S7=middle_otsu, S8=middle_gmm")
-parser.add_argument("--prune_method", type=str, default="", help="internal pruning method: static, kneedle, otsu, gmm, middle_static, middle_kneedle, middle_otsu, or middle_gmm")
+parser.add_argument("--prune_strategy", type=str, default="", help="external pruning strategy code: S1=static, S2=kneedle, S3=otsu, S4=gmm, S5=middle_static, S6=middle_kneedle, S7=middle_otsu, S8=middle_gmm, S9=full_static, S10=full_kneedle, S11=full_otsu, S12=full_gmm")
+parser.add_argument("--prune_method", type=str, default="", help="internal pruning method: static, kneedle, otsu, gmm, middle_*, or full_*")
 parser.add_argument("--static_prune_ratio", type=float, default=None, help="fixed channel prune ratio for static and middle_static pruning; dynamic strategies ignore it")
 parser.add_argument("--lambda_distill", type=float, default=0.3)
-parser.add_argument("--lambda_sparsity", type=float, default=0.3)
+parser.add_argument("--lambda_sparsity", type=float, default=0.0)
 parser.add_argument("--use_kd_output", type=int, default=1)
-parser.add_argument("--use_sparsity", type=int, default=1)
+parser.add_argument("--use_sparsity", type=int, default=0)
 parser.add_argument("--use_feature_distill", type=int, default=0)
 parser.add_argument("--use_aux_loss", type=int, default=0)
 parser.add_argument("--lambda_feat", type=float, default=0.1)
@@ -352,11 +369,15 @@ def _loss_tag() -> str:
         parts.append("feat")
     if args.use_aux_loss:
         parts.append("aux")
-    if args.use_sparsity:
+    if _effective_sparsity_loss_enabled():
         parts.append("sparsity")
     if len(parts) == 2:
         parts.append("only")
     return "_".join(parts)
+
+
+def _effective_sparsity_loss_enabled() -> bool:
+    return False
 
 
 args.loss_tag = _loss_tag()
@@ -417,6 +438,7 @@ def _pruning_metadata() -> dict:
         "loss_tag": args.loss_tag,
         "use_kd_output": int(args.use_kd_output),
         "use_sparsity": int(args.use_sparsity),
+        "effective_use_sparsity": int(_effective_sparsity_loss_enabled()),
         "use_feature_distill": int(args.use_feature_distill),
         "use_aux_loss": int(args.use_aux_loss),
         "lambda_feat": float(args.lambda_feat),
@@ -438,6 +460,8 @@ def _blueprint_matches_current_pruning_config(candidate_blueprint: dict) -> bool
         return False
     if args.prune_method in MIDDLE_PRUNED_RESNET_METHODS and str(candidate_blueprint.get("student_architecture", "")).lower() != "middle_pruned_resnet_unet":
         return False
+    if args.prune_method in FULL_PRUNED_RESNET_METHODS and str(candidate_blueprint.get("student_architecture", "")).lower() != "full_pruning_resnet_unet":
+        return False
     if uses_static_prune_ratio(args.prune_method):
         candidate_ratio = candidate_blueprint.get("static_prune_ratio", candidate_blueprint.get("prune_ratio"))
         try:
@@ -447,17 +471,42 @@ def _blueprint_matches_current_pruning_config(candidate_blueprint: dict) -> bool
     return True
 
 
+def _make_file_log_handler(log_path: Path, formatter: logging.Formatter) -> logging.FileHandler:
+    log_path = Path(log_path)
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+    handler = logging.FileHandler(str(log_path), mode="a", encoding="utf-8")
+    handler.setFormatter(formatter)
+    return handler
+
+
 def _configure_logging(log_path: Path) -> None:
     logger = logging.getLogger()
     logger.handlers.clear()
     logger.setLevel(logging.INFO)
     formatter = logging.Formatter("[%(asctime)s.%(msecs)03d] %(message)s", datefmt="%H:%M:%S")
-    file_handler = logging.FileHandler(str(log_path), encoding="utf-8")
-    file_handler.setFormatter(formatter)
+    file_handler = _make_file_log_handler(log_path, formatter)
     stream_handler = logging.StreamHandler(sys.stdout)
     stream_handler.setFormatter(formatter)
     logger.addHandler(file_handler)
+    if Path(log_path).name != "log.txt":
+        logger.addHandler(_make_file_log_handler(Path(log_path).with_name("log.txt"), formatter))
     logger.addHandler(stream_handler)
+
+
+@contextmanager
+def _phase_log(run_dir: Path | str, phase_label: str):
+    layout = ensure_run_layout(run_dir)
+    formatter = logging.Formatter("[%(asctime)s.%(msecs)03d] %(message)s", datefmt="%H:%M:%S")
+    handler = _make_file_log_handler(layout["run_dir"] / "log.txt", formatter)
+    logger = logging.getLogger()
+    logger.addHandler(handler)
+    logging.info("Phase log started | phase=%s | log=%s", phase_label, project_relative_path(layout["run_dir"] / "log.txt", PROJECT_ROOT))
+    try:
+        yield layout["run_dir"] / "log.txt"
+    finally:
+        logging.info("Phase log finished | phase=%s", phase_label)
+        logger.removeHandler(handler)
+        handler.close()
 
 
 def _teacher_signature(in_channels: int) -> dict:
@@ -500,40 +549,34 @@ def _student_variant_policy() -> dict:
             "use_distill": False,
             "use_gating": False,
             "use_sparsity": False,
-            "description": "Pruned student baseline without distillation or learnable gating.",
+            "description": "Pruned student baseline trained with segmentation loss only.",
         },
         "pruned_distill": {
             "variant_name": "pruned_distill",
             "use_distill": True,
             "use_gating": False,
             "use_sparsity": False,
-            "description": "Pruned student with teacher distillation but fixed-open gates.",
+            "description": "Pruned student trained with segmentation loss and teacher output distillation.",
         },
         "pruned_gate_sparsity": {
             "variant_name": "pruned_gate_sparsity",
             "use_distill": False,
-            "use_gating": True,
-            "use_sparsity": True,
-            "description": "Pruned student with learnable gating and sparsity, without teacher distillation.",
+            "use_gating": False,
+            "use_sparsity": False,
+            "description": "Deprecated compatibility alias; gates are disabled and the student uses segmentation loss only.",
         },
         "full": {
             "variant_name": "full",
             "use_distill": True,
-            "use_gating": True,
-            "use_sparsity": True,
-            "description": "Full proposal step 3: blueprint initialization + teacher distillation + gating + sparsity.",
+            "use_gating": False,
+            "use_sparsity": False,
+            "description": "Full proposal step 3: blueprint initialization plus teacher output distillation, without gates.",
         },
     }
     policy = dict(policies[args.student_variant])
     policy["use_distill"] = bool(policy["use_distill"] and args.use_kd_output)
-    policy["use_sparsity"] = bool(policy["use_sparsity"] and args.use_sparsity)
-    if _uses_middle_pruned_resnet_student():
-        policy["use_gating"] = False
-        policy["use_sparsity"] = False
-        policy["description"] = (
-            f"{_strategy_label()} uses structural middle-channel pruning inside ResNet bottlenecks. "
-            "The ResNet boundary layers stay full, so PDG gate-based late pruning is disabled for this student."
-        )
+    policy["use_gating"] = False
+    policy["use_sparsity"] = False
     return policy
 
 
@@ -714,6 +757,12 @@ def _build_student_from_blueprint(db_train, pruning_artifact: dict) -> nn.Module
     blueprint = pruning_artifact["blueprint"]
     if str(blueprint.get("student_architecture", "")).lower() == "middle_pruned_resnet_unet":
         return build_middle_pruned_resnet_unet(
+            in_channels=db_train.in_channels,
+            num_classes=args.num_classes,
+            blueprint=blueprint,
+        )
+    if str(blueprint.get("student_architecture", "")).lower() == "full_pruning_resnet_unet":
+        return build_full_pruning_resnet_unet(
             in_channels=db_train.in_channels,
             num_classes=args.num_classes,
             blueprint=blueprint,
@@ -1027,6 +1076,17 @@ def _copy_teacher_head_to_student_head(teacher_model, student_model: PDGUNet, st
     return _safe_copy_conv2d_state(source_head, target_head, out_indices, stem_indices)
 
 
+def _plain_double_conv_out_channels(block) -> int:
+    double_conv = getattr(block, "conv", block)
+    if hasattr(double_conv, "block") and len(double_conv.block) >= 2:
+        second = double_conv.block[1]
+        if hasattr(second, "block") and len(second.block) > 0 and isinstance(second.block[0], nn.Conv2d):
+            return int(second.block[0].out_channels)
+    if hasattr(block, "gate") and hasattr(block.gate, "alpha"):
+        return int(block.gate.alpha.numel())
+    raise TypeError(f"Cannot infer output channels from student block {type(block)!r}.")
+
+
 def _initialize_pruned_student_from_teacher(teacher_model, student_model: PDGUNet, blueprint: dict, *, input_channels: int) -> dict:
     teacher_modules = dict(teacher_model.named_modules())
     stage_names = ("stem", "down1", "down2", "down3", "down4")
@@ -1048,7 +1108,7 @@ def _initialize_pruned_student_from_teacher(teacher_model, student_model: PDGUNe
         teacher_module_name = module_row.get("module_name") or module_row.get("layer_name")
         kept_indices = [int(index) for index in module_row.get("kept_channel_indices", [])]
         target_block = student_stage_map[stage_name]
-        target_channels = int(target_block.gate.alpha.numel())
+        target_channels = _plain_double_conv_out_channels(target_block)
         if not kept_indices:
             kept_indices = list(range(target_channels))
         elif len(kept_indices) != target_channels:
@@ -1089,8 +1149,6 @@ def _initialize_pruned_student_from_teacher(teacher_model, student_model: PDGUNe
         student_model,
         stem_indices if stem_indices else list(range(int(student_model.channel_config[0]))),
     )
-    student_model.force_gates_open(args.student_gate_open_value)
-
     return {
         "strategy": "channel_subset_teacher_weight_reuse",
         "teacher_target_modules": [row.get("module_name") or row.get("layer_name") for row in blueprint_modules],
@@ -1100,10 +1158,6 @@ def _initialize_pruned_student_from_teacher(teacher_model, student_model: PDGUNe
         "stage_transfer_rows": stage_transfer_rows,
         "head_transfer_applied": bool(head_transfer.get("copied")),
         "head_transfer": head_transfer,
-        "gate_initialization": {
-            "strategy": "force_open_after_teacher_subset_transfer",
-            "open_probability": float(args.student_gate_open_value),
-        },
     }
 
 
@@ -1166,8 +1220,9 @@ def _copy_double_conv_state(source_block, target_block, out_indices: list[int], 
 
 def _copy_gated_double_conv_state(source_block, target_block, out_indices: list[int], in_indices: list[int]) -> None:
     _copy_double_conv_state(source_block.conv, target_block.conv, out_indices, in_indices)
-    out_index = torch.as_tensor(out_indices, dtype=torch.long, device=source_block.gate.alpha.device)
-    target_block.gate.alpha.data.copy_(source_block.gate.alpha.data.index_select(0, out_index).to(target_block.gate.alpha.device))
+    if hasattr(source_block, "gate") and hasattr(target_block, "gate"):
+        out_index = torch.as_tensor(out_indices, dtype=torch.long, device=source_block.gate.alpha.device)
+        target_block.gate.alpha.data.copy_(source_block.gate.alpha.data.index_select(0, out_index).to(target_block.gate.alpha.device))
 
 
 def _concat_skip_and_up_indices(stage_indices: list[int], stage_channels: int) -> list[int]:
@@ -1966,7 +2021,11 @@ def _run_teacher(device: torch.device, image_mode: str, db_train, trainloader, v
                 sample_validator=_validate_label_batch,
             )
             val_dice = float(np.mean(val_result["average_metric"][:, 0]))
+            val_iou = float(np.mean(val_result["average_metric"][:, 1]))
+            val_hd95 = float(np.mean(val_result["average_metric"][:, 2]))
             val_loss = _compute_supervised_val_loss(model, valloader, device, ce_loss, dice_loss)
+            train_loss = float(np.mean(train_losses)) if train_losses else 0.0
+            learning_rate = float(optimizer.param_groups[0].get("lr", args.teacher_lr))
             history["train_total_loss"].append(float(np.mean(train_losses)) if train_losses else 0.0)
             history["val_total_loss"].append(val_loss)
             history["val_macro_dice"].append(val_dice)
@@ -1980,7 +2039,21 @@ def _run_teacher(device: torch.device, image_mode: str, db_train, trainloader, v
                 optimizer=optimizer,
                 epoch=epoch,
                 best_metric=best_metric,
-                metrics={"val_macro_dice": val_dice, "val_total_loss": val_loss},
+                metrics={
+                    "train_total_loss": train_loss,
+                    "train_seg_loss": train_loss,
+                    "train_kd_loss": 0.0,
+                    "val_macro_dice": val_dice,
+                    "val_dice": val_dice,
+                    "val_iou": val_iou,
+                    "val_hd95": val_hd95,
+                    "val_total_loss": val_loss,
+                    "learning_rate": learning_rate,
+                    "best_val_dice": best_metric,
+                    "is_best": int(is_best),
+                    "use_kd_output": int(args.use_kd_output),
+                    "loss_tag": args.loss_tag,
+                },
                 config=vars(args),
                 model_info=model_info,
                 phase="teacher",
@@ -2105,7 +2178,11 @@ def _run_pruning(device: torch.device, image_mode: str, db_train, teacher_artifa
                 "mapping_rule": (
                     f"teacher_resnet_bottleneck_conv2 -> middle_pruned_resnet_unet ({args.prune_method})"
                     if _uses_middle_pruned_resnet_student()
-                    else "teacher_encoder -> student_channel_config"
+                    else (
+                        f"teacher_resnet_bottleneck_full_output -> full_pruning_resnet_unet ({args.prune_method})"
+                        if _uses_full_pruned_resnet_student()
+                        else "teacher_encoder -> student_channel_config"
+                    )
                 ),
                 **_pruning_metadata(),
                 "search_time_seconds": float(search_time_seconds),
@@ -2153,7 +2230,8 @@ def _run_pruning(device: torch.device, image_mode: str, db_train, teacher_artifa
             row["actual_prune_ratio"],
         )
 
-    if str(blueprint.get("student_architecture", "")).lower() == "middle_pruned_resnet_unet":
+    student_architecture = str(blueprint.get("student_architecture", "")).lower()
+    if student_architecture == "middle_pruned_resnet_unet":
         pruned_student, weight_transfer = build_middle_pruned_resnet_unet_from_teacher(
             teacher_artifact["model"],
             in_channels=db_train.in_channels,
@@ -2186,6 +2264,40 @@ def _run_pruning(device: torch.device, image_mode: str, db_train, teacher_artifa
                 ",".join(row.get("protected_components", [])) if row.get("protected_components") else "none",
                 ",".join(row.get("pruned_components", [])) if row.get("pruned_components") else "none",
             )
+    elif student_architecture == "full_pruning_resnet_unet":
+        pruned_student, weight_transfer = build_full_pruning_resnet_unet_from_teacher(
+            teacher_artifact["model"],
+            in_channels=db_train.in_channels,
+            num_classes=args.num_classes,
+            blueprint=blueprint,
+        )
+        pruned_student = pruned_student.to(device)
+        weight_transfer["copy_ratio"] = weight_transfer.get("block_transfer_ratio")
+        weight_transfer["exact_match_copy_ratio"] = weight_transfer.get("exact_matching_full_weight_copy", {}).get("copy_ratio")
+        weight_transfer["effective_note"] = (
+            f"{_strategy_label()} initializes a full-output-pruned ResNet-UNet from the teacher. "
+            "Each bottleneck prunes conv1/conv2 internal width and conv3 output; residual projections and decoder skip inputs are rebuilt to keep shapes valid."
+        )
+        logging.info(
+            "Step-2 %s full-block reuse | copied_blocks=%s/%s | exact_match_copy_ratio=%.4f",
+            _strategy_label(),
+            weight_transfer.get("copied_blocks"),
+            weight_transfer.get("requested_blocks"),
+            float(weight_transfer.get("exact_match_copy_ratio", 0.0) or 0.0),
+        )
+        for row in weight_transfer.get("rows", [])[:20]:
+            logging.info(
+                "Step-2 %s full block reuse | block=%s | status=%s | internal=%s/%s | output=%s/%s | projection=%s | pruned=%s",
+                _strategy_label(),
+                row.get("block_name"),
+                row.get("status"),
+                row.get("kept_internal_channels"),
+                row.get("original_internal_channels"),
+                row.get("kept_output_channels"),
+                row.get("original_output_channels"),
+                row.get("projection_mode", "n/a"),
+                ",".join(row.get("pruned_components", [])) if row.get("pruned_components") else "none",
+            )
     else:
         pruned_student = PDGUNet(
             in_channels=db_train.in_channels,
@@ -2199,13 +2311,12 @@ def _run_pruning(device: torch.device, image_mode: str, db_train, teacher_artifa
             input_channels=db_train.in_channels,
         )
         exact_match_fallback = _copy_exact_matching_weights(teacher_artifact["model"], pruned_student)
-        pruned_student.force_gates_open(args.student_gate_open_value)
         weight_transfer["exact_match_fallback"] = exact_match_fallback
         weight_transfer["copy_ratio"] = weight_transfer.get("stage_transfer_ratio")
         weight_transfer["exact_match_copy_ratio"] = exact_match_fallback.get("copy_ratio")
         weight_transfer["effective_note"] = (
             "Step-2 pruned student is initialized from teacher channels kept by the pruning blueprint. "
-            "Remaining compatible tensors are then copied via exact-key fallback, and gates are forced open for fair baseline evaluation."
+            "Remaining compatible tensors are then copied via exact-key fallback."
         )
         logging.info(
             "Step-2 teacher reuse | transferred_stages=%s/%s | head_transfer=%s | exact_match_copy_ratio=%.4f",
@@ -2231,7 +2342,18 @@ def _run_pruning(device: torch.device, image_mode: str, db_train, teacher_artifa
             head_transfer.get("copy_mode", "unmapped"),
             head_transfer.get("reason", ""),
         )
-    middle_static_student = str(blueprint.get("student_architecture", "")).lower() == "middle_pruned_resnet_unet"
+    weight_transfer_dir = layout["artifacts_dir"] / "weight_transfer"
+    weight_transfer_dir.mkdir(parents=True, exist_ok=True)
+    _write_json(weight_transfer_dir / "weight_transfer.json", weight_transfer)
+    if weight_transfer.get("stage_transfer_rows"):
+        write_metrics_rows(weight_transfer["stage_transfer_rows"], weight_transfer_dir / "stage_transfer_rows.csv")
+    if weight_transfer.get("rows"):
+        write_metrics_rows(weight_transfer["rows"], weight_transfer_dir / "block_transfer_rows.csv")
+    decoder_subset_transfer = weight_transfer.get("decoder_subset_transfer")
+    if isinstance(decoder_subset_transfer, dict) and decoder_subset_transfer.get("rows"):
+        write_metrics_rows(decoder_subset_transfer["rows"], weight_transfer_dir / "decoder_subset_transfer_rows.csv")
+    middle_static_student = student_architecture == "middle_pruned_resnet_unet"
+    full_static_student = student_architecture == "full_pruning_resnet_unet"
     pruning_model_info = extract_model_info(pruned_student)
     pruning_elapsed_before_eval = time.perf_counter() - phase_start_time
     pruning_model_info.update(
@@ -2240,14 +2362,26 @@ def _run_pruning(device: torch.device, image_mode: str, db_train, teacher_artifa
             "phase_name": "pruning",
             "teacher_model": args.teacher_model,
             "teacher_backbone_name": teacher_artifact["metadata"].get("backbone_name"),
-            "student_name": _middle_student_name("student_init") if middle_static_student else "pruned_student_init",
+            "student_name": (
+                _middle_student_name("student_init")
+                if middle_static_student
+                else (_middle_student_name("full_student_init") if full_static_student else "pruned_student_init")
+            ),
             "blueprint_path": project_relative_path(blueprint_path, PROJECT_ROOT),
             "blueprint": blueprint,
             **_pruning_metadata(),
             "weight_transfer": weight_transfer,
             "checkpoint_is_random_init": False,
-            "checkpoint_weight_status": "teacher_middle_subset_reuse_then_saved" if middle_static_student else "teacher_subset_reuse_then_saved",
-            "checkpoint_weight_source": "teacher_full_boundary_weights + middle_conv2_subset" if middle_static_student else "teacher_kept_channels + exact_match_fallback",
+            "checkpoint_weight_status": (
+                "teacher_middle_subset_reuse_then_saved"
+                if middle_static_student
+                else ("teacher_full_output_subset_reuse_then_saved" if full_static_student else "teacher_subset_reuse_then_saved")
+            ),
+            "checkpoint_weight_source": (
+                "teacher_full_boundary_weights + middle_conv2_subset"
+                if middle_static_student
+                else ("teacher_full_block_weight_subsets + rebuilt_residual_decoder_shapes" if full_static_student else "teacher_kept_channels + exact_match_fallback")
+            ),
             "search_time_seconds": search_time_seconds,
             "pruning_time_seconds": float(pruning_elapsed_before_eval),
             "evaluation_note": (
@@ -2255,9 +2389,14 @@ def _run_pruning(device: torch.device, image_mode: str, db_train, teacher_artifa
                 "Inside each ResNet bottleneck, conv1 output and conv3 output remain full; only conv2 output, bn2, and conv3 input are pruned."
                 if middle_static_student
                 else (
+                    f"This phase evaluates the {_strategy_label()} full-output-pruned ResNet-UNet immediately after structural pruning. "
+                    "Inside each ResNet bottleneck, conv1/conv2 internal width and conv3 output are pruned; residual projections and decoder skip inputs are rebuilt to match."
+                    if full_static_student
+                    else (
                     "This phase evaluates the pruned student immediately after structural pruning. "
                     "The student is initialized with the teacher weights of the kept channels whenever the stage-wise mapping is compatible, "
                     "instead of starting from a fresh random initialization."
+                    )
                 )
             ),
             "build_kwargs": {
@@ -2265,6 +2404,8 @@ def _run_pruning(device: torch.device, image_mode: str, db_train, teacher_artifa
                 "num_classes": args.num_classes,
                 "channel_config": list(blueprint["channel_config"]),
                 "stage_middle_channel_config": blueprint.get("stage_middle_channel_config"),
+                "stage_full_channel_config": blueprint.get("stage_full_channel_config"),
+                "stage_full_output_channel_config": blueprint.get("stage_full_output_channel_config"),
             },
         }
     )
@@ -2412,7 +2553,11 @@ def _run_student(device: torch.device, image_mode: str, db_train, trainloader, v
             "student_name": (
                 _middle_student_name(f"student_{variant_policy['variant_name']}")
                 if _uses_middle_pruned_resnet_student()
-                else f"gated_student_{variant_policy['variant_name']}"
+                else (
+                    _middle_student_name(f"full_student_{variant_policy['variant_name']}")
+                    if _uses_full_pruned_resnet_student()
+                    else f"pruned_unet_student_{variant_policy['variant_name']}"
+                )
             ),
             "blueprint_path": project_relative_path(pruning_artifact["blueprint_path"], PROJECT_ROOT),
             "blueprint": pruning_artifact["blueprint"],
@@ -2422,19 +2567,24 @@ def _run_student(device: torch.device, image_mode: str, db_train, trainloader, v
             "soft_pruning_definition": (
                 f"{_strategy_label()} already applies structural middle-channel pruning inside ResNet bottlenecks; gate-based soft pruning is disabled."
                 if _uses_middle_pruned_resnet_student()
-                else "Soft pruning is implemented through learnable channel gates plus sparsity regularization during the active pruning epochs."
+                else (
+                    f"{_strategy_label()} already applies structural full-output bottleneck pruning inside ResNet; gate-based soft pruning is disabled."
+                    if _uses_full_pruned_resnet_student()
+                    else "Gate-based soft pruning is disabled; the student is fine-tuned as a normal pruned UNet."
+                )
             ),
             "hard_pruning_definition": (
                 f"{_strategy_label()} keeps ResNet bottleneck boundary outputs full, so late PDG hard pruning is disabled for this architecture."
                 if _uses_middle_pruned_resnet_student()
                 else (
-                    "Late hard pruning is applied at the beginning of the final pruning window. The student is rebuilt with fewer channels based on gate values, "
-                    "then the compact student continues distillation for the remaining epochs."
+                    f"{_strategy_label()} prunes conv3 outputs during phase-2 and rebuilds residual/decoder shapes, so late gate-based hard pruning is disabled."
+                    if _uses_full_pruned_resnet_student()
+                    else "Late gate-based hard pruning is disabled; structural pruning is determined by the phase-2 blueprint."
                 )
             ),
             "step3_distillation_definition": (
                 "When the selected student variant enables distillation, the frozen teacher supervises the student across the whole step-3 run. "
-                "The final pruning window controls when structural hard pruning happens."
+                "The current main pipeline does not use gate-driven hard pruning; structural pruning is fixed by the phase-2 blueprint."
             ),
             "pruning_schedule": pruning_schedule,
             "student_pruning_epoch_config": student_pruning_epoch_config,
@@ -2450,22 +2600,22 @@ def _run_student(device: torch.device, image_mode: str, db_train, trainloader, v
                 "num_classes": args.num_classes,
                 "channel_config": list(pruning_artifact["blueprint"]["channel_config"]),
                 "stage_middle_channel_config": pruning_artifact["blueprint"].get("stage_middle_channel_config"),
+                "stage_full_channel_config": pruning_artifact["blueprint"].get("stage_full_channel_config"),
+                "stage_full_output_channel_config": pruning_artifact["blueprint"].get("stage_full_output_channel_config"),
             },
         }
     )
     _write_json(layout["configs_dir"] / "student_pruning_config.json", student_pruning_epoch_config)
     write_model_config(run_dir, student_model_info)
     logging.info(
-        "Student step-3 setup | variant=%s | step3_pruning_enabled=%s | step3_pruning_epochs=%s | use_distill=%s | use_gating=%s | use_sparsity=%s | gate_search_epochs=%s | hard_pruning_start_epoch=%s | hard_pruning_threshold=%s",
+        "Student step-3 setup | variant=%s | step3_pruning_enabled=%s | step3_pruning_epochs=%s | use_distill=%s | use_gating=%s | use_sparsity=%s | fine_tune_epochs=%s",
         variant_policy["variant_name"],
         int(bool(args.enable_step3_pruning)),
         int(args.step3_pruning_epochs),
         int(variant_policy["use_distill"]),
         int(variant_policy["use_gating"]),
         int(variant_policy["use_sparsity"]),
-        pruning_schedule["active_soft_pruning_epochs"],
-        pruning_schedule.get("hard_pruning_start_epoch"),
-        pruning_schedule.get("hard_pruning_threshold"),
+        int(args.max_epochs_student),
     )
     student_input_analysis = _export_model_channel_analysis(
         run_dir,
@@ -2475,12 +2625,7 @@ def _run_student(device: torch.device, image_mode: str, db_train, trainloader, v
         prefix="student_input",
         title="Student Input Architecture Before Tuning",
     )
-    input_gating_paths = save_gating_analysis_artifacts(
-        run_dir / "artifacts" / "gating_analysis",
-        student_input_analysis,
-        prefix="student_input",
-        title="Student Input Gating Analysis",
-    )
+    input_gating_paths = {}
     history = {}
     reusable_match = None
     diagnostics_rows = []
@@ -2509,7 +2654,7 @@ def _run_student(device: torch.device, image_mode: str, db_train, trainloader, v
         reusable_channel_config = reusable_signature.get("channel_config")
         if reusable_channel_config:
             reusable_channel_config = tuple(int(channel) for channel in reusable_channel_config)
-            if reusable_channel_config != tuple(student.channel_config) and not _uses_middle_pruned_resnet_student():
+            if reusable_channel_config != tuple(student.channel_config) and not _uses_middle_pruned_resnet_student() and not _uses_full_pruned_resnet_student():
                 student = PDGUNet(
                     in_channels=db_train.in_channels,
                     num_classes=args.num_classes,
@@ -2688,6 +2833,9 @@ def _run_student(device: torch.device, image_mode: str, db_train, trainloader, v
             )
             val_losses = _compute_student_val_losses(student, teacher, valloader, device, criterion, epoch_policy=epoch_policy)
             val_dice = float(np.mean(val_metrics["average_metric"][:, 0]))
+            val_iou = float(np.mean(val_metrics["average_metric"][:, 1]))
+            val_hd95 = float(np.mean(val_metrics["average_metric"][:, 2]))
+            learning_rate = float(optimizer.param_groups[0].get("lr", args.student_lr))
             gate_stats = _summarize_student_gates(student, args.student_gate_near_off_threshold)
             history["train_total_loss"].append(float(np.mean(tracked["total_loss"])) if tracked["total_loss"] else 0.0)
             history["train_segmentation_loss"].append(float(np.mean(tracked["segmentation_loss"])) if tracked["segmentation_loss"] else 0.0)
@@ -2753,13 +2901,26 @@ def _run_student(device: torch.device, image_mode: str, db_train, trainloader, v
                 epoch=epoch,
                 best_metric=best_metric,
                 metrics={
+                    "train_total_loss": history["train_total_loss"][-1],
+                    "train_seg_loss": history["train_segmentation_loss"][-1],
+                    "train_kd_loss": history["train_distillation_loss"][-1],
                     "val_macro_dice": val_dice,
+                    "val_dice": val_dice,
+                    "val_iou": val_iou,
+                    "val_hd95": val_hd95,
                     "val_total_loss": val_losses["total_loss"],
                     "val_segmentation_loss": val_losses["segmentation_loss"],
+                    "val_seg_loss": val_losses["segmentation_loss"],
                     "val_distillation_loss": val_losses["distillation_loss"],
+                    "val_kd_loss": val_losses["distillation_loss"],
                     "val_sparsity_loss": val_losses["sparsity_loss"],
                     "val_feature_distill_loss": val_losses["feature_distill_loss"],
                     "val_auxiliary_loss": val_losses["auxiliary_loss"],
+                    "learning_rate": learning_rate,
+                    "best_val_dice": best_metric,
+                    "is_best": int(is_best),
+                    "use_kd_output": int(args.use_kd_output),
+                    "loss_tag": args.loss_tag,
                 },
                 config=vars(args),
                 model_info=student_model_info,
@@ -2783,17 +2944,14 @@ def _run_student(device: torch.device, image_mode: str, db_train, trainloader, v
             if is_best:
                 best_path = checkpoint_path
             logging.info(
-                "Student epoch %d/%d | phase=%s | train_total=%.6f | val_total=%.6f | val_dice=%.6f | gate_mean=%.4f | near_off_ratio=%.4f | lambda_distill=%.4f | lambda_sparsity=%.4f",
+                "Student epoch %d/%d | phase=%s | train_total=%.6f | val_total=%.6f | val_dice=%.6f | lambda_distill=%.4f",
                 epoch,
                 args.max_epochs_student,
                 epoch_policy["phase_name"],
                 history["train_total_loss"][-1],
                 val_losses["total_loss"],
                 val_dice,
-                gate_stats["global"]["gate_mean"],
-                gate_stats["global"]["near_off_ratio"],
                 epoch_policy["lambda_distill"],
-                epoch_policy["lambda_sparsity"],
             )
         if best_path is None:
             best_path = resolve_phase_checkpoint(run_dir, "last")
@@ -2847,12 +3005,7 @@ def _run_student(device: torch.device, image_mode: str, db_train, trainloader, v
         prefix="student_final",
         title="Student Final Architecture After Tuning",
     )
-    final_gating_paths = save_gating_analysis_artifacts(
-        run_dir / "artifacts" / "gating_analysis",
-        student_final_analysis,
-        prefix="student_final",
-        title="Student Final Gating Analysis",
-    )
+    final_gating_paths = {}
     student_comparison_rows = build_analysis_comparison(
         student_input_analysis,
         student_final_analysis,
@@ -2870,8 +3023,8 @@ def _run_student(device: torch.device, image_mode: str, db_train, trainloader, v
                 "final_channel_layers": student_final_analysis["global_summary"]["num_channel_layers"],
                 "input_total_channels": student_input_analysis["global_summary"]["total_output_channels"],
                 "final_total_channels": student_final_analysis["global_summary"]["total_output_channels"],
-                "input_gate_layers": student_input_analysis["global_summary"]["num_gate_layers"],
-                "final_gate_layers": student_final_analysis["global_summary"]["num_gate_layers"],
+                "input_gate_layers": 0,
+                "final_gate_layers": 0,
                 "step3_pruning_enabled": bool(args.enable_step3_pruning),
                 "step3_pruning_epochs": int(args.step3_pruning_epochs),
                 "soft_pruning_threshold": args.student_gate_near_off_threshold,
@@ -2890,7 +3043,7 @@ def _run_student(device: torch.device, image_mode: str, db_train, trainloader, v
                 hard_pruning_plan["rows"],
                 run_dir / "artifacts" / "student_tuning_analysis" / "late_hard_pruning_plan.csv",
             )
-    gating_report_payload = {
+    channel_report_payload = {
         "global_summary": {
             "student_variant": variant_policy["variant_name"],
             "student_variant_description": variant_policy["description"],
@@ -2917,14 +3070,14 @@ def _run_student(device: torch.device, image_mode: str, db_train, trainloader, v
             "hard_pruning_start_epoch": pruning_schedule.get("hard_pruning_start_epoch"),
             "policy_note": pruning_schedule["policy_note"],
         },
-        "gate_summary_rows": list(student_final_analysis.get("gate_summary_rows", [])),
+        "gate_summary_rows": [],
         "comparison_rows": list(student_comparison_rows),
         "pruning_summary_rows": list(hard_pruning_plan.get("rows", [])) if hard_pruning_plan else [],
     }
     save_channel_analysis_pdf(
-        gating_report_payload,
-        layout["reports_dir"] / "student_channel_gating_report.pdf",
-        title="Student Channel Gating Report",
+        channel_report_payload,
+        layout["reports_dir"] / "student_channel_report.pdf",
+        title="Student Channel Report",
     )
     student_final_exports = _export_student_final_shortcuts(run_dir, _proposal_root_dir())
     return {
@@ -2992,9 +3145,12 @@ if __name__ == "__main__":
     db_train, db_val, trainloader, valloader = _build_loaders(device, image_mode)
     logging.info("Dataset summary | train=%d | val=%d", len(db_train), len(db_val))
 
-    teacher_artifact = _run_teacher(device, image_mode, db_train, trainloader, valloader)
-    pruning_artifact = _run_pruning(device, image_mode, db_train, teacher_artifact)
-    student_artifact = _run_student(device, image_mode, db_train, trainloader, valloader, teacher_artifact, pruning_artifact)
+    with _phase_log(_phase_dir("teacher"), "1_teacher"):
+        teacher_artifact = _run_teacher(device, image_mode, db_train, trainloader, valloader)
+    with _phase_log(_phase_dir("pruning"), "2_pruning"):
+        pruning_artifact = _run_pruning(device, image_mode, db_train, teacher_artifact)
+    with _phase_log(_phase_dir("student"), "3_student"):
+        student_artifact = _run_student(device, image_mode, db_train, trainloader, valloader, teacher_artifact, pruning_artifact)
     pipeline_export = _save_pipeline_outputs(pipeline_dir, teacher_artifact, pruning_artifact, student_artifact)
 
     _write_json(

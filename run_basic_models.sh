@@ -5,7 +5,7 @@ set -euo pipefail
 # Edit these lists for the exact experiments you want to run.
 # Dataset keys must match dataloaders.dataset.list_available_datasets().
 IFS=' ' read -r -a DATASETS <<< "${DATASETS:-cvc_300 cvc_clinicdb kvasir_seg etis cvc_colondb}"
-IFS=' ' read -r -a MODELS <<< "${MODELS:-unet resunet vnet unetr unet_resnet152}"
+IFS=' ' read -r -a MODELS <<< "${MODELS:-unet resunet vnet unetr unet_resnet152 att_unet r2unet unet_plus_plus}"
 
 OUTPUT_ROOT="${OUTPUT_ROOT:-outputs}"
 DEVICE="${DEVICE:-0}"
@@ -13,8 +13,8 @@ EPOCHS="${EPOCHS:-50}"
 BATCH_SIZE="${BATCH_SIZE:-8}"
 BASE_LR="${BASE_LR:-0.01}"
 NUM_WORKERS="${NUM_WORKERS:-4}"
-# Keep ResNet152 pretrained by default. Set ENCODER_PRETRAINED=0 only when you
-# explicitly want to train the ResNet encoder from scratch.
+# Keep supported pretrained encoders enabled by default. Set ENCODER_PRETRAINED=0
+# when you explicitly want to train the encoder from scratch.
 ENCODER_PRETRAINED="${ENCODER_PRETRAINED:-1}"
 # Set FORCE_RETRAIN=1 when an old compatible checkpoint exists but you want a
 # fresh run, for example after changing epochs/lr/augmentation.

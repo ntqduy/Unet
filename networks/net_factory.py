@@ -2,15 +2,20 @@ from __future__ import annotations
 
 from typing import Dict, List, Type
 
+from networks.Basic_Model.attention_unet import AttentionUNet2D, R2UNet2D
 from networks.Basic_Model.Unet_restnet import UNetResNet152
 from networks.Basic_Model.VNet import VNet2D
 from networks.Basic_Model.residual_unet import ResidualUNet2D
 from networks.Basic_Model.unet import UNet2D
+from networks.Basic_Model.unet_plus_plus import UNetPlusPlus2D
 from networks.Basic_Model.unetr import UNETR2D
 
 
 MODEL_REGISTRY: Dict[str, Type] = {
+    "att_unet": AttentionUNet2D,
+    "r2unet": R2UNet2D,
     "unet": UNet2D,
+    "unet_plus_plus": UNetPlusPlus2D,
     "unet_resnet152": UNetResNet152,
     "resunet": ResidualUNet2D,
     "vnet": VNet2D,
@@ -18,7 +23,10 @@ MODEL_REGISTRY: Dict[str, Type] = {
 }
 
 MODEL_METADATA: Dict[str, Dict[str, str]] = {
+    "att_unet": {"branch": "basic", "model_name": "att_unet", "backbone_name": "attention_unet_encoder"},
+    "r2unet": {"branch": "basic", "model_name": "r2unet", "backbone_name": "recurrent_residual_unet_encoder"},
     "unet": {"branch": "basic", "model_name": "unet", "backbone_name": "unet_encoder"},
+    "unet_plus_plus": {"branch": "basic", "model_name": "unet_plus_plus", "backbone_name": "smp_encoder"},
     "unet_resnet152": {"branch": "basic", "model_name": "unet_resnet152", "backbone_name": "resnet152"},
     "resunet": {"branch": "basic", "model_name": "resunet", "backbone_name": "residual_encoder"},
     "vnet": {"branch": "basic", "model_name": "vnet", "backbone_name": "vnet_encoder"},
@@ -26,8 +34,21 @@ MODEL_METADATA: Dict[str, Dict[str, str]] = {
 }
 
 MODEL_ALIASES = {
+    "attention-u-net": "att_unet",
+    "attention_unet": "att_unet",
+    "attunet": "att_unet",
+    "att_u_net": "att_unet",
+    "attu_net": "att_unet",
+    "r2u-net": "r2unet",
+    "r2u_net": "r2unet",
+    "r2u_unet": "r2unet",
     "u-net": "unet",
     "unet2d": "unet",
+    "unet++": "unet_plus_plus",
+    "unetplusplus": "unet_plus_plus",
+    "unet-plus-plus": "unet_plus_plus",
+    "nested-unet": "unet_plus_plus",
+    "nested_unet": "unet_plus_plus",
     "unet_restnet": "unet_resnet152",
     "unet_restnet152": "unet_resnet152",
     "unet_resnet": "unet_resnet152",

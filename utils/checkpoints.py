@@ -254,10 +254,12 @@ def _write_checkpoint_sidecars(
     *,
     is_best: bool,
     project_root: Path | str | None = None,
+    append_log: bool = True,
 ) -> None:
     _write_config_yaml(checkpoint_dir, payload.get("config", {}))
     _write_metrics_json(checkpoint_dir, payload, checkpoint_path, project_root=project_root)
-    _append_train_log(checkpoint_dir, payload, tag, checkpoint_path, is_best=is_best, project_root=project_root)
+    if append_log:
+        _append_train_log(checkpoint_dir, payload, tag, checkpoint_path, is_best=is_best, project_root=project_root)
 
 
 def save_checkpoint_payload_atomic(payload: Any, checkpoint_path: Path | str) -> Path:
@@ -323,14 +325,14 @@ def save_checkpoint(
         checkpoint_path = layout["checkpoint_dir"] / f"{tag}.pth"
         save_checkpoint_payload_atomic(payload, checkpoint_path)
         _write_metadata(layout["metadata_dir"] / f"{tag}.json", payload, checkpoint_path, project_root=project_root)
-        _write_checkpoint_sidecars(layout["checkpoint_dir"], payload, tag, checkpoint_path, is_best=is_best, project_root=project_root)
+        _write_checkpoint_sidecars(layout["checkpoint_dir"], payload, tag, checkpoint_path, is_best=is_best, project_root=project_root, append_log=False)
         return_path = checkpoint_path
 
     if is_best:
         best_checkpoint_path = layout["checkpoint_dir"] / "best.pth"
         save_checkpoint_payload_atomic(payload, best_checkpoint_path)
         _write_metadata(layout["metadata_dir"] / "best.json", payload, best_checkpoint_path, project_root=project_root)
-        _write_checkpoint_sidecars(layout["checkpoint_dir"], payload, tag, best_checkpoint_path, is_best=True, project_root=project_root)
+        _write_checkpoint_sidecars(layout["checkpoint_dir"], payload, tag, best_checkpoint_path, is_best=True, project_root=project_root, append_log=False)
         return_path = best_checkpoint_path
 
     return return_path

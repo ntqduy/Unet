@@ -11,7 +11,7 @@ import torch.nn.functional as F
 from matplotlib.backends.backend_pdf import PdfPages
 from torchvision.utils import save_image
 
-from utils.visualization import colorize_mask
+from utils.visualization import colorize_mask, _save_labeled_triplet_panel
 
 
 def _normalize_image_for_plot(image) -> np.ndarray:
@@ -154,7 +154,8 @@ def save_visualization_overview_image(
         if tuple(prediction.shape[-2:]) != target_size:
             prediction = F.interpolate(prediction.unsqueeze(0), size=target_size, mode="nearest").squeeze(0)
         panels.append(torch.cat([image, label, prediction], dim=2))
-    save_image(torch.cat(panels, dim=1), image_path)
+    stacked = torch.cat(panels, dim=1)
+    _save_labeled_triplet_panel(stacked, image_path)
     return image_path
 
 

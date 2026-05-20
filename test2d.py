@@ -33,7 +33,7 @@ parser.add_argument("--split", type=str, default="test", choices=["train", "val"
 parser.add_argument("--checkpoint_path", type=str, default="", help="optional checkpoint path; defaults to the best checkpoint under the experiment")
 parser.add_argument("--num_classes", type=int, default=2)
 parser.add_argument("--in_channels", type=int, default=3)
-parser.add_argument("--encoder_pretrained", type=int, default=1, help="only used by unet_resnet152")
+parser.add_argument("--encoder_pretrained", type=int, default=1, help="used by unet_resnet152 and unet_plus_plus")
 parser.add_argument("--gpu", type=str, default="0")
 parser.add_argument("--num_workers", type=int, default=4)
 parser.add_argument("--patch_size", nargs=2, type=int, default=[256, 256])
@@ -167,7 +167,7 @@ def test_calculate_metric():
     model_kwargs = {"mode": "test"}
     if FLAGS.model == "unetr":
         model_kwargs["image_size"] = tuple(FLAGS.patch_size)
-    if FLAGS.model == "unet_resnet152":
+    if FLAGS.model in {"unet_resnet152", "unet_plus_plus"}:
         model_kwargs["encoder_pretrained"] = bool(FLAGS.encoder_pretrained)
 
     reference_dataset = build_dataset(

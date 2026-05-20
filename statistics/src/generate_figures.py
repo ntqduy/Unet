@@ -17,9 +17,11 @@ except ImportError as error:  # pragma: no cover - dependency guard
     raise SystemExit("Missing dependency: pandas/matplotlib. Install project requirements with `pip install -r requirements.txt`.") from error
 
 PGD_TEACHER_DIR = "unet_resnet152_teacher"
-PGD_LOSS_TAG = "loss_seg_kd_sparsity"
+PGD_LOSS_TAG = "loss_seg_kd"
+PGD_LOSS_TAGS = ("loss_seg_kd", "loss_seg_kd_sparsity", "loss_seg_only")
 CHANNEL_METHODS = {"static", "kneedle", "otsu", "gmm"}
 MIDDLE_METHODS = {"middle_static", "middle_kneedle", "middle_otsu", "middle_gmm"}
+FULL_METHODS = {"full_static", "full_kneedle", "full_otsu", "full_gmm"}
 FIGURE15_DATASET = "cvc_clinicdb"
 FIGURE15_FALLBACK_METHOD_DIRS = [
     ("Teacher", Path("1_teacher")),
@@ -31,6 +33,10 @@ FIGURE15_FALLBACK_METHOD_DIRS = [
     ("Middle Kneedle", Path(PGD_LOSS_TAG) / "output_middle_kneedle_auto_no" / "3_student"),
     ("Middle Otsu", Path(PGD_LOSS_TAG) / "output_middle_otsu_auto_no" / "3_student"),
     ("Middle GMM", Path(PGD_LOSS_TAG) / "output_middle_gmm_auto_no" / "3_student"),
+    ("Full Static", Path(PGD_LOSS_TAG) / "output_full_static_0.5_no" / "3_student"),
+    ("Full Kneedle", Path(PGD_LOSS_TAG) / "output_full_kneedle_auto_no" / "3_student"),
+    ("Full Otsu", Path(PGD_LOSS_TAG) / "output_full_otsu_auto_no" / "3_student"),
+    ("Full GMM", Path(PGD_LOSS_TAG) / "output_full_gmm_auto_no" / "3_student"),
 ]
 
 
@@ -64,11 +70,16 @@ def _display_method(raw_method: str, ratio=np.nan) -> str:
         "middle_kneedle": "Middle-Kneedle",
         "middle_otsu": "Middle-Otsu",
         "middle_gmm": "Middle-GMM",
+        "full_kneedle": "Full-Kneedle Block",
+        "full_otsu": "Full-Otsu Block",
+        "full_gmm": "Full-GMM Block",
     }
     if raw_method == "static":
         return f"Static r={_fmt_ratio(ratio)}"
     if raw_method == "middle_static":
         return f"Middle Static Pruning (r = {_fmt_ratio(ratio)})"
+    if raw_method == "full_static":
+        return f"Full-Static Block (r = {_fmt_ratio(ratio)})"
     return mapping.get(raw_method, raw_method.replace("_", " ").title())
 
 
@@ -158,6 +169,10 @@ def _method_sort_key(raw_method: str, ratio: float) -> tuple[int, float, str]:
         "middle_kneedle": 5,
         "middle_otsu": 6,
         "middle_gmm": 7,
+        "full_static": 8,
+        "full_kneedle": 9,
+        "full_otsu": 10,
+        "full_gmm": 11,
     }
     method = str(raw_method or "").lower()
     ratio_key = _safe_float(ratio)
@@ -168,22 +183,23 @@ def _method_sort_key(raw_method: str, ratio: float) -> tuple[int, float, str]:
 
 def _figure15_method_dirs(outputs_root: Path, dataset: str) -> List[tuple[str, Path]]:
     base_root = outputs_root / "pgd_unet" / dataset / PGD_TEACHER_DIR
-    loss_root = base_root / PGD_LOSS_TAG
-    if not loss_root.is_dir():
+    loss_roots = [base_root / tag for tag in PGD_LOSS_TAGS if (base_root / tag).is_dir()]
+    if not loss_roots:
         return FIGURE15_FALLBACK_METHOD_DIRS
 
     discovered = []
-    for output_dir in loss_root.iterdir():
-        if not output_dir.is_dir() or not output_dir.name.startswith("output_"):
-            continue
-        raw_method, ratio = _method_from_output_dir(output_dir)
-        discovered.append(
-            (
-                _method_sort_key(raw_method, ratio),
-                _display_method(raw_method, ratio),
-                Path(PGD_LOSS_TAG) / output_dir.name / "3_student",
+    for loss_root in loss_roots:
+        for output_dir in loss_root.iterdir():
+            if not output_dir.is_dir() or not output_dir.name.startswith("output_"):
+                continue
+            raw_method, ratio = _method_from_output_dir(output_dir)
+            discovered.append(
+                (
+                    _method_sort_key(raw_method, ratio),
+                    _display_method(raw_method, ratio),
+                    Path(loss_root.name) / output_dir.name / "3_student",
+                )
             )
-        )
     if not discovered:
         return FIGURE15_FALLBACK_METHOD_DIRS
 
@@ -216,6 +232,11 @@ def _pgd_focus_root(outputs_root: Path, dataset: str) -> Path:
     return outputs_root / "pgd_unet" / dataset / PGD_TEACHER_DIR / PGD_LOSS_TAG
 
 
+def _pgd_focus_roots(outputs_root: Path, dataset: str) -> List[Path]:
+    base_root = outputs_root / "pgd_unet" / dataset / PGD_TEACHER_DIR
+    return [base_root / tag for tag in PGD_LOSS_TAGS if (base_root / tag).exists()]
+
+
 def _pgd_teacher_phase_root(outputs_root: Path, dataset: str) -> Path:
     return outputs_root / "pgd_unet" / dataset / PGD_TEACHER_DIR / "1_teacher"
 
@@ -238,7 +259,7 @@ def _datasets(outputs_root: Path, save_root: Path) -> List[str]:
         pgd_root = outputs_root / "pgd_unet"
         if pgd_root.exists():
             for dataset_dir in pgd_root.iterdir():
-                if (_pgd_focus_root(outputs_root, dataset_dir.name)).exists():
+                if _pgd_focus_roots(outputs_root, dataset_dir.name):
                     names.add(dataset_dir.name)
         for csv_path in outputs_root.rglob("*.csv"):
             dataset = _dataset_from_path(csv_path, outputs_root)
@@ -250,8 +271,7 @@ def _datasets(outputs_root: Path, save_root: Path) -> List[str]:
 def _find_dataset_files(outputs_root: Path, dataset: str, filename: str) -> List[Path]:
     if not outputs_root.exists():
         return []
-    focus_root = _pgd_focus_root(outputs_root, dataset)
-    if focus_root.exists():
+    for focus_root in _pgd_focus_roots(outputs_root, dataset):
         focused = [path for path in focus_root.rglob(filename)]
         if focused:
             logging.info("Found %d target PGD files for %s/%s under %s", len(focused), dataset, filename, focus_root)
@@ -406,10 +426,55 @@ def figure5_layerwise(outputs_root: Path, dataset: str, dataset_dir: Path) -> No
     if frame.empty or "actual_prune_ratio" not in frame.columns:
         _placeholder(path, f"No pruning summary rows found for {dataset}.")
         return
-    fig, ax = plt.subplots(figsize=(8.2, 4.2))
-    method_series = frame.get("prune_method", pd.Series(["Method"] * len(frame))).astype(str).str.lower()
-    ratio_series = frame.get("static_prune_ratio", pd.Series([np.nan] * len(frame)))
-    grouped_keys = pd.DataFrame({"method": method_series, "ratio": ratio_series})
+
+    output_paths = {
+        "s1_s4": dataset_dir / "figure5_s1_s4_blueprint_stage_pruning_ratio.pdf",
+        "s5_s8": dataset_dir / "figure5_s5_s8_middle_conv2_layerwise_pruning_ratio.pdf",
+        "s9_s12": dataset_dir / "figure5_s9_s12_full_block_layerwise_pruning_ratio.pdf",
+    }
+    groups = [
+        ("S1-S4 Blueprint Stage", CHANNEL_METHODS, "Stage index: stem, down1, down2, down3, down4", output_paths["s1_s4"]),
+        ("S5-S8 Middle Conv2 Block", MIDDLE_METHODS, "Teacher ResNet bottleneck block index", output_paths["s5_s8"]),
+        ("S9-S12 Full Block Output", FULL_METHODS, "Teacher ResNet bottleneck block index", output_paths["s9_s12"]),
+    ]
+
+    fig, axes = plt.subplots(3, 1, figsize=(9.4, 9.2), sharey=True)
+    plotted_any = False
+    for ax, (title, methods, xlabel, group_path) in zip(axes, groups):
+        group_frame = _filter_pruning_group(frame, methods)
+        if group_frame.empty:
+            _placeholder(group_path, f"No pruning summary rows found for {dataset} / {title}.")
+            ax.axis("off")
+            ax.text(0.5, 0.5, f"No data for {title}", ha="center", va="center", transform=ax.transAxes)
+            continue
+        _plot_pruning_ratio_group(ax, group_frame, title=title, xlabel=xlabel)
+        _save_pruning_ratio_group_pdf(group_frame, group_path, title=title, xlabel=xlabel)
+        plotted_any = True
+    if not plotted_any:
+        plt.close(fig)
+        _placeholder(path, f"No S1-S12 pruning rows found for {dataset}.")
+        return
+    fig.suptitle("Figure 5. Pruning ratio by pruning group", y=0.995, fontsize=12)
+    fig.tight_layout()
+    _save_pdf(fig, path)
+
+
+def _pruning_ratio_series(frame: pd.DataFrame) -> pd.Series:
+    for column in ("static_prune_ratio", "requested_static_prune_ratio", "prune_ratio"):
+        if column in frame.columns:
+            return frame[column]
+    return pd.Series([np.nan] * len(frame), index=frame.index)
+
+
+def _filter_pruning_group(frame: pd.DataFrame, methods: set[str]) -> pd.DataFrame:
+    method_series = frame.get("prune_method", pd.Series(["Method"] * len(frame), index=frame.index)).astype(str).str.lower()
+    return frame[method_series.isin(methods)].copy()
+
+
+def _plot_pruning_ratio_group(ax, frame: pd.DataFrame, *, title: str, xlabel: str) -> None:
+    method_series = frame.get("prune_method", pd.Series(["Method"] * len(frame), index=frame.index)).astype(str).str.lower()
+    ratio_series = _pruning_ratio_series(frame)
+    grouped_keys = pd.DataFrame({"method": method_series, "ratio": ratio_series}, index=frame.index)
     colors = plt.rcParams["axes.prop_cycle"].by_key().get("color", [])
     for index, ((method, ratio), group_index) in enumerate(grouped_keys.groupby(["method", "ratio"], dropna=False).groups.items()):
         group = frame.loc[list(group_index)]
@@ -424,19 +489,27 @@ def figure5_layerwise(outputs_root: Path, dataset: str, dataset_dir: Path) -> No
             label=label,
             color=colors[index % len(colors)] if colors else None,
         )
-    ax.set_xlabel("Layer index (1, 2, 3, ...)")
+    ax.set_title(title)
+    ax.set_xlabel(xlabel)
     ax.set_ylabel("Pruning ratio")
     ax.set_xticks([])
     ax.grid(alpha=0.25)
     ax.legend(loc="upper right", fontsize=7, frameon=True, framealpha=0.9, ncol=1)
+
+
+def _save_pruning_ratio_group_pdf(frame: pd.DataFrame, path: Path, *, title: str, xlabel: str) -> None:
+    fig, ax = plt.subplots(figsize=(8.8, 4.2))
+    _plot_pruning_ratio_group(ax, frame, title=title, xlabel=xlabel)
     _save_pdf(fig, path)
 
 
 def figure6_tradeoff(dataset_dir: Path) -> None:
     path = dataset_dir / "figure6_accuracy_efficiency_tradeoff.pdf"
-    frame = _read_csv(dataset_dir / "table2_pruning.csv")
+    frame = _read_csv(dataset_dir / "table6_method_comparison.csv")
     if frame.empty:
-        _placeholder(path, "No table metrics available for trade-off figure.")
+        frame = _read_csv(dataset_dir / "table2_pruning.csv")
+    if frame.empty:
+        _placeholder(path, "No after fine-tuning table metrics available for trade-off figure.")
         return
     method_col = "Method" if "Method" in frame.columns else "Phương pháp" if "Phương pháp" in frame.columns else frame.columns[0]
     dice_col = "Dice" if "Dice" in frame.columns else "Dice $\\uparrow$"
@@ -493,7 +566,8 @@ def figure6_tradeoff(dataset_dir: Path) -> None:
         )
 
     ax.set_xlabel(xlabel)
-    ax.set_ylabel("Dice")
+    ax.set_ylabel("Dice after fine-tuning")
+    ax.set_title("Accuracy-efficiency trade-off after student fine-tuning")
     ax.grid(alpha=0.25)
     ax.legend(loc="lower right", fontsize=7, frameon=True, framealpha=0.9)
     _save_pdf(fig, path)
@@ -562,7 +636,7 @@ def figure8_visual(outputs_root: Path, dataset: str, dataset_dir: Path) -> None:
     row = frame.iloc[(pd.to_numeric(frame["dice"], errors="coerce") - pd.to_numeric(frame["dice"], errors="coerce").median()).abs().argsort().iloc[0]]
     sample_id = row["sample_id"]
     sample_rows = frame[frame["sample_id"].astype(str).eq(str(sample_id))].head(4)
-    panels = [("Input", _read_image(row.get("image_path"))), ("Ground Truth", _read_image(row.get("mask_path")))]
+    panels = [("Image", _read_image(row.get("image_path"))), ("GT", _read_image(row.get("mask_path")))]
     for _, sample_row in sample_rows.iterrows():
         panels.append((str(sample_row.get("method", "Prediction"))[:18], _read_image(sample_row.get("prediction_path"))))
     panels = [(label, image) for label, image in panels if image is not None]
@@ -570,8 +644,9 @@ def figure8_visual(outputs_root: Path, dataset: str, dataset_dir: Path) -> None:
         logging.warning("Skip figure8 for %s because images cannot be loaded.", dataset)
         return
     fig, axes = plt.subplots(1, len(panels), figsize=(3.0 * len(panels), 3.2))
-    for ax, (_, image) in zip(np.ravel(axes), panels):
+    for ax, (label, image) in zip(np.ravel(axes), panels):
         ax.imshow(image, cmap="gray")
+        ax.set_title(label if label in {"Image", "GT"} else "PR", fontsize=9)
         ax.axis("off")
     _save_pdf(fig, dataset_dir / "figure8_visual_comparison.pdf")
 
@@ -629,6 +704,10 @@ def _method_from_output_dir(output_dir: Path) -> tuple[str, float]:
         method = f"middle_{parts[2]}"
         ratio = _safe_float(parts[3]) if len(parts) >= 5 and parts[3] != "auto" else np.nan
         return method, ratio
+    if output_dir.name.startswith("output_full_") and len(parts) >= 3:
+        method = f"full_{parts[2]}"
+        ratio = _safe_float(parts[3]) if len(parts) >= 5 and parts[3] != "auto" else np.nan
+        return method, ratio
     if output_dir.name.startswith("output_") and len(parts) >= 2:
         method = parts[1]
         ratio = _safe_float(parts[2]) if len(parts) >= 4 and parts[2] != "auto" else np.nan
@@ -650,9 +729,9 @@ def _student_metric_score(student_dir: Path) -> float:
 
 
 def _student_channel_context_from_output_dirs(outputs_root: Path, dataset: str) -> tuple[str, Path | None, Path | None]:
-    focus_root = _pgd_focus_root(outputs_root, dataset)
-    if not focus_root.exists():
-        logging.warning("PGD focus root is missing for %s: %s", dataset, focus_root)
+    focus_roots = _pgd_focus_roots(outputs_root, dataset)
+    if not focus_roots:
+        logging.warning("PGD focus root is missing for %s", dataset)
         return "best student", None, None
 
     candidates: List[tuple[float, int, str, Path, Path]] = []
@@ -665,20 +744,25 @@ def _student_channel_context_from_output_dirs(outputs_root: Path, dataset: str) 
         "gmm": 5,
         "middle_static": 6,
         "static": 7,
+        "full_kneedle": 8,
+        "full_otsu": 9,
+        "full_gmm": 10,
+        "full_static": 11,
     }
-    for output_dir in sorted(path for path in focus_root.iterdir() if path.is_dir() and path.name.startswith("output_")):
-        student_dir = output_dir / "3_student"
-        summary_path = _student_final_channel_summary_path(student_dir)
-        if summary_path is None:
-            continue
-        raw_method, ratio = _method_from_output_dir(output_dir)
-        label = _display_method(raw_method, ratio)
-        score = _student_metric_score(student_dir)
-        priority = method_priority.get(raw_method, 99)
-        candidates.append((score, -priority, label, student_dir, summary_path))
+    for focus_root in focus_roots:
+        for output_dir in sorted(path for path in focus_root.iterdir() if path.is_dir() and path.name.startswith("output_")):
+            student_dir = output_dir / "3_student"
+            summary_path = _student_final_channel_summary_path(student_dir)
+            if summary_path is None:
+                continue
+            raw_method, ratio = _method_from_output_dir(output_dir)
+            label = _display_method(raw_method, ratio)
+            score = _student_metric_score(student_dir)
+            priority = method_priority.get(raw_method, 99)
+            candidates.append((score, -priority, label, student_dir, summary_path))
 
     if not candidates:
-        logging.warning("No student channel-analysis candidates found under %s", focus_root)
+        logging.warning("No student channel-analysis candidates found for %s", dataset)
         return "best student", None, None
 
     score, _, label, student_dir, summary_path = max(candidates, key=lambda item: (item[0], item[1]))
@@ -972,6 +1056,78 @@ def figure16(outputs_root: Path, save_root: Path, dataset: str = "cvc_clinicdb")
     _save_pdf(fig, path)
 
 
+def _classify_train_log_run(path: Path, frame: pd.DataFrame) -> str | None:
+    path_text = str(path).replace("\\", "/").lower()
+    if "loss_seg_only" in path_text or "no_kd" in path_text:
+        return "Seg only"
+    if "loss_seg_kd" in path_text:
+        return "Seg + KD"
+    for column in ("use_kd_output", "config_use_kd_output"):
+        if column in frame.columns:
+            values = pd.to_numeric(frame[column], errors="coerce").dropna()
+            if not values.empty:
+                return "Seg + KD" if int(values.iloc[-1]) == 1 else "Seg only"
+    return None
+
+
+def _train_log_curve_from_path(path: Path) -> tuple[str | None, pd.DataFrame]:
+    frame = _read_csv(path)
+    if frame.empty:
+        return None, frame
+    if "phase" in frame.columns:
+        student = frame[frame["phase"].fillna("").astype(str).str.lower().eq("student")]
+        if not student.empty:
+            frame = student
+    if "checkpoint_name" in frame.columns:
+        last_rows = frame[frame["checkpoint_name"].fillna("").astype(str).eq("last.pth")]
+        if not last_rows.empty:
+            frame = last_rows
+    dice_col = "val_macro_dice" if "val_macro_dice" in frame.columns else "val_dice" if "val_dice" in frame.columns else ""
+    if not dice_col:
+        return None, pd.DataFrame()
+    frame = frame.copy()
+    frame["_epoch"] = pd.to_numeric(frame.get("epoch", pd.Series(range(1, len(frame) + 1))), errors="coerce")
+    frame["_dice"] = pd.to_numeric(frame[dice_col], errors="coerce")
+    frame = frame.dropna(subset=["_epoch", "_dice"]).sort_values("_epoch")
+    frame = frame.drop_duplicates(subset=["_epoch"], keep="last")
+    return _classify_train_log_run(path, frame), frame
+
+
+def figure17_kd_vs_seg(outputs_root: Path, dataset: str, dataset_dir: Path) -> None:
+    path = dataset_dir / "figure17_kd_vs_seg_validation_dice.pdf"
+    logs = _find_dataset_files(outputs_root, dataset, "train_log.csv")
+    curves: Dict[str, pd.DataFrame] = {}
+    warnings = []
+    for log_path in logs:
+        label, frame = _train_log_curve_from_path(log_path)
+        if label is None or frame.empty:
+            continue
+        current = curves.get(label)
+        if current is None or len(frame) > len(current) or float(frame["_dice"].iloc[-1]) > float(current["_dice"].iloc[-1]):
+            curves[label] = frame
+
+    fig, ax = plt.subplots(figsize=(7.4, 4.4))
+    for label, color in (("Seg only", "#4c78a8"), ("Seg + KD", "#f58518")):
+        frame = curves.get(label)
+        if frame is None or frame.empty:
+            warnings.append(f"Missing curve: {label}")
+            logging.warning("Figure 17 missing curve for %s/%s", dataset, label)
+            continue
+        ax.plot(frame["_epoch"], frame["_dice"], marker="o", markersize=3, linewidth=1.8, label=label, color=color)
+    if not curves:
+        plt.close(fig)
+        _placeholder(path, f"No usable train_log.csv validation Dice curves found for {dataset}.")
+        return
+    ax.set_xlabel("Epoch")
+    ax.set_ylabel("Validation Dice")
+    ax.set_title("Validation Dice: Segmentation Only vs Segmentation + KD")
+    ax.grid(alpha=0.25)
+    ax.legend(loc="best", fontsize=8, frameon=True, framealpha=0.9)
+    if warnings:
+        ax.text(0.01, 0.02, "; ".join(warnings), transform=ax.transAxes, fontsize=7, color="#8a4b00")
+    _save_pdf(fig, path)
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Generate paper-ready PDF figures from outputs/statistics tables.")
     parser.add_argument("--outputs-root", type=str, default="outputs")
@@ -1010,6 +1166,7 @@ def main() -> int:
         _run_figure("figure11_12_channel_analysis", dataset_dir / "figure11/figure12 channel-analysis PDFs", figure11_12, outputs_root, dataset, dataset_dir)
         _run_figure("figure13_search_time_comparison", dataset_dir / "figure13_search_time_comparison.pdf", figure13_search, dataset_dir)
         _run_figure("figure14_computational_cost_breakdown", dataset_dir / "figure14_computational_cost_breakdown.pdf", figure14_cost, dataset_dir)
+        _run_figure("figure17_kd_vs_seg_validation_dice", dataset_dir / "figure17_kd_vs_seg_validation_dice.pdf", figure17_kd_vs_seg, outputs_root, dataset, dataset_dir)
 
     _run_figure("figure15_params_dice_tradeoff", save_root / "figure15_params_dice_tradeoff.pdf", figure15, outputs_root, save_root)
     _run_figure("figure16_performance_clinicdb", save_root / "figure16_performance_clinicdb.pdf", figure16, outputs_root, save_root)

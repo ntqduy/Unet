@@ -9,7 +9,7 @@ cd "$PROJECT_ROOT"
 DATASET="etis"
 
 # Edit MODELS to choose which basic architectures to run.
-IFS=' ' read -r -a MODELS <<< "${MODELS:-unet resunet vnet unetr unet_resnet152}"
+IFS=' ' read -r -a MODELS <<< "${MODELS:-unet resunet vnet unetr unet_resnet152 att_unet r2unet unet_plus_plus}"
 
 OUTPUT_ROOT="${OUTPUT_ROOT:-outputs}"
 DEVICE="${DEVICE:-0}"

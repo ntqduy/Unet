@@ -265,7 +265,7 @@ def prune_one_layer(
     scores = _safe_numpy_1d(scores)
     method = method.lower()
 
-    if method in {"static", "middle_static"}:
+    if method in {"static", "middle_static", "full_static"}:
         if static_prune_ratio is None:
             raise ValueError(f"static_prune_ratio is required when method='{method}'")
         keep_mask = static_prune_by_ratio(scores, static_prune_ratio)
@@ -277,11 +277,11 @@ def prune_one_layer(
             keep_mask=keep_mask,
             threshold=tau,
         )
-    elif method in {"kneedle", "middle_kneedle"}:
+    elif method in {"kneedle", "middle_kneedle", "full_kneedle"}:
         tau = kneedle_threshold(scores)
-    elif method in {"otsu", "middle_otsu"}:
+    elif method in {"otsu", "middle_otsu", "full_otsu"}:
         tau = otsu_threshold(scores, num_bins=otsu_bins)
-    elif method in {"gmm", "middle_gmm"}:
+    elif method in {"gmm", "middle_gmm", "full_gmm"}:
         tau = gmm_threshold(scores, random_state=gmm_random_state)
     else:
         raise ValueError(f"Unsupported method: {method}")

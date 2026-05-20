@@ -13,20 +13,28 @@ except ImportError as error:  # pragma: no cover - dependency guard
     raise SystemExit("Missing dependency: pandas. Install project requirements with `pip install -r requirements.txt`.") from error
 
 
+PGD_TEACHER_DIR = "unet_resnet152_teacher"
+PGD_LOSS_TAG = "loss_seg_kd"
+PGD_LOSS_TAGS = {"loss_seg_kd", "loss_seg_kd_sparsity"}
+
 TABLE1_COLUMNS = ["Model", "Dice", "IoU", "HD95", "Params", "FLOPs", "FPS", "Inf (s)"]
 PERFORMANCE_COLUMNS = ["Dice", "IoU", "HD95", "Params", "FLOPs", "FPS", "Inf (s)", "Search Time (s)"]
 TABLE3_COLUMNS = ["Method", *PERFORMANCE_COLUMNS]
 TABLE4_COLUMNS = ["Component", "Dice", "IoU", "HD95", "Params", "FLOPs", "FPS", "Inf (s)", "Search Time (s)"]
 TABLE5_COLUMNS = ["Method", "Pruning Time (s)", "Search Time (s)", "Training Time (s)", "Inference Time (s)", "Total Time (s)"]
 TABLE5_METHOD_DIRS = [
-    ("Static pruning r = 0.5", Path("loss_seg_kd_sparsity") / "output_static_0.5_no" / "3_student"),
-    ("Kneedle", Path("loss_seg_kd_sparsity") / "output_kneedle_auto_no" / "3_student"),
-    ("Otsu", Path("loss_seg_kd_sparsity") / "output_otsu_auto_no" / "3_student"),
-    ("GMM", Path("loss_seg_kd_sparsity") / "output_gmm_auto_no" / "3_student"),
-    ("Middle Static Pruning (r = 0.5)", Path("loss_seg_kd_sparsity") / "output_middle_static_0.5_no" / "3_student"),
-    ("Middle Kneedle", Path("loss_seg_kd_sparsity") / "output_middle_kneedle_auto_no" / "3_student"),
-    ("Middle Otsu", Path("loss_seg_kd_sparsity") / "output_middle_otsu_auto_no" / "3_student"),
-    ("Middle GMM", Path("loss_seg_kd_sparsity") / "output_middle_gmm_auto_no" / "3_student"),
+    ("Static pruning r = 0.5", Path(PGD_LOSS_TAG) / "output_static_0.5_no" / "3_student"),
+    ("Kneedle", Path(PGD_LOSS_TAG) / "output_kneedle_auto_no" / "3_student"),
+    ("Otsu", Path(PGD_LOSS_TAG) / "output_otsu_auto_no" / "3_student"),
+    ("GMM", Path(PGD_LOSS_TAG) / "output_gmm_auto_no" / "3_student"),
+    ("Middle Static Pruning (r = 0.5)", Path(PGD_LOSS_TAG) / "output_middle_static_0.5_no" / "3_student"),
+    ("Middle Kneedle", Path(PGD_LOSS_TAG) / "output_middle_kneedle_auto_no" / "3_student"),
+    ("Middle Otsu", Path(PGD_LOSS_TAG) / "output_middle_otsu_auto_no" / "3_student"),
+    ("Middle GMM", Path(PGD_LOSS_TAG) / "output_middle_gmm_auto_no" / "3_student"),
+    ("Full Static Block (r = 0.5)", Path(PGD_LOSS_TAG) / "output_full_static_0.5_no" / "3_student"),
+    ("Full Kneedle Block", Path(PGD_LOSS_TAG) / "output_full_kneedle_auto_no" / "3_student"),
+    ("Full Otsu Block", Path(PGD_LOSS_TAG) / "output_full_otsu_auto_no" / "3_student"),
+    ("Full GMM Block", Path(PGD_LOSS_TAG) / "output_full_gmm_auto_no" / "3_student"),
 ]
 TABLE6_COLUMNS = [
     "Phương pháp",
@@ -40,25 +48,33 @@ TABLE6_COLUMNS = [
 TABLE2_COLUMNS = TABLE6_COLUMNS
 TABLE2_METHOD_DIRS = [
     ("Giáo viên (UNet-ResNet152)", Path("1_teacher")),
-    ("Static pruning r = 0.5", Path("loss_seg_kd_sparsity") / "output_static_0.5_no" / "2_pruning"),
-    ("Kneedle", Path("loss_seg_kd_sparsity") / "output_kneedle_auto_no" / "2_pruning"),
-    ("Otsu", Path("loss_seg_kd_sparsity") / "output_otsu_auto_no" / "2_pruning"),
-    ("GMM", Path("loss_seg_kd_sparsity") / "output_gmm_auto_no" / "2_pruning"),
-    ("Middle Static Pruning (r = 0.5)", Path("loss_seg_kd_sparsity") / "output_middle_static_0.5_no" / "2_pruning"),
-    ("Middle Kneedle", Path("loss_seg_kd_sparsity") / "output_middle_kneedle_auto_no" / "2_pruning"),
-    ("Middle Otsu", Path("loss_seg_kd_sparsity") / "output_middle_otsu_auto_no" / "2_pruning"),
-    ("Middle GMM", Path("loss_seg_kd_sparsity") / "output_middle_gmm_auto_no" / "2_pruning"),
+    ("Static pruning r = 0.5", Path(PGD_LOSS_TAG) / "output_static_0.5_no" / "2_pruning"),
+    ("Kneedle", Path(PGD_LOSS_TAG) / "output_kneedle_auto_no" / "2_pruning"),
+    ("Otsu", Path(PGD_LOSS_TAG) / "output_otsu_auto_no" / "2_pruning"),
+    ("GMM", Path(PGD_LOSS_TAG) / "output_gmm_auto_no" / "2_pruning"),
+    ("Middle Static Pruning (r = 0.5)", Path(PGD_LOSS_TAG) / "output_middle_static_0.5_no" / "2_pruning"),
+    ("Middle Kneedle", Path(PGD_LOSS_TAG) / "output_middle_kneedle_auto_no" / "2_pruning"),
+    ("Middle Otsu", Path(PGD_LOSS_TAG) / "output_middle_otsu_auto_no" / "2_pruning"),
+    ("Middle GMM", Path(PGD_LOSS_TAG) / "output_middle_gmm_auto_no" / "2_pruning"),
+    ("Full Static Block (r = 0.5)", Path(PGD_LOSS_TAG) / "output_full_static_0.5_no" / "2_pruning"),
+    ("Full Kneedle Block", Path(PGD_LOSS_TAG) / "output_full_kneedle_auto_no" / "2_pruning"),
+    ("Full Otsu Block", Path(PGD_LOSS_TAG) / "output_full_otsu_auto_no" / "2_pruning"),
+    ("Full GMM Block", Path(PGD_LOSS_TAG) / "output_full_gmm_auto_no" / "2_pruning"),
 ]
 TABLE6_METHOD_DIRS = [
     ("Giáo viên (UNet-ResNet152)", Path("1_teacher")),
-    ("Static pruning r = 0.5", Path("loss_seg_kd_sparsity") / "output_static_0.5_no" / "3_student"),
-    ("Kneedle", Path("loss_seg_kd_sparsity") / "output_kneedle_auto_no" / "3_student"),
-    ("Otsu", Path("loss_seg_kd_sparsity") / "output_otsu_auto_no" / "3_student"),
-    ("GMM", Path("loss_seg_kd_sparsity") / "output_gmm_auto_no" / "3_student"),
-    ("Middle Static Pruning (r = 0.5)", Path("loss_seg_kd_sparsity") / "output_middle_static_0.5_no" / "3_student"),
-    ("Middle Kneedle", Path("loss_seg_kd_sparsity") / "output_middle_kneedle_auto_no" / "3_student"),
-    ("Middle Otsu", Path("loss_seg_kd_sparsity") / "output_middle_otsu_auto_no" / "3_student"),
-    ("Middle GMM", Path("loss_seg_kd_sparsity") / "output_middle_gmm_auto_no" / "3_student"),
+    ("Static pruning r = 0.5", Path(PGD_LOSS_TAG) / "output_static_0.5_no" / "3_student"),
+    ("Kneedle", Path(PGD_LOSS_TAG) / "output_kneedle_auto_no" / "3_student"),
+    ("Otsu", Path(PGD_LOSS_TAG) / "output_otsu_auto_no" / "3_student"),
+    ("GMM", Path(PGD_LOSS_TAG) / "output_gmm_auto_no" / "3_student"),
+    ("Middle Static Pruning (r = 0.5)", Path(PGD_LOSS_TAG) / "output_middle_static_0.5_no" / "3_student"),
+    ("Middle Kneedle", Path(PGD_LOSS_TAG) / "output_middle_kneedle_auto_no" / "3_student"),
+    ("Middle Otsu", Path(PGD_LOSS_TAG) / "output_middle_otsu_auto_no" / "3_student"),
+    ("Middle GMM", Path(PGD_LOSS_TAG) / "output_middle_gmm_auto_no" / "3_student"),
+    ("Full Static Block (r = 0.5)", Path(PGD_LOSS_TAG) / "output_full_static_0.5_no" / "3_student"),
+    ("Full Kneedle Block", Path(PGD_LOSS_TAG) / "output_full_kneedle_auto_no" / "3_student"),
+    ("Full Otsu Block", Path(PGD_LOSS_TAG) / "output_full_otsu_auto_no" / "3_student"),
+    ("Full GMM Block", Path(PGD_LOSS_TAG) / "output_full_gmm_auto_no" / "3_student"),
 ]
 MEAN_STD_COLUMNS = [
     "Method",
@@ -80,10 +96,6 @@ MEAN_STD_COLUMNS = [
     "Std Search Time (s)",
 ]
 
-PGD_TEACHER_DIR = "unet_resnet152_teacher"
-PGD_LOSS_TAG = "loss_seg_kd_sparsity"
-
-
 def _path_parts(path: Path, outputs_root: Path) -> tuple[str, ...]:
     try:
         return path.relative_to(outputs_root).parts
@@ -93,7 +105,7 @@ def _path_parts(path: Path, outputs_root: Path) -> tuple[str, ...]:
 
 def _is_pgd_focus_path(path: Path, outputs_root: Path) -> bool:
     parts = _path_parts(path, outputs_root)
-    return len(parts) >= 5 and parts[0] == "pgd_unet" and parts[2] == PGD_TEACHER_DIR and parts[3] == PGD_LOSS_TAG
+    return len(parts) >= 5 and parts[0] == "pgd_unet" and parts[2] == PGD_TEACHER_DIR and parts[3] in PGD_LOSS_TAGS
 
 
 def _is_pgd_loss_metric_path(path: Path, outputs_root: Path) -> bool:
@@ -173,21 +185,29 @@ def _method_display(raw_method: str, ratio: Any = np.nan, *, kd: bool = False, s
     if summary:
         label = summary
     elif raw_method == "static":
-        label = f"Static r={_fmt_ratio(ratio)}"
-    elif raw_method == "middle_static":
-        label = f"Middle static r={_fmt_ratio(ratio)}"
+        label = f"S1 Static Blueprint r={_fmt_ratio(ratio)}"
     elif raw_method == "kneedle":
-        label = "Kneedle"
+        label = "S2 Kneedle Blueprint"
     elif raw_method == "otsu":
-        label = "Otsu"
+        label = "S3 Otsu Blueprint"
     elif raw_method == "gmm":
-        label = "GMM"
+        label = "S4 GMM Blueprint"
+    elif raw_method == "middle_static":
+        label = f"S5 Middle-Static Conv2 r={_fmt_ratio(ratio)}"
     elif raw_method == "middle_kneedle":
-        label = "Middle-Kneedle"
+        label = "S6 Middle-Kneedle Conv2"
     elif raw_method == "middle_otsu":
-        label = "Middle-Otsu"
+        label = "S7 Middle-Otsu Conv2"
     elif raw_method == "middle_gmm":
-        label = "Middle-GMM"
+        label = "S8 Middle-GMM Conv2"
+    elif raw_method == "full_static":
+        label = f"S9 Full-Static Block r={_fmt_ratio(ratio)}"
+    elif raw_method == "full_kneedle":
+        label = "S10 Full-Kneedle Block"
+    elif raw_method == "full_otsu":
+        label = "S11 Full-Otsu Block"
+    elif raw_method == "full_gmm":
+        label = "S12 Full-GMM Block"
     else:
         label = raw_method.replace("_", " ").title() if raw_method else "Unknown"
     return f"{label} + KD" if kd and "KD" not in label else label
@@ -497,8 +517,8 @@ def _loss_method(row: Dict[str, Any]) -> str:
 
 def _component(row: Dict[str, Any]) -> str:
     method = str(row.get("prune_method") or row.get("config_prune_method") or "").lower()
-    adaptive = method in {"kneedle", "otsu", "gmm", "middle_kneedle", "middle_otsu", "middle_gmm"}
-    block = method.startswith("middle_")
+    adaptive = method in {"kneedle", "otsu", "gmm", "middle_kneedle", "middle_otsu", "middle_gmm", "full_kneedle", "full_otsu", "full_gmm"}
+    block = method.startswith("middle_") or method.startswith("full_")
     kd = bool(_safe_int(row.get("use_kd_output", row.get("config_use_kd_output", 0))))
     distill = kd or _safe_float(row.get("lambda_distill", row.get("config_lambda_distill", 0))) > 0
     if not adaptive and not block and not distill:
@@ -582,13 +602,13 @@ def _build_pruning_table2_rows(dataset_metrics: pd.DataFrame, dataset_timing: pd
             )
         )
 
-    for raw_method in ("kneedle", "otsu", "gmm"):
+    for raw_method in ("kneedle", "otsu", "gmm", "full_kneedle", "full_otsu", "full_gmm"):
         best = _best_by_dice([row for row in pruning_rows if _row_prune_method(row) == raw_method])
         if best:
             rows.append(_table2_entry(best, "Adaptive threshold", _method_display(raw_method), dataset_timing, raw_method=raw_method, source_phase="pruning"))
 
     channel_adaptive = [row for row in pruning_rows if _row_prune_method(row) in {"kneedle", "otsu", "gmm"}]
-    block_adaptive = [row for row in pruning_rows if _row_prune_method(row) in {"middle_kneedle", "middle_otsu", "middle_gmm"}]
+    block_adaptive = [row for row in pruning_rows if _row_prune_method(row) in {"middle_kneedle", "middle_otsu", "middle_gmm", "full_kneedle", "full_otsu", "full_gmm"}]
     best_channel = _best_by_dice(channel_adaptive)
     best_block = _best_by_dice(block_adaptive)
     if best_channel:
@@ -624,7 +644,7 @@ def _build_pruning_table2_rows(dataset_metrics: pd.DataFrame, dataset_timing: pd
             )
         )
 
-    best_student = _best_by_dice([row for row in student_rows if _row_prune_method(row) in {"middle_kneedle", "middle_otsu", "middle_gmm"}])
+    best_student = _best_by_dice([row for row in student_rows if _row_prune_method(row) in {"middle_kneedle", "middle_otsu", "middle_gmm", "full_kneedle", "full_otsu", "full_gmm"}])
     if best_student is None:
         best_student = _best_by_dice(student_rows)
     if best_student:

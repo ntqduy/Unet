@@ -6,10 +6,10 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 cd "$PROJECT_ROOT"
 
-DATASET="cvc_clinicdb"
+DATASET="cvc_colondb"
 
 # Edit MODELS to choose which basic architectures to run.
-IFS=' ' read -r -a MODELS <<< "${MODELS:-unet resunet vnet unetr unet_resnet152}"
+IFS=' ' read -r -a MODELS <<< "${MODELS:-unet resunet vnet unetr unet_resnet152 att_unet r2unet unet_plus_plus}"
 
 OUTPUT_ROOT="${OUTPUT_ROOT:-outputs}"
 DEVICE="${DEVICE:-0}"
