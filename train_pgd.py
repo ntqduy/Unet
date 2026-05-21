@@ -26,12 +26,12 @@ from dataloaders.dataset import Normalize, RandomGenerator, ToTensor, build_data
 from networks.PGD_Unet.blueprint_unet_plus_plus import build_blueprint_unet_plus_plus
 from networks.PGD_Unet.gated_unet import PDGUNet
 from networks.PGD_Unet.full_pruning_unet_plus_plus import (
-    build_full_pruning_resnet_unet,
-    build_full_pruning_resnet_unet_from_teacher,
+    build_full_pruning_unet_plus_plus,
+    build_full_pruning_unet_plus_plus_from_teacher,
 )
 from networks.PGD_Unet.middle_pruned_unet_plus_plus import (
-    build_middle_pruned_resnet_unet,
-    build_middle_pruned_resnet_unet_from_teacher,
+    build_middle_pruned_unet_plus_plus,
+    build_middle_pruned_unet_plus_plus_from_teacher,
 )
 from networks.PGD_Unet.pruning import PRUNE_METHODS, extract_pruned_blueprint, load_blueprint_artifact, save_blueprint_artifact
 from networks.PGD_Unet.pruning_algorithms.pruning_smart import uses_static_prune_ratio
@@ -110,14 +110,24 @@ def _format_float_for_path(value: float) -> str:
     return "0" if text == "-0" else text
 
 
-def build_pruning_output_dir_name(prune_method: str, static_prune_ratio: float | None = None) -> str:
+def _strategy_output_prefix(prune_strategy: str | None) -> str:
+    strategy = str(prune_strategy or "").strip().lower()
+    return f"{strategy}_" if strategy else ""
+
+
+def build_pruning_output_dir_name(
+    prune_method: str,
+    static_prune_ratio: float | None = None,
+    prune_strategy: str | None = None,
+) -> str:
     prune_method = str(prune_method).lower()
+    prefix = _strategy_output_prefix(prune_strategy)
     if uses_static_prune_ratio(prune_method):
         if static_prune_ratio is None:
             raise ValueError(f"static_prune_ratio is required for {prune_method} output directory naming.")
-        return f"output_{prune_method}_{_format_float_for_path(static_prune_ratio)}"
+        return f"output_{prefix}{prune_method}_{_format_float_for_path(static_prune_ratio)}"
     if prune_method in {"kneedle", "otsu", "gmm", "middle_kneedle", "middle_otsu", "middle_gmm", "full_kneedle", "full_otsu", "full_gmm"}:
-        return f"output_{prune_method}"
+        return f"output_{prefix}{prune_method}"
     raise ValueError(f"Unsupported prune_method: {prune_method}")
 
 
@@ -126,11 +136,13 @@ def build_step3_output_dir_name(
     static_prune_ratio: float | None,
     step3_pruning_enabled: bool,
     step3_pruning_epochs: int,
+    prune_strategy: str | None = None,
 ) -> str:
     prune_method = str(prune_method).lower()
+    prefix = _strategy_output_prefix(prune_strategy)
     rate_tag = _format_float_for_path(static_prune_ratio) if uses_static_prune_ratio(prune_method) else "auto"
     step3_tag = str(int(step3_pruning_epochs)) if step3_pruning_enabled else "no"
-    return f"output_{prune_method}_{rate_tag}_{step3_tag}"
+    return f"output_{prefix}{prune_method}_{rate_tag}_{step3_tag}"
 
 
 def _uses_middle_pruned_resnet_student() -> bool:
@@ -212,6 +224,7 @@ def _normalize_pruning_args(parsed_args: argparse.Namespace, active_parser: argp
     parsed_args.pruning_output_dir_name = build_pruning_output_dir_name(
         parsed_args.prune_method,
         parsed_args.static_prune_ratio,
+        parsed_args.prune_strategy,
     )
     return parsed_args
 
@@ -239,6 +252,7 @@ def _normalize_step3_pruning_args(parsed_args: argparse.Namespace, active_parser
         parsed_args.static_prune_ratio,
         enabled,
         parsed_args.step3_pruning_epochs,
+        parsed_args.prune_strategy,
     )
     return parsed_args
 
@@ -679,7 +693,7 @@ def _build_pruning_warmup_schedule(total_epochs: int, requested_warmup_epochs: i
 def _student_epoch_policy(epoch: int, schedule: dict, variant_policy: dict) -> dict:
     if not variant_policy["use_gating"]:
         return {
-            "phase_name": "distillation_only" if variant_policy["use_distill"] else "plain_student_training",
+            "phase_name": "segmentation_plus_distillation" if variant_policy["use_distill"] else "segmentation_only",
             "gate_trainable": False,
             "lambda_distill": args.lambda_distill if variant_policy["use_distill"] else 0.0,
             "lambda_sparsity": 0.0,
@@ -774,13 +788,13 @@ def _build_student_from_blueprint(db_train, pruning_artifact: dict) -> nn.Module
     blueprint = pruning_artifact["blueprint"]
     student_architecture = _blueprint_student_architecture(blueprint)
     if student_architecture in {"middle_pruned_resnet_unet", "middle_pruned_unet_plus_plus"}:
-        return build_middle_pruned_resnet_unet(
+        return build_middle_pruned_unet_plus_plus(
             in_channels=db_train.in_channels,
             num_classes=args.num_classes,
             blueprint=blueprint,
         )
     if student_architecture in {"full_pruning_resnet_unet", "full_pruning_unet_plus_plus"}:
-        return build_full_pruning_resnet_unet(
+        return build_full_pruning_unet_plus_plus(
             in_channels=db_train.in_channels,
             num_classes=args.num_classes,
             blueprint=blueprint,
@@ -2282,7 +2296,7 @@ def _run_pruning(device: torch.device, image_mode: str, db_train, teacher_artifa
 
     student_architecture = _blueprint_student_architecture(blueprint)
     if student_architecture in {"middle_pruned_resnet_unet", "middle_pruned_unet_plus_plus"}:
-        pruned_student, weight_transfer = build_middle_pruned_resnet_unet_from_teacher(
+        pruned_student, weight_transfer = build_middle_pruned_unet_plus_plus_from_teacher(
             teacher_artifact["model"],
             in_channels=db_train.in_channels,
             num_classes=args.num_classes,
@@ -2291,8 +2305,10 @@ def _run_pruning(device: torch.device, image_mode: str, db_train, teacher_artifa
         pruned_student = pruned_student.to(device)
         weight_transfer["copy_ratio"] = weight_transfer.get("block_transfer_ratio")
         weight_transfer["exact_match_copy_ratio"] = weight_transfer.get("exact_matching_full_weight_copy", {}).get("copy_ratio")
+        student_label = _student_model_name()
         weight_transfer["effective_note"] = (
-            f"{_strategy_label()} initializes a middle-pruned ResNet-UNet from the teacher. In every ResNet bottleneck, conv1 output and conv3 output stay full; "
+            f"{_strategy_label()} initializes a middle-pruned {student_label} from the teacher. "
+            "In every ResNet bottleneck, conv1 output and conv3 output stay full; "
             "only conv2 output, bn2, and conv3 input are subset-copied by the selected pruning mask."
         )
         logging.info(
@@ -2315,7 +2331,7 @@ def _run_pruning(device: torch.device, image_mode: str, db_train, teacher_artifa
                 ",".join(row.get("pruned_components", [])) if row.get("pruned_components") else "none",
             )
     elif student_architecture in {"full_pruning_resnet_unet", "full_pruning_unet_plus_plus"}:
-        pruned_student, weight_transfer = build_full_pruning_resnet_unet_from_teacher(
+        pruned_student, weight_transfer = build_full_pruning_unet_plus_plus_from_teacher(
             teacher_artifact["model"],
             in_channels=db_train.in_channels,
             num_classes=args.num_classes,
@@ -2324,9 +2340,15 @@ def _run_pruning(device: torch.device, image_mode: str, db_train, teacher_artifa
         pruned_student = pruned_student.to(device)
         weight_transfer["copy_ratio"] = weight_transfer.get("block_transfer_ratio")
         weight_transfer["exact_match_copy_ratio"] = weight_transfer.get("exact_matching_full_weight_copy", {}).get("copy_ratio")
+        student_label = _student_model_name()
+        decoder_note = (
+            "UNet++ encoder stage expanders restore the feature widths expected by the SMP decoder."
+            if student_architecture == "full_pruning_unet_plus_plus"
+            else "Residual projections and decoder skip inputs are rebuilt to keep shapes valid."
+        )
         weight_transfer["effective_note"] = (
-            f"{_strategy_label()} initializes a full-output-pruned ResNet-UNet from the teacher. "
-            "Each bottleneck prunes conv1/conv2 internal width and conv3 output; residual projections and decoder skip inputs are rebuilt to keep shapes valid."
+            f"{_strategy_label()} initializes a full-output-pruned {student_label} from the teacher. "
+            f"Each bottleneck prunes conv1/conv2 internal width and conv3 output; {decoder_note}"
         )
         logging.info(
             "Step-2 %s full-block reuse | copied_blocks=%s/%s | exact_match_copy_ratio=%.4f",
@@ -2442,11 +2464,11 @@ def _run_pruning(device: torch.device, image_mode: str, db_train, teacher_artifa
             "search_time_seconds": search_time_seconds,
             "pruning_time_seconds": float(pruning_elapsed_before_eval),
             "evaluation_note": (
-                f"This phase evaluates the {_strategy_label()} middle-pruned ResNet-UNet immediately after structural pruning. "
+                f"This phase evaluates the {_strategy_label()} {_student_model_name()} immediately after structural pruning. "
                 "Inside each ResNet bottleneck, conv1 output and conv3 output remain full; only conv2 output, bn2, and conv3 input are pruned."
                 if middle_static_student
                 else (
-                    f"This phase evaluates the {_strategy_label()} full-output-pruned ResNet-UNet immediately after structural pruning. "
+                    f"This phase evaluates the {_strategy_label()} {_student_model_name()} immediately after structural pruning. "
                     "Inside each ResNet bottleneck, conv1/conv2 internal width and conv3 output are pruned; residual projections and decoder skip inputs are rebuilt to match."
                     if full_static_student
                     else (
@@ -2911,15 +2933,24 @@ def _run_student(device: torch.device, image_mode: str, db_train, trainloader, v
             val_hd95 = float(np.mean(val_metrics["average_metric"][:, 2]))
             learning_rate = float(optimizer.param_groups[0].get("lr", args.student_lr))
             gate_stats = _summarize_student_gates(student, args.student_gate_near_off_threshold)
+            lambda_segmentation = 1.0
+            train_segmentation_loss = float(np.mean(tracked["segmentation_loss"])) if tracked["segmentation_loss"] else 0.0
+            train_distillation_loss = float(np.mean(tracked["distillation_loss"])) if tracked["distillation_loss"] else 0.0
+            val_segmentation_loss = float(val_losses["segmentation_loss"])
+            val_distillation_loss = float(val_losses["distillation_loss"])
+            train_weighted_segmentation_loss = lambda_segmentation * train_segmentation_loss
+            train_weighted_distillation_loss = epoch_policy["lambda_distill"] * train_distillation_loss
+            val_weighted_segmentation_loss = lambda_segmentation * val_segmentation_loss
+            val_weighted_distillation_loss = epoch_policy["lambda_distill"] * val_distillation_loss
             history["train_total_loss"].append(float(np.mean(tracked["total_loss"])) if tracked["total_loss"] else 0.0)
-            history["train_segmentation_loss"].append(float(np.mean(tracked["segmentation_loss"])) if tracked["segmentation_loss"] else 0.0)
-            history["train_distillation_loss"].append(float(np.mean(tracked["distillation_loss"])) if tracked["distillation_loss"] else 0.0)
+            history["train_segmentation_loss"].append(train_segmentation_loss)
+            history["train_distillation_loss"].append(train_distillation_loss)
             history["train_sparsity_loss"].append(float(np.mean(tracked["sparsity_loss"])) if tracked["sparsity_loss"] else 0.0)
             history["train_feature_distill_loss"].append(float(np.mean(tracked["feature_distill_loss"])) if tracked["feature_distill_loss"] else 0.0)
             history["train_auxiliary_loss"].append(float(np.mean(tracked["auxiliary_loss"])) if tracked["auxiliary_loss"] else 0.0)
             history["val_total_loss"].append(val_losses["total_loss"])
-            history["val_segmentation_loss"].append(val_losses["segmentation_loss"])
-            history["val_distillation_loss"].append(val_losses["distillation_loss"])
+            history["val_segmentation_loss"].append(val_segmentation_loss)
+            history["val_distillation_loss"].append(val_distillation_loss)
             history["val_sparsity_loss"].append(val_losses["sparsity_loss"])
             history["val_feature_distill_loss"].append(val_losses["feature_distill_loss"])
             history["val_auxiliary_loss"].append(val_losses["auxiliary_loss"])
@@ -2940,6 +2971,7 @@ def _run_student(device: torch.device, image_mode: str, db_train, trainloader, v
                     "feature_distill_active": int(epoch_policy["lambda_feat"] > 0),
                     "auxiliary_loss_active": int(epoch_policy["lambda_aux"] > 0),
                     "gate_trainable": int(epoch_policy["gate_trainable"]),
+                    "lambda_segmentation": lambda_segmentation,
                     "lambda_distill": epoch_policy["lambda_distill"],
                     "lambda_sparsity": epoch_policy["lambda_sparsity"],
                     "lambda_feat": epoch_policy["lambda_feat"],
@@ -2947,12 +2979,16 @@ def _run_student(device: torch.device, image_mode: str, db_train, trainloader, v
                     "train_total_loss": history["train_total_loss"][-1],
                     "train_segmentation_loss": history["train_segmentation_loss"][-1],
                     "train_distillation_loss": history["train_distillation_loss"][-1],
+                    "train_weighted_segmentation_loss": train_weighted_segmentation_loss,
+                    "train_weighted_distillation_loss": train_weighted_distillation_loss,
                     "train_sparsity_loss": history["train_sparsity_loss"][-1],
                     "train_feature_distill_loss": history["train_feature_distill_loss"][-1],
                     "train_auxiliary_loss": history["train_auxiliary_loss"][-1],
                     "val_total_loss": val_losses["total_loss"],
                     "val_segmentation_loss": val_losses["segmentation_loss"],
                     "val_distillation_loss": val_losses["distillation_loss"],
+                    "val_weighted_segmentation_loss": val_weighted_segmentation_loss,
+                    "val_weighted_distillation_loss": val_weighted_distillation_loss,
                     "val_sparsity_loss": val_losses["sparsity_loss"],
                     "val_feature_distill_loss": val_losses["feature_distill_loss"],
                     "val_auxiliary_loss": val_losses["auxiliary_loss"],
@@ -2981,6 +3017,8 @@ def _run_student(device: torch.device, image_mode: str, db_train, trainloader, v
                     "train_total_loss": history["train_total_loss"][-1],
                     "train_seg_loss": history["train_segmentation_loss"][-1],
                     "train_kd_loss": history["train_distillation_loss"][-1],
+                    "train_weighted_seg_loss": train_weighted_segmentation_loss,
+                    "train_weighted_kd_loss": train_weighted_distillation_loss,
                     "val_macro_dice": val_dice,
                     "val_dice": val_dice,
                     "val_iou": val_iou,
@@ -2990,12 +3028,15 @@ def _run_student(device: torch.device, image_mode: str, db_train, trainloader, v
                     "val_seg_loss": val_losses["segmentation_loss"],
                     "val_distillation_loss": val_losses["distillation_loss"],
                     "val_kd_loss": val_losses["distillation_loss"],
+                    "val_weighted_seg_loss": val_weighted_segmentation_loss,
+                    "val_weighted_kd_loss": val_weighted_distillation_loss,
                     "val_sparsity_loss": val_losses["sparsity_loss"],
                     "val_feature_distill_loss": val_losses["feature_distill_loss"],
                     "val_auxiliary_loss": val_losses["auxiliary_loss"],
                     "learning_rate": learning_rate,
                     "best_val_dice": best_metric,
                     "is_best": int(is_best),
+                    "lambda_segmentation": lambda_segmentation,
                     "use_kd_output": int(args.use_kd_output),
                     "loss_tag": args.loss_tag,
                 },

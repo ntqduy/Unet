@@ -328,7 +328,13 @@ def _copy_decoder_input_subsets(source_model: UNetResNet152, target_model: UNetR
 
 
 def _blueprint_uses_unet_plus_plus(blueprint: Mapping[str, object]) -> bool:
-    return str(blueprint.get("teacher_model", "")).lower() == "unet_plus_plus"
+    architecture_values = (
+        blueprint.get("teacher_model"),
+        blueprint.get("teacher_architecture"),
+        blueprint.get("student_architecture"),
+        blueprint.get("decoder_architecture"),
+    )
+    return any("unet_plus_plus" in str(value).lower() for value in architecture_values if value)
 
 
 def _stage_alias(stage_name: str) -> str:
@@ -416,6 +422,10 @@ class FullPrunedResNetUNet(BaseSegmentationModel):
         for row in self.full_prune_plan:
             block = _get_module(self.base_model, str(row["block_name"]))
             _replace_bottleneck_full(block, row)
+        if self.uses_unet_plus_plus:
+            _patch_unet_plus_plus_encoder_expanders(self.base_model, blueprint)
+        else:
+            _rebuild_decoder_for_stage_outputs(self.base_model, blueprint)
 
         self.model_name = "full_pruning_unet_plus_plus" if self.uses_unet_plus_plus else "full_pruning_resnet_unet"
         self.backbone_name = "resnet152_unet_plus_plus_full_pruned" if self.uses_unet_plus_plus else "resnet152_full_pruned"
@@ -475,6 +485,19 @@ def build_full_pruning_resnet_unet(
     )
 
 
+def build_full_pruning_unet_plus_plus(
+    *,
+    in_channels: int,
+    num_classes: int,
+    blueprint: Mapping[str, object],
+) -> FullPrunedResNetUNet:
+    return build_full_pruning_resnet_unet(
+        in_channels=in_channels,
+        num_classes=num_classes,
+        blueprint=blueprint,
+    )
+
+
 def build_full_pruning_resnet_unet_from_teacher(
     teacher_model: nn.Module,
     *,
@@ -525,8 +548,14 @@ def build_full_pruning_resnet_unet_from_teacher(
         rows.append(transfer_row)
 
     if student.uses_unet_plus_plus:
-        _patch_unet_plus_plus_encoder_expanders(student.base_model, blueprint)
-        decoder_subset_transfer = _copy_decoder_input_subsets(teacher_model, student.base_model, blueprint)
+        decoder_subset_transfer = {
+            "decoder_subset_rows": [],
+            "note": (
+                "UNet++ does not expose the custom UNetResNet152 center/decoder modules. "
+                "Decoder tensors are copied by exact-key matching when shapes match; encoder stage expanders restore "
+                "ResNet feature widths for the SMP UNet++ decoder."
+            ),
+        }
     else:
         decoder_subset_transfer = _copy_decoder_input_subsets(teacher_model, student.base_model, blueprint)
 
@@ -543,3 +572,18 @@ def build_full_pruning_resnet_unet_from_teacher(
         "decoder_subset_transfer": decoder_subset_transfer,
         "rows": rows,
     }
+
+
+def build_full_pruning_unet_plus_plus_from_teacher(
+    teacher_model: nn.Module,
+    *,
+    in_channels: int,
+    num_classes: int,
+    blueprint: Mapping[str, object],
+) -> Tuple[FullPrunedResNetUNet, dict]:
+    return build_full_pruning_resnet_unet_from_teacher(
+        teacher_model,
+        in_channels=in_channels,
+        num_classes=num_classes,
+        blueprint=blueprint,
+    )

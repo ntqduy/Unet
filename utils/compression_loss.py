@@ -33,6 +33,7 @@ class CompressionLoss(nn.Module):
         use_aux_loss=0,
         lambda_feat=0.1,
         lambda_aux=0.2,
+        lambda_segmentation=1.0,
         feature_layers=None,
         segmentation_loss_method="hybrid",
         distillation_loss_method="mse",
@@ -58,6 +59,7 @@ class CompressionLoss(nn.Module):
         self.use_aux_loss = bool(int(use_aux_loss))
         self.lambda_feat = float(lambda_feat)
         self.lambda_aux = float(lambda_aux)
+        self.lambda_segmentation = float(lambda_segmentation)
         self.feature_layers = list(feature_layers or [])
         self.distill_temperature = max(float(distill_temperature), 1e-6)
 
@@ -161,6 +163,7 @@ class CompressionLoss(nn.Module):
         effective_lambda_sparsity = (self.lambda_sparsity if lambda_sparsity is None else float(lambda_sparsity)) if self.use_sparsity else 0.0
         effective_lambda_feat = (self.lambda_feat if lambda_feat is None else float(lambda_feat)) if self.use_feature_distill else 0.0
         effective_lambda_aux = (self.lambda_aux if lambda_aux is None else float(lambda_aux)) if self.use_aux_loss else 0.0
+        effective_lambda_segmentation = self.lambda_segmentation
 
         l_seg = self._segmentation_loss(student_logits, student_probs, target)
 
@@ -180,7 +183,7 @@ class CompressionLoss(nn.Module):
         l_aux = self._auxiliary_loss(student_output, target, student_logits)
 
         total_loss = (
-            l_seg
+            effective_lambda_segmentation * l_seg
             + effective_lambda_distill * l_distill
             + effective_lambda_feat * l_feature
             + effective_lambda_aux * l_aux
@@ -193,6 +196,7 @@ class CompressionLoss(nn.Module):
             "sparsity_loss": l_sparsity,
             "feature_distill_loss": l_feature,
             "auxiliary_loss": l_aux,
+            "lambda_segmentation": effective_lambda_segmentation,
             "lambda_distill": effective_lambda_distill,
             "lambda_sparsity": effective_lambda_sparsity,
             "lambda_feat": effective_lambda_feat,

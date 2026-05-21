@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 import argparse
 import logging
@@ -25,18 +25,18 @@ FULL_METHODS = {"full_static", "full_kneedle", "full_otsu", "full_gmm"}
 FIGURE15_DATASET = "cvc_clinicdb"
 FIGURE15_FALLBACK_METHOD_DIRS = [
     ("Teacher", Path("1_teacher")),
-    ("Static r=0.5", Path(PGD_LOSS_TAG) / "output_static_0.5_no" / "3_student"),
-    ("Kneedle", Path(PGD_LOSS_TAG) / "output_kneedle_auto_no" / "3_student"),
-    ("Otsu", Path(PGD_LOSS_TAG) / "output_otsu_auto_no" / "3_student"),
-    ("GMM", Path(PGD_LOSS_TAG) / "output_gmm_auto_no" / "3_student"),
-    ("Middle Static", Path(PGD_LOSS_TAG) / "output_middle_static_0.5_no" / "3_student"),
-    ("Middle Kneedle", Path(PGD_LOSS_TAG) / "output_middle_kneedle_auto_no" / "3_student"),
-    ("Middle Otsu", Path(PGD_LOSS_TAG) / "output_middle_otsu_auto_no" / "3_student"),
-    ("Middle GMM", Path(PGD_LOSS_TAG) / "output_middle_gmm_auto_no" / "3_student"),
-    ("Full Static", Path(PGD_LOSS_TAG) / "output_full_static_0.5_no" / "3_student"),
-    ("Full Kneedle", Path(PGD_LOSS_TAG) / "output_full_kneedle_auto_no" / "3_student"),
-    ("Full Otsu", Path(PGD_LOSS_TAG) / "output_full_otsu_auto_no" / "3_student"),
-    ("Full GMM", Path(PGD_LOSS_TAG) / "output_full_gmm_auto_no" / "3_student"),
+    ("Static r=0.5", Path(PGD_LOSS_TAG) / "output_s1_static_0.5_no" / "3_student"),
+    ("Kneedle", Path(PGD_LOSS_TAG) / "output_s2_kneedle_auto_no" / "3_student"),
+    ("Otsu", Path(PGD_LOSS_TAG) / "output_s3_otsu_auto_no" / "3_student"),
+    ("GMM", Path(PGD_LOSS_TAG) / "output_s4_gmm_auto_no" / "3_student"),
+    ("Middle Static", Path(PGD_LOSS_TAG) / "output_s5_middle_static_0.5_no" / "3_student"),
+    ("Middle Kneedle", Path(PGD_LOSS_TAG) / "output_s6_middle_kneedle_auto_no" / "3_student"),
+    ("Middle Otsu", Path(PGD_LOSS_TAG) / "output_s7_middle_otsu_auto_no" / "3_student"),
+    ("Middle GMM", Path(PGD_LOSS_TAG) / "output_s8_middle_gmm_auto_no" / "3_student"),
+    ("Full Static", Path(PGD_LOSS_TAG) / "output_s9_full_static_0.5_no" / "3_student"),
+    ("Full Kneedle", Path(PGD_LOSS_TAG) / "output_s10_full_kneedle_auto_no" / "3_student"),
+    ("Full Otsu", Path(PGD_LOSS_TAG) / "output_s11_full_otsu_auto_no" / "3_student"),
+    ("Full GMM", Path(PGD_LOSS_TAG) / "output_s12_full_gmm_auto_no" / "3_student"),
 ]
 
 
@@ -210,7 +210,7 @@ def _figure15_method_dirs(outputs_root: Path, dataset: str) -> List[tuple[str, P
 
 
 def _method_column(frame: pd.DataFrame) -> str | None:
-    for column in ("Method", "Phương pháp", "PhÆ°Æ¡ng phÃ¡p"):
+    for column in ("Method", "PhÆ°Æ¡ng phÃ¡p", "PhÃ†Â°Ã†Â¡ng phÃƒÂ¡p"):
         if column in frame.columns:
             return column
     return str(frame.columns[0]) if len(frame.columns) else None
@@ -511,7 +511,7 @@ def figure6_tradeoff(dataset_dir: Path) -> None:
     if frame.empty:
         _placeholder(path, "No after fine-tuning table metrics available for trade-off figure.")
         return
-    method_col = "Method" if "Method" in frame.columns else "Phương pháp" if "Phương pháp" in frame.columns else frame.columns[0]
+    method_col = "Method" if "Method" in frame.columns else "PhÆ°Æ¡ng phÃ¡p" if "PhÆ°Æ¡ng phÃ¡p" in frame.columns else frame.columns[0]
     dice_col = "Dice" if "Dice" in frame.columns else "Dice $\\uparrow$"
     if dice_col not in frame.columns:
         _placeholder(path, "No Dice column available for trade-off figure.")
@@ -540,7 +540,7 @@ def figure6_tradeoff(dataset_dir: Path) -> None:
         ax.scatter(group_frame["_x"], group_frame["_y"], s=52, alpha=0.88, label=group)
 
     label_candidates = frame[
-        frame[method_col].astype(str).str.contains("Teacher|Giáo viên|GMM|Middle", regex=True, case=False, na=False)
+        frame[method_col].astype(str).str.contains("Teacher|GiÃ¡o viÃªn|GMM|Middle", regex=True, case=False, na=False)
     ]
     for offset_index, (_, row) in enumerate(label_candidates.iterrows()):
         offset = (6, 6 + 5 * (offset_index % 2))
@@ -553,7 +553,7 @@ def figure6_tradeoff(dataset_dir: Path) -> None:
             arrowprops={"arrowstyle": "-", "lw": 0.6, "alpha": 0.55},
         )
 
-    teacher = frame[frame[method_col].astype(str).str.contains("Teacher|Giáo viên", regex=True, case=False, na=False)]
+    teacher = frame[frame[method_col].astype(str).str.contains("Teacher|GiÃ¡o viÃªn", regex=True, case=False, na=False)]
     proposed = frame[frame[method_col].astype(str).str.contains("Middle GMM|GMM", regex=True, case=False, na=False)]
     if not teacher.empty and not proposed.empty:
         src = teacher.iloc[0]
@@ -700,15 +700,17 @@ def figure10_boundary(outputs_root: Path, dataset: str, dataset_dir: Path) -> No
 
 def _method_from_output_dir(output_dir: Path) -> tuple[str, float]:
     parts = output_dir.name.split("_")
-    if output_dir.name.startswith("output_middle_") and len(parts) >= 3:
+    if len(parts) >= 3 and re.fullmatch(r"s\d+", parts[1]):
+        parts = [parts[0], *parts[2:]]
+    if len(parts) >= 3 and parts[1] == "middle":
         method = f"middle_{parts[2]}"
         ratio = _safe_float(parts[3]) if len(parts) >= 5 and parts[3] != "auto" else np.nan
         return method, ratio
-    if output_dir.name.startswith("output_full_") and len(parts) >= 3:
+    if len(parts) >= 3 and parts[1] == "full":
         method = f"full_{parts[2]}"
         ratio = _safe_float(parts[3]) if len(parts) >= 5 and parts[3] != "auto" else np.nan
         return method, ratio
-    if output_dir.name.startswith("output_") and len(parts) >= 2:
+    if len(parts) >= 2 and parts[0] == "output":
         method = parts[1]
         ratio = _safe_float(parts[2]) if len(parts) >= 4 and parts[2] != "auto" else np.nan
         return method, ratio

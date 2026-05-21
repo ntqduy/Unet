@@ -126,7 +126,13 @@ def _copy_pruned_bottleneck_middle(source_block: nn.Module, target_block: nn.Mod
 
 
 def _blueprint_uses_unet_plus_plus(blueprint: Mapping[str, object]) -> bool:
-    return str(blueprint.get("teacher_model", "")).lower() == "unet_plus_plus"
+    architecture_values = (
+        blueprint.get("teacher_model"),
+        blueprint.get("teacher_architecture"),
+        blueprint.get("student_architecture"),
+        blueprint.get("decoder_architecture"),
+    )
+    return any("unet_plus_plus" in str(value).lower() for value in architecture_values if value)
 
 
 class MiddlePrunedResNetUNet(BaseSegmentationModel):
@@ -225,6 +231,19 @@ def build_middle_pruned_resnet_unet(
     )
 
 
+def build_middle_pruned_unet_plus_plus(
+    *,
+    in_channels: int,
+    num_classes: int,
+    blueprint: Mapping[str, object],
+) -> MiddlePrunedResNetUNet:
+    return build_middle_pruned_resnet_unet(
+        in_channels=in_channels,
+        num_classes=num_classes,
+        blueprint=blueprint,
+    )
+
+
 def build_middle_pruned_resnet_unet_from_teacher(
     teacher_model: nn.Module,
     *,
@@ -276,3 +295,18 @@ def build_middle_pruned_resnet_unet_from_teacher(
         "stage_middle_channel_config": student.stage_middle_channel_config,
         "rows": rows,
     }
+
+
+def build_middle_pruned_unet_plus_plus_from_teacher(
+    teacher_model: nn.Module,
+    *,
+    in_channels: int,
+    num_classes: int,
+    blueprint: Mapping[str, object],
+) -> Tuple[MiddlePrunedResNetUNet, dict]:
+    return build_middle_pruned_resnet_unet_from_teacher(
+        teacher_model,
+        in_channels=in_channels,
+        num_classes=num_classes,
+        blueprint=blueprint,
+    )

@@ -274,7 +274,8 @@ else
   fi
 fi
 
-OUTPUT_DIR="output_${PRUNE_METHOD}_${RATE_TAG}_${STEP3_TAG}"
+PRUNE_STRATEGY_TAG="$(printf "%s" "$PRUNE_STRATEGY" | tr '[:upper:]' '[:lower:]')"
+OUTPUT_DIR="output_${PRUNE_STRATEGY_TAG}_${PRUNE_METHOD}_${RATE_TAG}_${STEP3_TAG}"
 
 echo "Teacher model: $TEACHER_MODEL"
 echo "Encoder pretrained: $ENCODER_PRETRAINED"

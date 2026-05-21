@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 import argparse
 import json
@@ -23,21 +23,21 @@ TABLE3_COLUMNS = ["Method", *PERFORMANCE_COLUMNS]
 TABLE4_COLUMNS = ["Component", "Dice", "IoU", "HD95", "Params", "FLOPs", "FPS", "Inf (s)", "Search Time (s)"]
 TABLE5_COLUMNS = ["Method", "Pruning Time (s)", "Search Time (s)", "Training Time (s)", "Inference Time (s)", "Total Time (s)"]
 TABLE5_METHOD_DIRS = [
-    ("Static pruning r = 0.5", Path(PGD_LOSS_TAG) / "output_static_0.5_no" / "3_student"),
-    ("Kneedle", Path(PGD_LOSS_TAG) / "output_kneedle_auto_no" / "3_student"),
-    ("Otsu", Path(PGD_LOSS_TAG) / "output_otsu_auto_no" / "3_student"),
-    ("GMM", Path(PGD_LOSS_TAG) / "output_gmm_auto_no" / "3_student"),
-    ("Middle Static Pruning (r = 0.5)", Path(PGD_LOSS_TAG) / "output_middle_static_0.5_no" / "3_student"),
-    ("Middle Kneedle", Path(PGD_LOSS_TAG) / "output_middle_kneedle_auto_no" / "3_student"),
-    ("Middle Otsu", Path(PGD_LOSS_TAG) / "output_middle_otsu_auto_no" / "3_student"),
-    ("Middle GMM", Path(PGD_LOSS_TAG) / "output_middle_gmm_auto_no" / "3_student"),
-    ("Full Static Block (r = 0.5)", Path(PGD_LOSS_TAG) / "output_full_static_0.5_no" / "3_student"),
-    ("Full Kneedle Block", Path(PGD_LOSS_TAG) / "output_full_kneedle_auto_no" / "3_student"),
-    ("Full Otsu Block", Path(PGD_LOSS_TAG) / "output_full_otsu_auto_no" / "3_student"),
-    ("Full GMM Block", Path(PGD_LOSS_TAG) / "output_full_gmm_auto_no" / "3_student"),
+    ("Static pruning r = 0.5", Path(PGD_LOSS_TAG) / "output_s1_static_0.5_no" / "3_student"),
+    ("Kneedle", Path(PGD_LOSS_TAG) / "output_s2_kneedle_auto_no" / "3_student"),
+    ("Otsu", Path(PGD_LOSS_TAG) / "output_s3_otsu_auto_no" / "3_student"),
+    ("GMM", Path(PGD_LOSS_TAG) / "output_s4_gmm_auto_no" / "3_student"),
+    ("Middle Static Pruning (r = 0.5)", Path(PGD_LOSS_TAG) / "output_s5_middle_static_0.5_no" / "3_student"),
+    ("Middle Kneedle", Path(PGD_LOSS_TAG) / "output_s6_middle_kneedle_auto_no" / "3_student"),
+    ("Middle Otsu", Path(PGD_LOSS_TAG) / "output_s7_middle_otsu_auto_no" / "3_student"),
+    ("Middle GMM", Path(PGD_LOSS_TAG) / "output_s8_middle_gmm_auto_no" / "3_student"),
+    ("Full Static Block (r = 0.5)", Path(PGD_LOSS_TAG) / "output_s9_full_static_0.5_no" / "3_student"),
+    ("Full Kneedle Block", Path(PGD_LOSS_TAG) / "output_s10_full_kneedle_auto_no" / "3_student"),
+    ("Full Otsu Block", Path(PGD_LOSS_TAG) / "output_s11_full_otsu_auto_no" / "3_student"),
+    ("Full GMM Block", Path(PGD_LOSS_TAG) / "output_s12_full_gmm_auto_no" / "3_student"),
 ]
 TABLE6_COLUMNS = [
-    "Phương pháp",
+    "PhÆ°Æ¡ng phÃ¡p",
     "Dice $\\uparrow$",
     "IoU $\\uparrow$",
     "HD95 $\\downarrow$",
@@ -47,34 +47,34 @@ TABLE6_COLUMNS = [
 ]
 TABLE2_COLUMNS = TABLE6_COLUMNS
 TABLE2_METHOD_DIRS = [
-    ("Giáo viên (UNet-ResNet152)", Path("1_teacher")),
-    ("Static pruning r = 0.5", Path(PGD_LOSS_TAG) / "output_static_0.5_no" / "2_pruning"),
-    ("Kneedle", Path(PGD_LOSS_TAG) / "output_kneedle_auto_no" / "2_pruning"),
-    ("Otsu", Path(PGD_LOSS_TAG) / "output_otsu_auto_no" / "2_pruning"),
-    ("GMM", Path(PGD_LOSS_TAG) / "output_gmm_auto_no" / "2_pruning"),
-    ("Middle Static Pruning (r = 0.5)", Path(PGD_LOSS_TAG) / "output_middle_static_0.5_no" / "2_pruning"),
-    ("Middle Kneedle", Path(PGD_LOSS_TAG) / "output_middle_kneedle_auto_no" / "2_pruning"),
-    ("Middle Otsu", Path(PGD_LOSS_TAG) / "output_middle_otsu_auto_no" / "2_pruning"),
-    ("Middle GMM", Path(PGD_LOSS_TAG) / "output_middle_gmm_auto_no" / "2_pruning"),
-    ("Full Static Block (r = 0.5)", Path(PGD_LOSS_TAG) / "output_full_static_0.5_no" / "2_pruning"),
-    ("Full Kneedle Block", Path(PGD_LOSS_TAG) / "output_full_kneedle_auto_no" / "2_pruning"),
-    ("Full Otsu Block", Path(PGD_LOSS_TAG) / "output_full_otsu_auto_no" / "2_pruning"),
-    ("Full GMM Block", Path(PGD_LOSS_TAG) / "output_full_gmm_auto_no" / "2_pruning"),
+    ("GiÃ¡o viÃªn (UNet-ResNet152)", Path("1_teacher")),
+    ("Static pruning r = 0.5", Path(PGD_LOSS_TAG) / "output_s1_static_0.5_no" / "2_pruning"),
+    ("Kneedle", Path(PGD_LOSS_TAG) / "output_s2_kneedle_auto_no" / "2_pruning"),
+    ("Otsu", Path(PGD_LOSS_TAG) / "output_s3_otsu_auto_no" / "2_pruning"),
+    ("GMM", Path(PGD_LOSS_TAG) / "output_s4_gmm_auto_no" / "2_pruning"),
+    ("Middle Static Pruning (r = 0.5)", Path(PGD_LOSS_TAG) / "output_s5_middle_static_0.5_no" / "2_pruning"),
+    ("Middle Kneedle", Path(PGD_LOSS_TAG) / "output_s6_middle_kneedle_auto_no" / "2_pruning"),
+    ("Middle Otsu", Path(PGD_LOSS_TAG) / "output_s7_middle_otsu_auto_no" / "2_pruning"),
+    ("Middle GMM", Path(PGD_LOSS_TAG) / "output_s8_middle_gmm_auto_no" / "2_pruning"),
+    ("Full Static Block (r = 0.5)", Path(PGD_LOSS_TAG) / "output_s9_full_static_0.5_no" / "2_pruning"),
+    ("Full Kneedle Block", Path(PGD_LOSS_TAG) / "output_s10_full_kneedle_auto_no" / "2_pruning"),
+    ("Full Otsu Block", Path(PGD_LOSS_TAG) / "output_s11_full_otsu_auto_no" / "2_pruning"),
+    ("Full GMM Block", Path(PGD_LOSS_TAG) / "output_s12_full_gmm_auto_no" / "2_pruning"),
 ]
 TABLE6_METHOD_DIRS = [
-    ("Giáo viên (UNet-ResNet152)", Path("1_teacher")),
-    ("Static pruning r = 0.5", Path(PGD_LOSS_TAG) / "output_static_0.5_no" / "3_student"),
-    ("Kneedle", Path(PGD_LOSS_TAG) / "output_kneedle_auto_no" / "3_student"),
-    ("Otsu", Path(PGD_LOSS_TAG) / "output_otsu_auto_no" / "3_student"),
-    ("GMM", Path(PGD_LOSS_TAG) / "output_gmm_auto_no" / "3_student"),
-    ("Middle Static Pruning (r = 0.5)", Path(PGD_LOSS_TAG) / "output_middle_static_0.5_no" / "3_student"),
-    ("Middle Kneedle", Path(PGD_LOSS_TAG) / "output_middle_kneedle_auto_no" / "3_student"),
-    ("Middle Otsu", Path(PGD_LOSS_TAG) / "output_middle_otsu_auto_no" / "3_student"),
-    ("Middle GMM", Path(PGD_LOSS_TAG) / "output_middle_gmm_auto_no" / "3_student"),
-    ("Full Static Block (r = 0.5)", Path(PGD_LOSS_TAG) / "output_full_static_0.5_no" / "3_student"),
-    ("Full Kneedle Block", Path(PGD_LOSS_TAG) / "output_full_kneedle_auto_no" / "3_student"),
-    ("Full Otsu Block", Path(PGD_LOSS_TAG) / "output_full_otsu_auto_no" / "3_student"),
-    ("Full GMM Block", Path(PGD_LOSS_TAG) / "output_full_gmm_auto_no" / "3_student"),
+    ("GiÃ¡o viÃªn (UNet-ResNet152)", Path("1_teacher")),
+    ("Static pruning r = 0.5", Path(PGD_LOSS_TAG) / "output_s1_static_0.5_no" / "3_student"),
+    ("Kneedle", Path(PGD_LOSS_TAG) / "output_s2_kneedle_auto_no" / "3_student"),
+    ("Otsu", Path(PGD_LOSS_TAG) / "output_s3_otsu_auto_no" / "3_student"),
+    ("GMM", Path(PGD_LOSS_TAG) / "output_s4_gmm_auto_no" / "3_student"),
+    ("Middle Static Pruning (r = 0.5)", Path(PGD_LOSS_TAG) / "output_s5_middle_static_0.5_no" / "3_student"),
+    ("Middle Kneedle", Path(PGD_LOSS_TAG) / "output_s6_middle_kneedle_auto_no" / "3_student"),
+    ("Middle Otsu", Path(PGD_LOSS_TAG) / "output_s7_middle_otsu_auto_no" / "3_student"),
+    ("Middle GMM", Path(PGD_LOSS_TAG) / "output_s8_middle_gmm_auto_no" / "3_student"),
+    ("Full Static Block (r = 0.5)", Path(PGD_LOSS_TAG) / "output_s9_full_static_0.5_no" / "3_student"),
+    ("Full Kneedle Block", Path(PGD_LOSS_TAG) / "output_s10_full_kneedle_auto_no" / "3_student"),
+    ("Full Otsu Block", Path(PGD_LOSS_TAG) / "output_s11_full_otsu_auto_no" / "3_student"),
+    ("Full GMM Block", Path(PGD_LOSS_TAG) / "output_s12_full_gmm_auto_no" / "3_student"),
 ]
 MEAN_STD_COLUMNS = [
     "Method",
@@ -407,7 +407,7 @@ def _best_test_row_from_csv(csv_path: Path) -> Dict[str, Any] | None:
 def _table6_row(method: str, row: Dict[str, Any] | None) -> Dict[str, Any]:
     if row is None:
         return {
-            "Phương pháp": method,
+            "PhÆ°Æ¡ng phÃ¡p": method,
             "Dice $\\uparrow$": np.nan,
             "IoU $\\uparrow$": np.nan,
             "HD95 $\\downarrow$": np.nan,
@@ -416,7 +416,7 @@ def _table6_row(method: str, row: Dict[str, Any] | None) -> Dict[str, Any]:
             "Inf (s) $\\downarrow$": np.nan,
         }
     return {
-        "Phương pháp": method,
+        "PhÆ°Æ¡ng phÃ¡p": method,
         "Dice $\\uparrow$": _safe_float(row.get("dice")),
         "IoU $\\uparrow$": _safe_float(row.get("iou")),
         "HD95 $\\downarrow$": _safe_float(row.get("hd95")),
