@@ -60,6 +60,116 @@ def _resolve_module_importance(model: nn.Module, module_name: str, module: nn.Mo
     return module.weight.detach().abs().sum(dim=(1, 2, 3))
 
 
+def _conv_input_importance(module: nn.Conv2d) -> torch.Tensor:
+    return module.weight.detach().abs().sum(dim=(0, 2, 3))
+
+
+def _normalize_importance(values: torch.Tensor) -> torch.Tensor:
+    values = values.detach().float()
+    max_value = values.max() if values.numel() else values.new_tensor(0.0)
+    if float(max_value.item()) <= 0.0:
+        return torch.zeros_like(values)
+    return values / max_value.clamp_min(1e-12)
+
+
+def _bottleneck_internal_importance(model: nn.Module, block_name: str, block: nn.Module) -> tuple[torch.Tensor, Dict[str, List[float]]]:
+    conv1_out = _resolve_module_importance(model, f"{block_name}.conv1", block.conv1)
+    conv2_out = _resolve_module_importance(model, f"{block_name}.conv2", block.conv2)
+    conv2_in = _conv_input_importance(block.conv2)
+    conv3_in = _conv_input_importance(block.conv3)
+    sources = {
+        "conv1_out": conv1_out,
+        "conv2_in": conv2_in,
+        "conv2_out": conv2_out,
+        "conv3_in": conv3_in,
+    }
+    lengths = {int(value.numel()) for value in sources.values()}
+    if len(lengths) != 1:
+        raise ValueError(f"Internal bottleneck importance sources have mismatched lengths for {block_name}: {sorted(lengths)}")
+    combined = torch.stack([_normalize_importance(value) for value in sources.values()]).mean(dim=0)
+    source_values = {name: [float(item) for item in value.detach().cpu().tolist()] for name, value in sources.items()}
+    source_values["combined_internal"] = [float(item) for item in combined.detach().cpu().tolist()]
+    return combined, source_values
+
+
+def _bottleneck_full_channel_importance(
+    model: nn.Module,
+    block_name: str,
+    block: nn.Module,
+    next_input_importance: Optional[torch.Tensor] = None,
+    next_input_source: str = "",
+) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, Dict[str, List[float]]]:
+    conv1_out = _resolve_module_importance(model, f"{block_name}.conv1", block.conv1)
+    conv2_in = _conv_input_importance(block.conv2)
+    conv2_out = _resolve_module_importance(model, f"{block_name}.conv2", block.conv2)
+    conv3_in = _conv_input_importance(block.conv3)
+    conv3_out = _resolve_module_importance(model, f"{block_name}.conv3", block.conv3)
+    if next_input_importance is not None and int(next_input_importance.numel()) != int(conv3_out.numel()):
+        raise ValueError(
+            f"conv3 output and next input importance lengths mismatch for {block_name}: "
+            f"{int(conv3_out.numel())} vs {int(next_input_importance.numel())}"
+        )
+    conv3_next_in = next_input_importance if next_input_importance is not None else conv3_out
+
+    if int(conv1_out.numel()) != int(conv2_in.numel()):
+        raise ValueError(
+            f"conv1 output and conv2 input importance lengths mismatch for {block_name}: "
+            f"{int(conv1_out.numel())} vs {int(conv2_in.numel())}"
+        )
+    if int(conv2_out.numel()) != int(conv3_in.numel()):
+        raise ValueError(
+            f"conv2 output and conv3 input importance lengths mismatch for {block_name}: "
+            f"{int(conv2_out.numel())} vs {int(conv3_in.numel())}"
+        )
+
+    conv1_to_conv2 = torch.stack((_normalize_importance(conv1_out), _normalize_importance(conv2_in))).mean(dim=0)
+    conv2_to_conv3 = torch.stack((_normalize_importance(conv2_out), _normalize_importance(conv3_in))).mean(dim=0)
+    conv3_to_next = torch.stack((_normalize_importance(conv3_out), _normalize_importance(conv3_next_in))).mean(dim=0)
+    source_values = {
+        "conv1_out": [float(item) for item in conv1_out.detach().cpu().tolist()],
+        "conv2_in": [float(item) for item in conv2_in.detach().cpu().tolist()],
+        "conv2_out": [float(item) for item in conv2_out.detach().cpu().tolist()],
+        "conv3_in": [float(item) for item in conv3_in.detach().cpu().tolist()],
+        "conv3_out": [float(item) for item in conv3_out.detach().cpu().tolist()],
+        "conv3_next_in": [float(item) for item in conv3_next_in.detach().cpu().tolist()],
+        "conv3_next_in_source": next_input_source or "conv3_out_fallback",
+        "combined_conv1_to_conv2": [float(item) for item in conv1_to_conv2.detach().cpu().tolist()],
+        "combined_conv2_to_conv3": [float(item) for item in conv2_to_conv3.detach().cpu().tolist()],
+        "combined_conv3_to_next": [float(item) for item in conv3_to_next.detach().cpu().tolist()],
+    }
+    return conv1_to_conv2, conv2_to_conv3, conv3_to_next, source_values
+
+
+def _bottleneck_middle_importance(model: nn.Module, block_name: str, block: nn.Module) -> tuple[torch.Tensor, Dict[str, List[float]]]:
+    conv2_out = _resolve_module_importance(model, f"{block_name}.conv2", block.conv2)
+    conv3_in = _conv_input_importance(block.conv3)
+    if int(conv2_out.numel()) != int(conv3_in.numel()):
+        raise ValueError(
+            f"conv2 output and conv3 input importance lengths mismatch for {block_name}: "
+            f"{int(conv2_out.numel())} vs {int(conv3_in.numel())}"
+        )
+    combined = torch.stack((_normalize_importance(conv2_out), _normalize_importance(conv3_in))).mean(dim=0)
+    source_values = {
+        "conv2_out": [float(item) for item in conv2_out.detach().cpu().tolist()],
+        "conv3_in": [float(item) for item in conv3_in.detach().cpu().tolist()],
+        "combined_conv2_to_conv3": [float(item) for item in combined.detach().cpu().tolist()],
+    }
+    return combined, source_values
+
+
+def _first_conv_input_importance(module: Optional[nn.Module]) -> Optional[torch.Tensor]:
+    if module is None:
+        return None
+    if isinstance(module, nn.Conv2d):
+        return _conv_input_importance(module)
+    for child in module.modules():
+        if child is module:
+            continue
+        if isinstance(child, nn.Conv2d):
+            return _conv_input_importance(child)
+    return None
+
+
 def _resolve_target_modules(teacher_model: nn.Module, target_modules: Optional[Sequence[str]]) -> Sequence[str]:
     if target_modules:
         return tuple(target_modules)
@@ -127,9 +237,10 @@ def _extract_middle_resnet_blueprint(
             block_name = f"{stage_name}.{child_name}"
             if not _is_resnet_bottleneck_block(block):
                 continue
+            plot_index = len(middle_prune_plan) + 1
 
             middle_layer_name = f"{block_name}.conv2"
-            importance = _resolve_module_importance(teacher_model, middle_layer_name, block.conv2)
+            importance, middle_importance_sources = _bottleneck_middle_importance(teacher_model, block_name, block)
             importance_np = importance.detach().cpu().numpy()
             prune_kwargs = {
                 "scores": importance_np,
@@ -162,6 +273,9 @@ def _extract_middle_resnet_blueprint(
                 {
                     "stage_name": stage_name,
                     "block_name": block_name,
+                    "pruning_group": "s5_s8_middle_conv2_block",
+                    "plot_index": plot_index,
+                    "plot_role": "conv2_output_to_conv3_input",
                     "middle_layer_name": middle_layer_name,
                     "first_layer_name": f"{block_name}.conv1",
                     "last_layer_name": f"{block_name}.conv3",
@@ -173,20 +287,27 @@ def _extract_middle_resnet_blueprint(
                     "pruning_threshold": float(prune_result.threshold),
                     "prune_method": prune_method,
                     "protected_boundary_layers": [f"{block_name}.conv1", f"{block_name}.conv3"],
+                    "importance_source": "mean_normalized_conv2_out_and_conv3_in",
+                    "importance_sources": middle_importance_sources,
                 }
             )
 
             teacher_channel_analysis.append(
                 {
                     "layer_name": block_name,
+                    "pruning_group": "s5_s8_middle_conv2_block",
+                    "plot_index": plot_index,
+                    "plot_role": "conv2_output_to_conv3_input",
                     "pruning_layer_name": middle_layer_name,
+                    "channel_role": "conv2_output_to_conv3_input",
                     "module_type": type(block).__name__,
                     "channel_layer_type": type(block.conv2).__name__,
                     "in_channels": int(block.conv2.in_channels),
                     "teacher_out_channels": original_middle_channels,
                     "kernel_size": list(block.conv2.kernel_size),
                     "weight_shape": [int(value) for value in block.conv2.weight.shape],
-                    "importance_source": "bn2_weight_or_conv2_l1",
+                    "importance_source": "mean_normalized_conv2_out_and_conv3_in",
+                    "importance_sources": middle_importance_sources,
                     "importance_values": importance_values,
                     "ranked_channel_indices_desc": [int(index) for index in ranked_indices.tolist()],
                     "kept_channel_indices": kept_indices,
@@ -209,7 +330,11 @@ def _extract_middle_resnet_blueprint(
             row = {
                 "layer_name": block_name,
                 "module_name": block_name,
+                "pruning_group": "s5_s8_middle_conv2_block",
+                "plot_index": plot_index,
+                "plot_role": "conv2_output_to_conv3_input",
                 "pruning_layer_name": middle_layer_name,
+                "channel_role": "conv2_output_to_conv3_input",
                 "module_type": type(block).__name__,
                 "channel_layer_type": type(block.conv2).__name__,
                 "in_channels": int(block.conv2.in_channels),
@@ -219,7 +344,7 @@ def _extract_middle_resnet_blueprint(
                 "kept_channels": keep_channels,
                 "pruned_channels": int(len(pruned_indices)),
                 "actual_prune_ratio": actual_prune_ratio,
-                "criterion": "bn2_weight_or_conv2_l1",
+                "criterion": "mean_normalized_conv2_out_and_conv3_in",
                 "prune_method": prune_method,
                 "selection_policy": selection_policy,
                 "pruning_threshold": float(prune_result.threshold),
@@ -232,6 +357,8 @@ def _extract_middle_resnet_blueprint(
                 "importance_max": stats["max"],
                 "importance_mean": stats["mean"],
                 "importance_std": stats["std"],
+                "importance_source": "mean_normalized_conv2_out_and_conv3_in",
+                "importance_sources": middle_importance_sources,
                 "kept_channel_indices": kept_indices,
                 "pruned_channel_indices": pruned_indices,
                 "ranked_channel_indices_desc": [int(index) for index in ranked_indices.tolist()],
@@ -240,6 +367,9 @@ def _extract_middle_resnet_blueprint(
             teacher_vs_student_rows.append(
                 {
                     "layer_name": block_name,
+                    "pruning_group": "s5_s8_middle_conv2_block",
+                    "plot_index": plot_index,
+                    "plot_role": "conv2_output_to_conv3_input",
                     "pruning_layer_name": middle_layer_name,
                     "teacher_out_channels": original_middle_channels,
                     "student_out_channels": keep_channels,
@@ -254,9 +384,15 @@ def _extract_middle_resnet_blueprint(
                 channel_level_detail.append(
                     {
                         "layer_name": block_name,
+                        "pruning_group": "s5_s8_middle_conv2_block",
+                        "plot_index": plot_index,
+                        "plot_role": "conv2_output_to_conv3_input",
                         "pruning_layer_name": middle_layer_name,
+                        "channel_role": "conv2_output_to_conv3_input",
                         "channel_index": int(channel_index),
                         "importance": float(importance_value),
+                        "conv2_out_importance": middle_importance_sources["conv2_out"][channel_index],
+                        "conv3_in_importance": middle_importance_sources["conv3_in"][channel_index],
                         "rank_desc": int(rank_lookup[channel_index]),
                         "decision": "keep" if channel_index in kept_index_set else "prune",
                         "prune_method": prune_method,
@@ -280,7 +416,7 @@ def _extract_middle_resnet_blueprint(
         "global_prune_ratio": float(total_pruned / max(1, total_before)),
         "num_layers_changed": changed_layers,
         "num_layers_unchanged": int(len(teacher_vs_student_rows) - changed_layers),
-        "protected_boundary_policy": "conv1_out_and_conv3_out_are_kept_full; only conv2_out/bn2 and conv3_in are pruned",
+        "protected_boundary_policy": "conv1_out_and_conv3_out_are_kept_full; conv2_out and conv3_in are pruned with one shared combined mask",
     }
 
     return {
@@ -293,7 +429,7 @@ def _extract_middle_resnet_blueprint(
         "static_prune_ratio": float(static_prune_ratio) if ratio_based_static else None,
         "block_middle_pruning": True,
         "target_modules": list(target_modules),
-        "criterion": "bn2_weight_or_conv2_l1",
+        "criterion": "mean_normalized_conv2_out_and_conv3_in",
         "minimum_channels": effective_minimum_channels,
         "dynamic_min_keep_ratio": effective_min_keep_ratio,
         "otsu_bins": int(otsu_bins),
@@ -339,6 +475,7 @@ def _extract_full_resnet_blueprint(
     channel_level_detail: List[Dict[str, object]] = []
     full_prune_plan: List[Dict[str, object]] = []
     stage_full_channel_config: Dict[str, List[int]] = {}
+    stage_full_conv2_channel_config: Dict[str, List[int]] = {}
     stage_full_output_channel_config: Dict[str, List[int]] = {}
     stage_output_kept_indices: Dict[str, List[int]] = {}
 
@@ -373,44 +510,105 @@ def _extract_full_resnet_blueprint(
             "stats": _tensor_stats(values),
         }
 
+    ordered_blocks: List[tuple[str, nn.Module]] = []
+    for stage_name in stage_names:
+        stage = named_modules[stage_name]
+        for child_name, block in stage.named_children():
+            if _is_resnet_bottleneck_block(block):
+                ordered_blocks.append((f"{stage_name}.{child_name}", block))
+    next_input_by_block: Dict[str, tuple[Optional[torch.Tensor], str]] = {}
+    for index, (block_name, block) in enumerate(ordered_blocks):
+        if index + 1 < len(ordered_blocks):
+            next_name, next_block = ordered_blocks[index + 1]
+            next_input_by_block[block_name] = (_conv_input_importance(next_block.conv1), f"{next_name}.conv1_input")
+        else:
+            next_input = _first_conv_input_importance(named_modules.get("center"))
+            next_input_by_block[block_name] = (next_input, "center_first_conv_input" if next_input is not None else "conv3_out_fallback")
+
     previous_stage_output_indices: Optional[List[int]] = None
     for stage_name in stage_names:
         stage = named_modules[stage_name]
         stage_full_channel_config[stage_name] = []
+        stage_full_conv2_channel_config[stage_name] = []
         stage_full_output_channel_config[stage_name] = []
         current_input_indices = list(previous_stage_output_indices) if previous_stage_output_indices is not None else None
         for child_name, block in stage.named_children():
             block_name = f"{stage_name}.{child_name}"
             if not _is_resnet_bottleneck_block(block):
                 continue
+            plot_index = len(full_prune_plan) + 1
 
             if current_input_indices is None:
                 current_input_indices = list(range(int(block.conv1.in_channels)))
             input_indices = list(current_input_indices)
             full_layer_name = f"{block_name}.full_block"
             internal_layer_name = f"{block_name}.internal_width"
+            conv1_layer_name = f"{block_name}.conv1_to_conv2"
+            conv2_layer_name = f"{block_name}.conv2_to_conv3"
             output_layer_name = f"{block_name}.conv3_output"
-            internal_importance = _resolve_module_importance(teacher_model, f"{block_name}.conv2", block.conv2)
-            output_importance = _resolve_module_importance(teacher_model, f"{block_name}.conv3", block.conv3)
+            next_input_importance, next_input_source = next_input_by_block.get(block_name, (None, "conv3_out_fallback"))
+            conv1_importance, conv2_importance, output_importance, internal_importance_sources = _bottleneck_full_channel_importance(
+                teacher_model,
+                block_name,
+                block,
+                next_input_importance=next_input_importance,
+                next_input_source=next_input_source,
+            )
+            internal_importance = torch.cat(
+                (
+                    _normalize_importance(conv1_importance),
+                    _normalize_importance(conv2_importance),
+                )
+            )
+            conv1_prune = run_channel_prune(conv1_importance, conv1_layer_name)
+            conv2_prune = run_channel_prune(conv2_importance, conv2_layer_name)
             internal_prune = run_channel_prune(internal_importance, internal_layer_name)
             output_prune = run_channel_prune(output_importance, output_layer_name)
 
-            internal_keep_indices = internal_prune["kept_indices"]
-            internal_pruned_indices = internal_prune["pruned_indices"]
+            conv1_keep_indices = conv1_prune["kept_indices"]
+            conv1_pruned_indices = conv1_prune["pruned_indices"]
+            conv2_keep_indices = conv2_prune["kept_indices"]
+            conv2_pruned_indices = conv2_prune["pruned_indices"]
+            internal_keep_indices = conv1_keep_indices
+            internal_pruned_indices = conv1_pruned_indices
             output_keep_indices = output_prune["kept_indices"]
-            output_pruned_indices = output_prune["pruned_indices"]
-            keep_channels = int(len(internal_keep_indices))
+            output_selection_policy = selection_policy
+            output_pruning_threshold = float(output_prune["result"].threshold)
+            residual_safe_output_for_identity = bool(
+                block.downsample is None
+                and tuple(block.conv2.stride) == (1, 1)
+                and len(input_indices) <= int(block.conv3.out_channels)
+            )
+            if residual_safe_output_for_identity:
+                # Sequential block pruning: the current block may prune its
+                # output further, but an identity residual can only keep
+                # channels that are still present in its input skip tensor.
+                candidate_output_indices = sorted(int(index) for index in input_indices)
+                candidate_scores = output_importance.detach().cpu()[candidate_output_indices]
+                constrained_output_prune = run_channel_prune(candidate_scores, f"{output_layer_name}.input_subset")
+                output_keep_indices = sorted(candidate_output_indices[int(index)] for index in constrained_output_prune["kept_indices"])
+                output_selection_policy = f"{selection_policy}_sequential_output_subset_of_input"
+                output_pruning_threshold = float(constrained_output_prune["result"].threshold)
+            output_kept_index_set = set(output_keep_indices)
+            output_pruned_indices = sorted(index for index in range(int(output_importance.numel())) if index not in output_kept_index_set)
+            keep_channels = int(len(conv1_keep_indices))
+            keep_conv2_channels = int(len(conv2_keep_indices))
             keep_output_channels = int(len(output_keep_indices))
             original_internal_channels = int(block.conv2.out_channels)
             original_output_channels = int(block.conv3.out_channels)
-            internal_actual_prune_ratio = float(internal_prune["result"].prune_ratio)
-            output_actual_prune_ratio = float(output_prune["result"].prune_ratio)
+            internal_actual_prune_ratio = float(len(conv1_pruned_indices) / max(1, original_internal_channels))
+            conv2_actual_prune_ratio = float(len(conv2_pruned_indices) / max(1, original_internal_channels))
+            output_actual_prune_ratio = float(len(output_pruned_indices) / max(1, original_output_channels))
 
             stage_full_channel_config[stage_name].append(keep_channels)
+            stage_full_conv2_channel_config[stage_name].append(keep_conv2_channels)
             stage_full_output_channel_config[stage_name].append(keep_output_channels)
             plan_row = {
                 "stage_name": stage_name,
                 "block_name": block_name,
+                "pruning_group": "s9_s12_full_block",
+                "plot_index": plot_index,
+                "plot_role": "conv3_output",
                 "full_layer_name": full_layer_name,
                 "first_layer_name": f"{block_name}.conv1",
                 "middle_layer_name": f"{block_name}.conv2",
@@ -422,18 +620,29 @@ def _extract_full_resnet_blueprint(
                 "kept_internal_channels": keep_channels,
                 "internal_kept_channel_indices": internal_keep_indices,
                 "internal_pruned_channel_indices": internal_pruned_indices,
-                "internal_pruning_threshold": float(internal_prune["result"].threshold),
+                "conv1_kept_channel_indices": conv1_keep_indices,
+                "conv1_pruned_channel_indices": conv1_pruned_indices,
+                "conv1_pruning_threshold": float(conv1_prune["result"].threshold),
+                "conv1_actual_prune_ratio": internal_actual_prune_ratio,
+                "conv2_kept_channel_indices": conv2_keep_indices,
+                "conv2_pruned_channel_indices": conv2_pruned_indices,
+                "conv2_pruning_threshold": float(conv2_prune["result"].threshold),
+                "conv2_actual_prune_ratio": conv2_actual_prune_ratio,
+                "kept_conv2_channels": keep_conv2_channels,
+                "internal_pruning_threshold": float(conv1_prune["result"].threshold),
                 "internal_actual_prune_ratio": internal_actual_prune_ratio,
+                "internal_importance_source": "conv1_out_plus_conv2_in__conv2_out_plus_conv3_in__conv3_out_plus_next_input_from_teacher",
+                "internal_importance_sources": internal_importance_sources,
                 "original_output_channels": original_output_channels,
                 "kept_output_channels": keep_output_channels,
                 "output_kept_channel_indices": output_keep_indices,
                 "output_pruned_channel_indices": output_pruned_indices,
-                "output_pruning_threshold": float(output_prune["result"].threshold),
+                "output_pruning_threshold": output_pruning_threshold,
                 "output_actual_prune_ratio": output_actual_prune_ratio,
                 "kept_channel_indices": output_keep_indices,
                 "pruned_channel_indices": output_pruned_indices,
-                "selection_policy": selection_policy,
-                "pruning_threshold": float(output_prune["result"].threshold),
+                "selection_policy": output_selection_policy,
+                "pruning_threshold": output_pruning_threshold,
                 "prune_method": prune_method,
                 "residual_projection_required": bool(
                     block.downsample is not None
@@ -449,7 +658,11 @@ def _extract_full_resnet_blueprint(
             row = {
                 "layer_name": block_name,
                 "module_name": block_name,
+                "pruning_group": "s9_s12_full_block",
+                "plot_index": plot_index,
+                "plot_role": "conv3_output",
                 "pruning_layer_name": full_layer_name,
+                "channel_role": "conv3_output",
                 "module_type": type(block).__name__,
                 "channel_layer_type": "BottleneckFullOutput",
                 "in_channels": int(block.conv1.in_channels),
@@ -461,12 +674,16 @@ def _extract_full_resnet_blueprint(
                 "actual_prune_ratio": output_actual_prune_ratio,
                 "internal_teacher_channels": original_internal_channels,
                 "internal_student_channels": keep_channels,
+                "conv2_student_channels": keep_conv2_channels,
                 "internal_prune_ratio": internal_actual_prune_ratio,
-                "criterion": "bn2/bn3_weight_or_conv_l1",
+                "conv2_prune_ratio": conv2_actual_prune_ratio,
+                "criterion": "mean_normalized_output_and_next_input_per_pruned_edge",
                 "prune_method": prune_method,
-                "selection_policy": selection_policy,
-                "pruning_threshold": float(output_prune["result"].threshold),
-                "internal_pruning_threshold": float(internal_prune["result"].threshold),
+                "selection_policy": output_selection_policy,
+                "pruning_threshold": output_pruning_threshold,
+                "internal_pruning_threshold": float(conv1_prune["result"].threshold),
+                "conv1_pruning_threshold": float(conv1_prune["result"].threshold),
+                "conv2_pruning_threshold": float(conv2_prune["result"].threshold),
                 "requested_static_prune_ratio": float(static_prune_ratio) if ratio_based_static else None,
                 "block_full_pruning": True,
                 "prunes_conv3_output": True,
@@ -476,22 +693,67 @@ def _extract_full_resnet_blueprint(
                 "importance_max": output_prune["stats"]["max"],
                 "importance_mean": output_prune["stats"]["mean"],
                 "importance_std": output_prune["stats"]["std"],
-                "internal_importance_min": internal_prune["stats"]["min"],
-                "internal_importance_max": internal_prune["stats"]["max"],
-                "internal_importance_mean": internal_prune["stats"]["mean"],
-                "internal_importance_std": internal_prune["stats"]["std"],
+                "internal_importance_min": conv1_prune["stats"]["min"],
+                "internal_importance_max": conv1_prune["stats"]["max"],
+                "internal_importance_mean": conv1_prune["stats"]["mean"],
+                "internal_importance_std": conv1_prune["stats"]["std"],
+                "conv2_importance_min": conv2_prune["stats"]["min"],
+                "conv2_importance_max": conv2_prune["stats"]["max"],
+                "conv2_importance_mean": conv2_prune["stats"]["mean"],
+                "conv2_importance_std": conv2_prune["stats"]["std"],
+                "internal_importance_source": "conv1_out_plus_conv2_in__conv2_out_plus_conv3_in__conv3_out_plus_next_input_from_teacher",
+                "internal_importance_sources": internal_importance_sources,
                 "input_channel_indices": input_indices,
                 "internal_kept_channel_indices": internal_keep_indices,
+                "conv1_kept_channel_indices": conv1_keep_indices,
+                "conv2_kept_channel_indices": conv2_keep_indices,
                 "output_kept_channel_indices": output_keep_indices,
                 "kept_channel_indices": output_keep_indices,
                 "pruned_channel_indices": output_pruned_indices,
                 "ranked_channel_indices_desc": output_prune["ranked_indices"],
             }
             per_module.append(row)
-            teacher_channel_analysis.append({**row, "importance_source": "bn3_weight_or_conv3_l1", "importance_values": output_prune["values"]})
+            teacher_channel_analysis.append({**row, "importance_source": "mean_normalized_conv3_out_and_next_input", "importance_values": output_prune["values"]})
+            teacher_channel_analysis.append(
+                {
+                    **row,
+                    "pruning_layer_name": internal_layer_name,
+                    "channel_role": "internal_width",
+                    "importance_source": "mean_normalized_conv1_out_and_conv2_in",
+                    "importance_values": conv1_prune["values"],
+                    "ranked_channel_indices_desc": conv1_prune["ranked_indices"],
+                    "kept_channel_indices": conv1_keep_indices,
+                    "pruned_channel_indices": conv1_pruned_indices,
+                    "pruning_threshold": float(conv1_prune["result"].threshold),
+                    "importance_min": conv1_prune["stats"]["min"],
+                    "importance_max": conv1_prune["stats"]["max"],
+                    "importance_mean": conv1_prune["stats"]["mean"],
+                    "importance_std": conv1_prune["stats"]["std"],
+                }
+            )
+            teacher_channel_analysis.append(
+                {
+                    **row,
+                    "pruning_layer_name": conv2_layer_name,
+                    "channel_role": "conv2_output",
+                    "importance_source": "mean_normalized_conv2_out_and_conv3_in",
+                    "importance_values": conv2_prune["values"],
+                    "ranked_channel_indices_desc": conv2_prune["ranked_indices"],
+                    "kept_channel_indices": conv2_keep_indices,
+                    "pruned_channel_indices": conv2_pruned_indices,
+                    "pruning_threshold": float(conv2_prune["result"].threshold),
+                    "importance_min": conv2_prune["stats"]["min"],
+                    "importance_max": conv2_prune["stats"]["max"],
+                    "importance_mean": conv2_prune["stats"]["mean"],
+                    "importance_std": conv2_prune["stats"]["std"],
+                }
+            )
             teacher_vs_student_rows.append(
                 {
                     "layer_name": block_name,
+                    "pruning_group": "s9_s12_full_block",
+                    "plot_index": plot_index,
+                    "plot_role": "conv3_output",
                     "pruning_layer_name": full_layer_name,
                     "teacher_out_channels": original_output_channels,
                     "student_out_channels": keep_output_channels,
@@ -499,41 +761,93 @@ def _extract_full_resnet_blueprint(
                     "actual_prune_ratio": output_actual_prune_ratio,
                     "teacher_internal_channels": original_internal_channels,
                     "student_internal_channels": keep_channels,
+                    "student_conv2_channels": keep_conv2_channels,
                     "internal_prune_ratio": internal_actual_prune_ratio,
+                    "conv2_prune_ratio": conv2_actual_prune_ratio,
                     "prune_method": prune_method,
-                    "selection_policy": selection_policy,
-                    "pruning_threshold": float(output_prune["result"].threshold),
-                    "internal_pruning_threshold": float(internal_prune["result"].threshold),
+                    "selection_policy": output_selection_policy,
+                    "pruning_threshold": output_pruning_threshold,
+                    "internal_pruning_threshold": float(conv1_prune["result"].threshold),
+                    "conv2_pruning_threshold": float(conv2_prune["result"].threshold),
                 }
             )
             for channel_index, importance_value in enumerate(output_prune["values"]):
                 channel_level_detail.append(
                     {
                         "layer_name": block_name,
+                        "pruning_group": "s9_s12_full_block",
+                        "plot_index": plot_index,
+                        "plot_role": "conv3_output",
                         "pruning_layer_name": output_layer_name,
                         "channel_role": "conv3_output",
                         "channel_index": int(channel_index),
                         "importance": float(importance_value),
                         "rank_desc": int(output_prune["rank_lookup"][channel_index]),
-                        "decision": "keep" if channel_index in output_prune["kept_index_set"] else "prune",
+                        "decision": "keep" if channel_index in output_kept_index_set else "prune",
                         "prune_method": prune_method,
-                        "selection_policy": selection_policy,
-                        "pruning_threshold": float(output_prune["result"].threshold),
+                        "selection_policy": output_selection_policy,
+                        "pruning_threshold": output_pruning_threshold,
+                        "conv3_out_importance": internal_importance_sources["conv3_out"][channel_index],
+                        "conv3_next_in_importance": internal_importance_sources["conv3_next_in"][channel_index],
+                        "conv3_next_in_source": internal_importance_sources.get("conv3_next_in_source", "conv3_out_fallback"),
                     }
                 )
             for channel_index, importance_value in enumerate(internal_prune["values"]):
                 channel_level_detail.append(
                     {
                         "layer_name": block_name,
+                        "pruning_group": "s9_s12_full_block",
+                        "plot_index": plot_index,
+                        "plot_role": "internal_combined_summary",
                         "pruning_layer_name": internal_layer_name,
-                        "channel_role": "internal_width",
+                        "channel_role": "internal_combined_summary",
                         "channel_index": int(channel_index),
                         "importance": float(importance_value),
                         "rank_desc": int(internal_prune["rank_lookup"][channel_index]),
-                        "decision": "keep" if channel_index in internal_prune["kept_index_set"] else "prune",
+                        "decision": "summary",
                         "prune_method": prune_method,
                         "selection_policy": selection_policy,
                         "pruning_threshold": float(internal_prune["result"].threshold),
+                    }
+                )
+            for channel_index, importance_value in enumerate(conv1_prune["values"]):
+                channel_level_detail.append(
+                    {
+                        "layer_name": block_name,
+                        "pruning_group": "s9_s12_full_block",
+                        "plot_index": plot_index,
+                        "plot_role": "conv1_output",
+                        "pruning_layer_name": conv1_layer_name,
+                        "channel_role": "conv1_output",
+                        "channel_index": int(channel_index),
+                        "importance": float(importance_value),
+                        "rank_desc": int(conv1_prune["rank_lookup"][channel_index]),
+                        "decision": "keep" if channel_index in conv1_prune["kept_index_set"] else "prune",
+                        "prune_method": prune_method,
+                        "selection_policy": selection_policy,
+                        "pruning_threshold": float(conv1_prune["result"].threshold),
+                        "conv1_out_importance": internal_importance_sources["conv1_out"][channel_index],
+                        "conv2_in_importance": internal_importance_sources["conv2_in"][channel_index],
+                    }
+                )
+            for channel_index, importance_value in enumerate(conv2_prune["values"]):
+                channel_level_detail.append(
+                    {
+                        "layer_name": block_name,
+                        "pruning_group": "s9_s12_full_block",
+                        "plot_index": plot_index,
+                        "plot_role": "conv2_output",
+                        "pruning_layer_name": conv2_layer_name,
+                        "channel_role": "conv2_output",
+                        "channel_index": int(channel_index),
+                        "importance": float(importance_value),
+                        "rank_desc": int(conv2_prune["rank_lookup"][channel_index]),
+                        "decision": "keep" if channel_index in conv2_prune["kept_index_set"] else "prune",
+                        "prune_method": prune_method,
+                        "selection_policy": selection_policy,
+                        "pruning_threshold": float(conv2_prune["result"].threshold),
+                        "conv2_out_importance": internal_importance_sources["conv2_out"][channel_index],
+                        "conv3_in_importance": internal_importance_sources["conv3_in"][channel_index],
                     }
                 )
             current_input_indices = output_keep_indices
@@ -548,7 +862,13 @@ def _extract_full_resnet_blueprint(
     total_after = int(sum(row["student_out_channels"] for row in teacher_vs_student_rows))
     internal_total_before = int(sum(row["teacher_internal_channels"] for row in teacher_vs_student_rows))
     internal_total_after = int(sum(row["student_internal_channels"] for row in teacher_vs_student_rows))
+    conv2_total_after = int(sum(row.get("student_conv2_channels", row["student_internal_channels"]) for row in teacher_vs_student_rows))
     total_pruned = int(total_before - total_after)
+    internal_total_pruned = int(internal_total_before - internal_total_after)
+    conv2_total_pruned = int(internal_total_before - conv2_total_after)
+    combined_total_before = int(total_before + internal_total_before + internal_total_before)
+    combined_total_after = int(total_after + internal_total_after + conv2_total_after)
+    combined_total_pruned = int(total_pruned + internal_total_pruned + conv2_total_pruned)
     changed_layers = int(sum(1 for row in teacher_vs_student_rows if row["channels_pruned"] > 0))
     global_pruning_summary = {
         "num_layers_analyzed": int(len(teacher_vs_student_rows)),
@@ -556,10 +876,22 @@ def _extract_full_resnet_blueprint(
         "total_channels_after": total_after,
         "total_channels_pruned": total_pruned,
         "global_prune_ratio": float(total_pruned / max(1, total_before)),
+        "output_channels_before": total_before,
+        "output_channels_after": total_after,
+        "output_channels_pruned": total_pruned,
+        "output_global_prune_ratio": float(total_pruned / max(1, total_before)),
         "internal_channels_before": internal_total_before,
         "internal_channels_after": internal_total_after,
-        "internal_channels_pruned": int(internal_total_before - internal_total_after),
-        "internal_global_prune_ratio": float((internal_total_before - internal_total_after) / max(1, internal_total_before)),
+        "internal_channels_pruned": internal_total_pruned,
+        "internal_global_prune_ratio": float(internal_total_pruned / max(1, internal_total_before)),
+        "conv2_channels_before": internal_total_before,
+        "conv2_channels_after": conv2_total_after,
+        "conv2_channels_pruned": conv2_total_pruned,
+        "conv2_global_prune_ratio": float(conv2_total_pruned / max(1, internal_total_before)),
+        "combined_channels_before": combined_total_before,
+        "combined_channels_after": combined_total_after,
+        "combined_channels_pruned": combined_total_pruned,
+        "combined_global_prune_ratio": float(combined_total_pruned / max(1, combined_total_before)),
         "num_layers_changed": changed_layers,
         "num_layers_unchanged": int(len(teacher_vs_student_rows) - changed_layers),
         "protected_boundary_policy": "conv3 output is pruned; residual projections are inserted or subset-copied whenever block input/output channels differ",
@@ -568,6 +900,7 @@ def _extract_full_resnet_blueprint(
     return {
         "channel_config": tuple(int(row["kept_output_channels"]) for row in full_prune_plan),
         "stage_full_channel_config": {stage: list(values) for stage, values in stage_full_channel_config.items()},
+        "stage_full_conv2_channel_config": {stage: list(values) for stage, values in stage_full_conv2_channel_config.items()},
         "stage_full_output_channel_config": {stage: list(values) for stage, values in stage_full_output_channel_config.items()},
         "stage_output_kept_indices": {stage: list(values) for stage, values in stage_output_kept_indices.items()},
         "full_prune_plan": full_prune_plan,
@@ -578,7 +911,7 @@ def _extract_full_resnet_blueprint(
         "block_full_pruning": True,
         "prunes_conv3_output": True,
         "target_modules": list(target_modules),
-        "criterion": "bn2/bn3_weight_or_conv_l1",
+        "criterion": "mean_normalized_output_and_next_input_per_pruned_edge",
         "minimum_channels": effective_minimum_channels,
         "dynamic_min_keep_ratio": effective_min_keep_ratio,
         "otsu_bins": int(otsu_bins),
@@ -652,7 +985,7 @@ def extract_pruned_blueprint(
     channel_level_detail: List[Dict[str, object]] = []
 
     named_modules = dict(teacher_model.named_modules())
-    for module_name in target_modules:
+    for module_index, module_name in enumerate(target_modules, start=1):
         module = named_modules.get(module_name)
         if module is None:
             continue
@@ -691,7 +1024,11 @@ def extract_pruned_blueprint(
         teacher_channel_analysis.append(
             {
                 "layer_name": module_name,
+                "pruning_group": "s1_s4_blueprint_stage",
+                "plot_index": module_index,
+                "plot_role": "stage_output",
                 "pruning_layer_name": pruning_layer_name,
+                "channel_role": "stage_output",
                 "module_type": type(module).__name__,
                 "channel_layer_type": type(pruning_layer).__name__,
                 "in_channels": int(getattr(pruning_layer, "in_channels", 0)),
@@ -722,7 +1059,11 @@ def extract_pruned_blueprint(
             {
                 "layer_name": module_name,
                 "module_name": module_name,
+                "pruning_group": "s1_s4_blueprint_stage",
+                "plot_index": module_index,
+                "plot_role": "stage_output",
                 "pruning_layer_name": pruning_layer_name,
+                "channel_role": "stage_output",
                 "module_type": type(module).__name__,
                 "channel_layer_type": type(pruning_layer).__name__,
                 "in_channels": int(getattr(pruning_layer, "in_channels", 0)),
@@ -753,6 +1094,9 @@ def extract_pruned_blueprint(
         teacher_vs_student_rows.append(
             {
                 "layer_name": module_name,
+                "pruning_group": "s1_s4_blueprint_stage",
+                "plot_index": module_index,
+                "plot_role": "stage_output",
                 "pruning_layer_name": pruning_layer_name,
                 "teacher_out_channels": int(pruning_layer.out_channels),
                 "student_out_channels": int(keep_channels),
@@ -767,7 +1111,11 @@ def extract_pruned_blueprint(
             channel_level_detail.append(
                 {
                     "layer_name": module_name,
+                    "pruning_group": "s1_s4_blueprint_stage",
+                    "plot_index": module_index,
+                    "plot_role": "stage_output",
                     "pruning_layer_name": pruning_layer_name,
+                    "channel_role": "stage_output",
                     "channel_index": int(channel_index),
                     "importance": float(importance_value),
                     "rank_desc": int(rank_lookup[channel_index]),

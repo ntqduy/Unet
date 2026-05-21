@@ -261,12 +261,12 @@ parser = argparse.ArgumentParser(description="Teacher -> Pruning -> Student trai
 parser.add_argument("--root_path", type=str, default=str(DEFAULT_DATA_ROOT))
 parser.add_argument("--dataset", type=str, default="kvasir_seg", choices=list_available_datasets())
 parser.add_argument("--exp", type=str, default="pdg_pipeline")
-parser.add_argument("--teacher_model", type=str, default="unet_plus_plus", choices=list_models())
+parser.add_argument("--teacher_model", type=str, default="unet_resnet152", choices=list_models())
 parser.add_argument("--teacher_checkpoint", type=str, default="")
 parser.add_argument("--train_split", type=str, default="train", choices=["train", "val", "test"])
 parser.add_argument("--val_split", type=str, default="val", choices=["train", "val", "test"])
 parser.add_argument("--max_epochs_teacher", type=int, default=20)
-parser.add_argument("--max_epochs_student", type=int, default=40)
+parser.add_argument("--max_epochs_student", type=int, default=60)
 parser.add_argument("--batch_size", type=int, default=8)
 parser.add_argument("--teacher_lr", type=float, default=0.01)
 parser.add_argument("--student_lr", type=float, default=1e-4)
@@ -2429,8 +2429,10 @@ def _run_pruning(device: torch.device, image_mode: str, db_train, teacher_artifa
     if weight_transfer.get("rows"):
         write_metrics_rows(weight_transfer["rows"], weight_transfer_dir / "block_transfer_rows.csv")
     decoder_subset_transfer = weight_transfer.get("decoder_subset_transfer")
-    if isinstance(decoder_subset_transfer, dict) and decoder_subset_transfer.get("rows"):
-        write_metrics_rows(decoder_subset_transfer["rows"], weight_transfer_dir / "decoder_subset_transfer_rows.csv")
+    if isinstance(decoder_subset_transfer, dict):
+        decoder_rows = decoder_subset_transfer.get("rows") or decoder_subset_transfer.get("decoder_subset_rows")
+        if decoder_rows:
+            write_metrics_rows(decoder_rows, weight_transfer_dir / "decoder_subset_transfer_rows.csv")
     middle_static_student = student_architecture in {"middle_pruned_resnet_unet", "middle_pruned_unet_plus_plus"}
     full_static_student = student_architecture in {"full_pruning_resnet_unet", "full_pruning_unet_plus_plus"}
     pruning_model_info = extract_model_info(pruned_student)
@@ -2484,6 +2486,7 @@ def _run_pruning(device: torch.device, image_mode: str, db_train, teacher_artifa
                 "channel_config": list(blueprint["channel_config"]),
                 "stage_middle_channel_config": blueprint.get("stage_middle_channel_config"),
                 "stage_full_channel_config": blueprint.get("stage_full_channel_config"),
+                "stage_full_conv2_channel_config": blueprint.get("stage_full_conv2_channel_config"),
                 "stage_full_output_channel_config": blueprint.get("stage_full_output_channel_config"),
             },
         }
@@ -2688,6 +2691,7 @@ def _run_student(device: torch.device, image_mode: str, db_train, trainloader, v
                 "channel_config": list(pruning_artifact["blueprint"]["channel_config"]),
                 "stage_middle_channel_config": pruning_artifact["blueprint"].get("stage_middle_channel_config"),
                 "stage_full_channel_config": pruning_artifact["blueprint"].get("stage_full_channel_config"),
+                "stage_full_conv2_channel_config": pruning_artifact["blueprint"].get("stage_full_conv2_channel_config"),
                 "stage_full_output_channel_config": pruning_artifact["blueprint"].get("stage_full_output_channel_config"),
             },
         }
@@ -2853,13 +2857,17 @@ def _run_student(device: torch.device, image_mode: str, db_train, trainloader, v
                             "checkpoint_is_random_init": False,
                             "checkpoint_weight_status": "subset_reused_from_pre_pruning_student_then_trained",
                             "checkpoint_weight_source": "step3_pre_hard_pruning_student",
-                            "build_kwargs": {
-                                "in_channels": db_train.in_channels,
-                                "num_classes": args.num_classes,
-                                "channel_config": list(hard_pruning_plan["channel_config"]),
-                            },
-                        }
-                    )
+                        "build_kwargs": {
+                            "in_channels": db_train.in_channels,
+                            "num_classes": args.num_classes,
+                            "channel_config": list(hard_pruning_plan["channel_config"]),
+                            "stage_middle_channel_config": pruning_artifact["blueprint"].get("stage_middle_channel_config"),
+                            "stage_full_channel_config": pruning_artifact["blueprint"].get("stage_full_channel_config"),
+                            "stage_full_conv2_channel_config": pruning_artifact["blueprint"].get("stage_full_conv2_channel_config"),
+                            "stage_full_output_channel_config": pruning_artifact["blueprint"].get("stage_full_output_channel_config"),
+                        },
+                    }
+                )
                     write_model_config(run_dir, student_model_info)
                     logging.info(
                         "Applied late hard pruning at epoch %d | threshold=%.4f | channel_config=%s | global_prune_ratio=%.4f | weight_init=%s | channel_reuse_ratio=%.4f",
@@ -2961,6 +2969,8 @@ def _run_student(device: torch.device, image_mode: str, db_train, trainloader, v
             history["epoch_lambda_sparsity"].append(epoch_policy["lambda_sparsity"])
             history["epoch_lambda_feat"].append(epoch_policy["lambda_feat"])
             history["epoch_lambda_aux"].append(epoch_policy["lambda_aux"])
+            is_best = val_dice > best_metric
+            epoch_best_val_dice = val_dice if is_best or best_metric == float("-inf") else best_metric
             diagnostics_rows.append(
                 {
                     "epoch": epoch,
@@ -2993,6 +3003,14 @@ def _run_student(device: torch.device, image_mode: str, db_train, trainloader, v
                     "val_feature_distill_loss": val_losses["feature_distill_loss"],
                     "val_auxiliary_loss": val_losses["auxiliary_loss"],
                     "val_macro_dice": val_dice,
+                    "val_dice": val_dice,
+                    "val_iou": val_iou,
+                    "val_hd95": val_hd95,
+                    "learning_rate": learning_rate,
+                    "best_val_dice": epoch_best_val_dice,
+                    "is_best": int(is_best),
+                    "loss_tag": args.loss_tag,
+                    "use_kd_output": int(args.use_kd_output),
                     "gate_mean": gate_stats["global"]["gate_mean"],
                     "gate_std": gate_stats["global"]["gate_std"],
                     "near_off_channels": gate_stats["global"]["near_off_channels"],
@@ -3000,7 +3018,6 @@ def _run_student(device: torch.device, image_mode: str, db_train, trainloader, v
                     "near_off_ratio": gate_stats["global"]["near_off_ratio"],
                 }
             )
-            is_best = val_dice > best_metric
             if is_best:
                 best_metric = val_dice
                 no_improve_epochs = 0
@@ -3014,6 +3031,13 @@ def _run_student(device: torch.device, image_mode: str, db_train, trainloader, v
                 epoch=epoch,
                 best_metric=best_metric,
                 metrics={
+                    "phase_name": epoch_policy["phase_name"],
+                    "soft_pruning_active": int(epoch_policy["soft_pruning_active"]),
+                    "hard_pruning_active": int(epoch_policy["hard_pruning_active"]),
+                    "distillation_active": int(epoch_policy["lambda_distill"] > 0),
+                    "feature_distill_active": int(epoch_policy["lambda_feat"] > 0),
+                    "auxiliary_loss_active": int(epoch_policy["lambda_aux"] > 0),
+                    "gate_trainable": int(epoch_policy["gate_trainable"]),
                     "train_total_loss": history["train_total_loss"][-1],
                     "train_seg_loss": history["train_segmentation_loss"][-1],
                     "train_kd_loss": history["train_distillation_loss"][-1],
@@ -3037,6 +3061,10 @@ def _run_student(device: torch.device, image_mode: str, db_train, trainloader, v
                     "best_val_dice": best_metric,
                     "is_best": int(is_best),
                     "lambda_segmentation": lambda_segmentation,
+                    "lambda_distill": epoch_policy["lambda_distill"],
+                    "lambda_sparsity": epoch_policy["lambda_sparsity"],
+                    "lambda_feat": epoch_policy["lambda_feat"],
+                    "lambda_aux": epoch_policy["lambda_aux"],
                     "use_kd_output": int(args.use_kd_output),
                     "loss_tag": args.loss_tag,
                 },

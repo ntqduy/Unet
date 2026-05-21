@@ -16,7 +16,7 @@ def _build_help_parser() -> argparse.ArgumentParser:
     parser.add_argument("--train_split", type=str, default="train")
     parser.add_argument("--val_split", type=str, default="val")
     parser.add_argument("--max_epochs_teacher", type=int, default=20)
-    parser.add_argument("--max_epochs_student", type=int, default=40)
+    parser.add_argument("--max_epochs_student", type=int, default=60)
     parser.add_argument("--batch_size", type=int, default=8)
     parser.add_argument("--teacher_lr", type=float, default=0.01)
     parser.add_argument("--student_lr", type=float, default=1e-4)

@@ -1,4 +1,4 @@
-# Tong Hop Codebase PGD-UNet
+﻿# Tong Hop Codebase PGD-UNet
 
 File nay tom tat nhung gi code hien tai dang lam trong repo. Muc tieu chinh cua repo la huan luyen va danh gia bai toan medical image segmentation, dong thoi thuc hien pruning, compression va knowledge distillation cho mo hinh UNet/ResNet-UNet tren cac dataset polyp.
 

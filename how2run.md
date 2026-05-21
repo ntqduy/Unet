@@ -376,7 +376,7 @@ echo "=============================="
 ÄÃ¢y lÃ  file hoÃ n chá»‰nh cho lá»‡nh:
 
 ```bash
-python train_pgd.py --dataset cvc_clinicdb --root_path data/CVC-ClinicDB --teacher_model unet_resnet152 --exp pgd_cvc_clinicdb --max_epochs_teacher 50 --max_epochs_student 50 --prune_ratio 0.5 --lambda_distill 0.3 --lambda_sparsity 0.3 --batch_size 8 --patch_size 256 256
+python train_pgd.py --dataset cvc_clinicdb --root_path data/CVC-ClinicDB --teacher_model unet_resnet152 --exp pgd_cvc_clinicdb --max_epochs_teacher 50 --max_epochs_student 60 --prune_ratio 0.5 --lambda_distill 0.3 --lambda_sparsity 0.3 --batch_size 8 --patch_size 256 256
 ```
 
 ## Ná»™i dung file `run_pgd_cvc_clinicdb.sh`
@@ -415,7 +415,7 @@ python train_pgd.py \
   --teacher_model unet_resnet152 \
   --exp pgd_cvc_clinicdb \
   --max_epochs_teacher 50 \
-  --max_epochs_student 50 \
+  --max_epochs_student 60 \
   --prune_ratio 0.5 \
   --lambda_distill 0.3 \
   --lambda_sparsity 0.3 \
@@ -746,5 +746,3 @@ Quy trÃ¬nh chuáº©n Ä‘á»ƒ cháº¡y project cá»§a báº¡n trÃªn 
 8. Theo dÃµi báº±ng `squeue` vÃ  `tail -f`
 
 Náº¿u sau nÃ y báº¡n cÃ³ thÃªm model má»›i, báº¡n chá»‰ cáº§n sá»­a pháº§n command Python trong file `run.sh`, cÃ²n khung Slurm script gáº§n nhÆ° cÃ³ thá»ƒ giá»¯ nguyÃªn.
-
-

@@ -89,6 +89,15 @@ def _make_batchnorm_like(source: nn.BatchNorm2d | None, num_features: int) -> nn
     )
 
 
+class ChannelSelect2d(nn.Module):
+    def __init__(self, indices: Sequence[int]):
+        super().__init__()
+        self.register_buffer("indices", torch.as_tensor([int(index) for index in indices], dtype=torch.long))
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return x.index_select(1, self.indices.to(device=x.device))
+
+
 def _get_module(root: nn.Module, module_name: str) -> nn.Module:
     modules = dict(root.named_modules())
     if module_name not in modules:
@@ -149,12 +158,20 @@ def _replace_bottleneck_full(block: nn.Module, row: Mapping[str, object]) -> Non
         raise TypeError("Expected bottleneck bn1/bn2/bn3 to be BatchNorm2d layers.")
 
     input_indices = _as_indices(row.get("input_channel_indices"), block.conv1.in_channels)
-    internal_indices = _as_indices(row.get("internal_kept_channel_indices", row.get("kept_channel_indices")), block.conv2.out_channels)
+    conv1_indices = _as_indices(
+        row.get("conv1_kept_channel_indices", row.get("internal_kept_channel_indices", row.get("kept_channel_indices"))),
+        block.conv1.out_channels,
+    )
+    conv2_indices = _as_indices(
+        row.get("conv2_kept_channel_indices", row.get("internal_kept_channel_indices", row.get("kept_channel_indices"))),
+        block.conv2.out_channels,
+    )
     output_indices = _as_indices(row.get("output_kept_channel_indices", row.get("kept_channel_indices")), block.conv3.out_channels)
     input_channels = len(input_indices)
-    internal_channels = len(internal_indices)
+    conv1_channels = len(conv1_indices)
+    conv2_channels = len(conv2_indices)
     output_channels = len(output_indices)
-    if min(input_channels, internal_channels, output_channels) <= 0:
+    if min(input_channels, conv1_channels, conv2_channels, output_channels) <= 0:
         raise ValueError("Full bottleneck pruning requires non-empty input/internal/output channel sets.")
 
     original_downsample = block.downsample
@@ -166,14 +183,22 @@ def _replace_bottleneck_full(block: nn.Module, row: Mapping[str, object]) -> Non
         or list(input_indices) != list(output_indices)
         or tuple(stride) != (1, 1)
     )
+    can_select_identity_skip = (
+        original_downsample is None
+        and tuple(stride) == (1, 1)
+        and all(int(index) in {int(value) for value in input_indices} for index in output_indices)
+    )
 
-    block.conv1 = _make_conv2d_like(block.conv1, input_channels, internal_channels)
-    block.bn1 = _make_batchnorm_like(block.bn1, internal_channels)
-    block.conv2 = _make_conv2d_like(block.conv2, internal_channels, internal_channels)
-    block.bn2 = _make_batchnorm_like(block.bn2, internal_channels)
-    block.conv3 = _make_conv2d_like(block.conv3, internal_channels, output_channels)
+    block.conv1 = _make_conv2d_like(block.conv1, input_channels, conv1_channels)
+    block.bn1 = _make_batchnorm_like(block.bn1, conv1_channels)
+    block.conv2 = _make_conv2d_like(block.conv2, conv1_channels, conv2_channels)
+    block.bn2 = _make_batchnorm_like(block.bn2, conv2_channels)
+    block.conv3 = _make_conv2d_like(block.conv3, conv2_channels, output_channels)
     block.bn3 = _make_batchnorm_like(block.bn3, output_channels)
-    if needs_projection:
+    if needs_projection and can_select_identity_skip:
+        input_position = {int(index): position for position, index in enumerate(input_indices)}
+        block.downsample = ChannelSelect2d([input_position[int(index)] for index in output_indices])
+    elif needs_projection:
         projection_conv = _make_projection_conv(source_projection_conv, input_channels, output_channels, stride)
         projection_bn = _make_batchnorm_like(source_projection_bn, output_channels)
         block.downsample = nn.Sequential(projection_conv, projection_bn)
@@ -251,16 +276,23 @@ def _initialize_selector_projection(target_block: nn.Module, input_indices: Sequ
 
 def _copy_pruned_bottleneck_full(source_block: nn.Module, target_block: nn.Module, row: Mapping[str, object]) -> dict:
     input_indices = _as_indices(row.get("input_channel_indices"), source_block.conv1.in_channels)
-    internal_indices = _as_indices(row.get("internal_kept_channel_indices", row.get("kept_channel_indices")), source_block.conv2.out_channels)
+    conv1_indices = _as_indices(
+        row.get("conv1_kept_channel_indices", row.get("internal_kept_channel_indices", row.get("kept_channel_indices"))),
+        source_block.conv1.out_channels,
+    )
+    conv2_indices = _as_indices(
+        row.get("conv2_kept_channel_indices", row.get("internal_kept_channel_indices", row.get("kept_channel_indices"))),
+        source_block.conv2.out_channels,
+    )
     output_indices = _as_indices(row.get("output_kept_channel_indices", row.get("kept_channel_indices")), source_block.conv3.out_channels)
 
-    _copy_conv_subset(source_block.conv1, target_block.conv1, out_indices=internal_indices, in_indices=input_indices)
-    _copy_norm_subset(source_block.bn1, target_block.bn1, internal_indices)
+    _copy_conv_subset(source_block.conv1, target_block.conv1, out_indices=conv1_indices, in_indices=input_indices)
+    _copy_norm_subset(source_block.bn1, target_block.bn1, conv1_indices)
 
-    _copy_conv_subset(source_block.conv2, target_block.conv2, out_indices=internal_indices, in_indices=internal_indices)
-    _copy_norm_subset(source_block.bn2, target_block.bn2, internal_indices)
+    _copy_conv_subset(source_block.conv2, target_block.conv2, out_indices=conv2_indices, in_indices=conv1_indices)
+    _copy_norm_subset(source_block.bn2, target_block.bn2, conv2_indices)
 
-    _copy_conv_subset(source_block.conv3, target_block.conv3, out_indices=output_indices, in_indices=internal_indices)
+    _copy_conv_subset(source_block.conv3, target_block.conv3, out_indices=output_indices, in_indices=conv2_indices)
     _copy_norm_subset(source_block.bn3, target_block.bn3, output_indices)
 
     source_projection_conv, source_projection_bn = _first_conv_bn(source_block.downsample)
@@ -275,14 +307,20 @@ def _copy_pruned_bottleneck_full(source_block: nn.Module, target_block: nn.Modul
         else:
             _initialize_selector_projection(target_block, input_indices, output_indices)
             projection_mode = "inserted_channel_selector"
+    elif isinstance(target_block.downsample, ChannelSelect2d):
+        projection_mode = "parameter_free_channel_select"
 
     return {
         "copied": True,
         "kept_input_channels": int(len(input_indices)),
-        "kept_internal_channels": int(len(internal_indices)),
+        "kept_internal_channels": int(len(conv1_indices)),
+        "kept_conv1_channels": int(len(conv1_indices)),
+        "kept_conv2_channels": int(len(conv2_indices)),
         "kept_output_channels": int(len(output_indices)),
         "original_input_channels": int(source_block.conv1.in_channels),
         "original_internal_channels": int(source_block.conv2.out_channels),
+        "original_conv1_channels": int(source_block.conv1.out_channels),
+        "original_conv2_channels": int(source_block.conv2.out_channels),
         "original_output_channels": int(source_block.conv3.out_channels),
         "projection_mode": projection_mode,
         "protected_components": ["spatial_stride", "residual_add_semantics"],
@@ -410,6 +448,10 @@ class FullPrunedResNetUNet(BaseSegmentationModel):
             str(stage): [int(value) for value in values]
             for stage, values in dict(blueprint.get("stage_full_channel_config", {}) or {}).items()
         }
+        self.stage_full_conv2_channel_config = {
+            str(stage): [int(value) for value in values]
+            for stage, values in dict(blueprint.get("stage_full_conv2_channel_config", {}) or {}).items()
+        }
         self.stage_full_output_channel_config = {
             str(stage): [int(value) for value in values]
             for stage, values in dict(blueprint.get("stage_full_output_channel_config", {}) or {}).items()
@@ -435,6 +477,7 @@ class FullPrunedResNetUNet(BaseSegmentationModel):
             num_classes=num_classes,
             channel_config=list(self.channel_config),
             stage_full_channel_config=self.stage_full_channel_config,
+            stage_full_conv2_channel_config=self.stage_full_conv2_channel_config,
             stage_full_output_channel_config=self.stage_full_output_channel_config,
             stage_output_kept_indices=self.stage_output_kept_indices,
             pruning_method=self.prune_method,
@@ -451,6 +494,7 @@ class FullPrunedResNetUNet(BaseSegmentationModel):
             aux={
                 "channel_config": list(self.channel_config),
                 "stage_full_channel_config": self.stage_full_channel_config,
+                "stage_full_conv2_channel_config": self.stage_full_conv2_channel_config,
                 "stage_full_output_channel_config": self.stage_full_output_channel_config,
                 "stage_output_kept_indices": self.stage_output_kept_indices,
             },
@@ -568,6 +612,7 @@ def build_full_pruning_resnet_unet_from_teacher(
         "block_transfer_ratio": float(copied_blocks / max(1, len(rows))),
         "exact_matching_full_weight_copy": exact_copy,
         "stage_full_channel_config": student.stage_full_channel_config,
+        "stage_full_conv2_channel_config": student.stage_full_conv2_channel_config,
         "stage_full_output_channel_config": student.stage_full_output_channel_config,
         "decoder_subset_transfer": decoder_subset_transfer,
         "rows": rows,

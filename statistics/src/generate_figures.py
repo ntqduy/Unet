@@ -418,6 +418,94 @@ def figure3_thresholds(outputs_root: Path, dataset: str, dataset_dir: Path) -> N
     if ax.get_legend_handles_labels()[0]:
         ax.legend(loc="upper right", fontsize=8, frameon=True, framealpha=0.9)
     _save_pdf(fig, path)
+    _save_group_threshold_figures(details, summaries, dataset, dataset_dir)
+
+
+def _method_family(method: str) -> str:
+    method = str(method or "").lower()
+    for prefix in ("middle_", "full_"):
+        if method.startswith(prefix):
+            return method[len(prefix) :]
+    return method
+
+
+def _save_group_threshold_figures(details: pd.DataFrame, summaries: pd.DataFrame, dataset: str, dataset_dir: Path) -> None:
+    group_specs = [
+        (
+            "S1-S4 Blueprint Stage",
+            CHANNEL_METHODS,
+            "stage_output",
+            dataset_dir / "figure3_s1_s4_blueprint_importance_thresholds.pdf",
+        ),
+        (
+            "S5-S8 Middle Conv2->Conv3",
+            MIDDLE_METHODS,
+            "conv2_output_to_conv3_input",
+            dataset_dir / "figure3_s5_s8_middle_importance_thresholds.pdf",
+        ),
+        (
+            "S9-S12 Full Block Conv3 Output",
+            FULL_METHODS,
+            "conv3_output",
+            dataset_dir / "figure3_s9_s12_full_output_importance_thresholds.pdf",
+        ),
+        (
+            "S9-S12 Full Block Conv1 Output",
+            FULL_METHODS,
+            "conv1_output",
+            dataset_dir / "figure3_s9_s12_full_conv1_importance_thresholds.pdf",
+        ),
+        (
+            "S9-S12 Full Block Conv2 Output",
+            FULL_METHODS,
+            "conv2_output",
+            dataset_dir / "figure3_s9_s12_full_conv2_importance_thresholds.pdf",
+        ),
+    ]
+    method_series_details = details.get("prune_method", pd.Series([""] * len(details), index=details.index)).astype(str).str.lower()
+    method_series_summaries = summaries.get("prune_method", pd.Series([""] * len(summaries), index=summaries.index)).astype(str).str.lower()
+    threshold_styles = {
+        "static": {"color": "#d62728", "linestyle": "--"},
+        "kneedle": {"color": "#2ca02c", "linestyle": "-."},
+        "otsu": {"color": "#ff7f0e", "linestyle": ":"},
+        "gmm": {"color": "#9467bd", "linestyle": (0, (5, 1))},
+    }
+    for title, methods, channel_role, path in group_specs:
+        group_details = details[method_series_details.isin(methods)].copy()
+        if "channel_role" in group_details.columns:
+            group_details = group_details[group_details["channel_role"].astype(str).eq(channel_role)]
+        values = pd.to_numeric(group_details.get("importance", pd.Series(dtype=float)), errors="coerce").dropna()
+        if values.empty:
+            _placeholder(path, f"No importance rows found for {dataset} / {title}.")
+            continue
+        fig, ax = plt.subplots(figsize=(7.2, 4.2))
+        ax.hist(values, bins=32, alpha=0.72, color="#9ecae1", edgecolor="white", linewidth=0.4)
+        x_min = float(values.quantile(0.005))
+        x_max = float(values.quantile(0.995))
+        if x_max <= x_min:
+            x_min, x_max = float(values.min()), float(values.max())
+        margin = max((x_max - x_min) * 0.08, 1e-6)
+        x_low, x_high = x_min - margin, x_max + margin
+        group_summaries = summaries[method_series_summaries.isin(methods)].copy()
+        if "plot_role" in group_summaries.columns:
+            group_summaries = group_summaries[group_summaries["plot_role"].astype(str).eq(channel_role)]
+        if "pruning_threshold" in group_summaries.columns:
+            group_methods = group_summaries.get("prune_method", pd.Series([""] * len(group_summaries), index=group_summaries.index)).astype(str).str.lower()
+            for method in sorted(set(group_methods)):
+                family = _method_family(method)
+                thresholds = pd.to_numeric(group_summaries[group_methods.eq(method)]["pruning_threshold"], errors="coerce").dropna()
+                if thresholds.empty:
+                    continue
+                value = float(thresholds.median())
+                if x_low <= value <= x_high:
+                    ax.axvline(value, linewidth=1.7, label=_display_method(method), **threshold_styles.get(family, {}))
+        ax.set_xlim(x_low, x_high)
+        ax.set_title(title)
+        ax.set_xlabel("Channel importance")
+        ax.set_ylabel("Number of channels")
+        if ax.get_legend_handles_labels()[0]:
+            ax.legend(loc="upper right", fontsize=8, frameon=True, framealpha=0.9)
+        _save_pdf(fig, path)
 
 
 def figure5_layerwise(outputs_root: Path, dataset: str, dataset_dir: Path) -> None:
@@ -431,6 +519,9 @@ def figure5_layerwise(outputs_root: Path, dataset: str, dataset_dir: Path) -> No
         "s1_s4": dataset_dir / "figure5_s1_s4_blueprint_stage_pruning_ratio.pdf",
         "s5_s8": dataset_dir / "figure5_s5_s8_middle_conv2_layerwise_pruning_ratio.pdf",
         "s9_s12": dataset_dir / "figure5_s9_s12_full_block_layerwise_pruning_ratio.pdf",
+        "s9_s12_conv1": dataset_dir / "figure5_s9_s12_full_conv1_pruning_ratio.pdf",
+        "s9_s12_conv2": dataset_dir / "figure5_s9_s12_full_conv2_pruning_ratio.pdf",
+        "s9_s12_conv3": dataset_dir / "figure5_s9_s12_full_conv3_pruning_ratio.pdf",
     }
     groups = [
         ("S1-S4 Blueprint Stage", CHANNEL_METHODS, "Stage index: stem, down1, down2, down3, down4", output_paths["s1_s4"]),
@@ -450,6 +541,28 @@ def figure5_layerwise(outputs_root: Path, dataset: str, dataset_dir: Path) -> No
         _plot_pruning_ratio_group(ax, group_frame, title=title, xlabel=xlabel)
         _save_pruning_ratio_group_pdf(group_frame, group_path, title=title, xlabel=xlabel)
         plotted_any = True
+    full_frame = _filter_pruning_group(frame, FULL_METHODS)
+    _save_full_role_ratio_pdf(
+        full_frame,
+        output_paths["s9_s12_conv1"],
+        ratio_column="internal_prune_ratio",
+        title="S9-S12 Full Block Conv1 Output",
+        xlabel="Teacher ResNet bottleneck block index",
+    )
+    _save_full_role_ratio_pdf(
+        full_frame,
+        output_paths["s9_s12_conv2"],
+        ratio_column="conv2_prune_ratio",
+        title="S9-S12 Full Block Conv2 Output",
+        xlabel="Teacher ResNet bottleneck block index",
+    )
+    _save_full_role_ratio_pdf(
+        full_frame,
+        output_paths["s9_s12_conv3"],
+        ratio_column="actual_prune_ratio",
+        title="S9-S12 Full Block Conv3 Output",
+        xlabel="Teacher ResNet bottleneck block index",
+    )
     if not plotted_any:
         plt.close(fig)
         _placeholder(path, f"No S1-S12 pruning rows found for {dataset}.")
@@ -478,6 +591,8 @@ def _plot_pruning_ratio_group(ax, frame: pd.DataFrame, *, title: str, xlabel: st
     colors = plt.rcParams["axes.prop_cycle"].by_key().get("color", [])
     for index, ((method, ratio), group_index) in enumerate(grouped_keys.groupby(["method", "ratio"], dropna=False).groups.items()):
         group = frame.loc[list(group_index)]
+        if "plot_index" in group.columns:
+            group = group.assign(_plot_index=pd.to_numeric(group["plot_index"], errors="coerce")).sort_values(["_plot_index", "layer_name"], na_position="last")
         ratios = pd.to_numeric(group["actual_prune_ratio"], errors="coerce").dropna().to_numpy()
         if ratios.size == 0:
             continue
@@ -501,6 +616,19 @@ def _save_pruning_ratio_group_pdf(frame: pd.DataFrame, path: Path, *, title: str
     fig, ax = plt.subplots(figsize=(8.8, 4.2))
     _plot_pruning_ratio_group(ax, frame, title=title, xlabel=xlabel)
     _save_pdf(fig, path)
+
+
+def _save_full_role_ratio_pdf(frame: pd.DataFrame, path: Path, *, ratio_column: str, title: str, xlabel: str) -> None:
+    if frame.empty or ratio_column not in frame.columns:
+        _placeholder(path, f"No {ratio_column} rows found for {title}.")
+        return
+    plot_frame = frame.copy()
+    plot_frame["actual_prune_ratio"] = pd.to_numeric(plot_frame[ratio_column], errors="coerce")
+    plot_frame = plot_frame.dropna(subset=["actual_prune_ratio"])
+    if plot_frame.empty:
+        _placeholder(path, f"No valid {ratio_column} values found for {title}.")
+        return
+    _save_pruning_ratio_group_pdf(plot_frame, path, title=title, xlabel=xlabel)
 
 
 def figure6_tradeoff(dataset_dir: Path) -> None:

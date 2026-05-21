@@ -1,18 +1,18 @@
 ﻿# Ý Tưởng Hiện Tại Của PGD-UNet
 
-## Cap Nhat Kien Truc S1-S12
+## Cập Nhật Kiến Trúc S1-S12
 
-Pipeline S1-S12 mac dinh hien dung `unet_plus_plus` lam teacher chinh. `unet_plus_plus` trong code la `segmentation_models_pytorch.UnetPlusPlus` voi encoder `resnet152`. Do do importance/pruning bay gio doc cac stage encoder:
+Pipeline S1-S12 mặc định hiện dùng `unet_resnet152` làm teacher chính. Đây là U-Net decoder custom với ResNet152 encoder. Do đó importance/pruning đọc các stage encoder:
 
 ```text
-model.encoder.conv1
-model.encoder.layer1
-model.encoder.layer2
-model.encoder.layer3
-model.encoder.layer4
+stem
+layer1
+layer2
+layer3
+layer4
 ```
 
-S5-S8 va S9-S12 van prune ResNet bottleneck trong encoder, nhung student khi teacher la `unet_plus_plus` se giu decoder UNet++ thay vi quay ve decoder custom cua `UNetResNet152`.
+S5-S8 và S9-S12 prune ResNet bottleneck trong encoder. Với default `unet_resnet152`, student dùng decoder U-Net custom tương ứng: `middle_pruned_resnet_unet` cho S5-S8 và `full_pruning_resnet_unet` cho S9-S12. Nhánh `unet_plus_plus` vẫn còn tương thích nếu truyền `--teacher_model unet_plus_plus`, nhưng không còn là default.
 
 Tài liệu này phản ánh logic code hiện tại của project PGD-UNet. Các nội dung cũ về gate/gated UNet, sparsity là pipeline chính, hoặc S1-S8-only đã được thay bằng mô tả mới bên dưới.
 
@@ -184,8 +184,8 @@ S1-S4 tạo student nhỏ theo stage/channel config.
 
 - Dùng các module/stage chính để tính importance.
 - Sinh `channel_config` cho student.
-- Khi `teacher_model=unet_plus_plus`, build `blueprint_unet_plus_plus`: mini UNet++ theo `channel_config`, decoder nested UNet++, không còn learnable gate.
-- Khi teacher không phải UNet++, fallback về `PDGUNet` plain pruned UNet để giữ backward compatibility.
+- Với default `teacher_model=unet_resnet152`, build `PDGUNet`: plain pruned U-Net theo `channel_config`, không còn learnable gate trong pipeline chính.
+- Nếu truyền `teacher_model=unet_plus_plus`, build `blueprint_unet_plus_plus`: mini UNet++ theo `channel_config`, decoder nested UNet++.
 - Mapping layer/block không còn 1-1 với ResNet teacher, nên không nên ép vào layerwise bottleneck plot.
 
 Phù hợp để visualize:
@@ -198,7 +198,7 @@ Params/FLOPs/FPS/Dice tradeoff
 
 ## 8. Nhóm S5-S8: Middle Conv2 Pruning
 
-S5-S8 dành cho `teacher_model=unet_plus_plus`.
+S5-S8 dành cho ResNet152 encoder teacher, mặc định là `teacher_model=unet_resnet152`.
 
 Ý tưởng: giữ boundary của bottleneck an toàn, chỉ prune phần giữa `conv2`.
 
@@ -229,7 +229,7 @@ Vì sao chọn `conv2`?
 Student architecture:
 
 ```text
-middle_pruned_unet_plus_plus
+middle_pruned_resnet_unet
 ```
 
 Blueprint chính:
@@ -248,7 +248,7 @@ S9-S12 hiện đã được sửa thành full block pruning thật hơn: prune c
 Student architecture:
 
 ```text
-full_pruning_unet_plus_plus
+full_pruning_resnet_unet
 ```
 
 Pruned trong main path:
@@ -270,16 +270,16 @@ downsample/residual projection
 residual add
 stage output channels
 decoder skip input channels
-UNet++ encoder feature widths
+decoder skip input channels
 ```
 
-Trong `full_pruning_unet_plus_plus.py`, nếu student là UNet++ thì không copy các module custom `center/dec*` của `UNetResNet152`. Code prune bottleneck output rồi gắn stage expander 1x1 để restore feature width cho decoder SMP UNet++:
+Trong default `unet_resnet152`, code prune bottleneck output rồi rebuild decoder U-Net custom để skip input khớp stage output mới:
 
 ```text
-decoder input = projected output cua layer4
-skip layer3  = projected output cua layer3
-skip layer2  = projected output cua layer2
-skip layer1  = projected output cua layer1
+center input = pruned output cua layer4
+skip layer3  = pruned output cua layer3
+skip layer2  = pruned output cua layer2
+skip layer1  = pruned output cua layer1
 stem skip    = stem 64 channels
 ```
 
@@ -295,7 +295,7 @@ internal_kept_channel_indices
 output_kept_channel_indices
 teacher_vs_student_rows
 global_pruning_summary
-student_architecture = full_pruning_unet_plus_plus
+student_architecture = full_pruning_resnet_unet
 ```
 
 Câu trình bày:
@@ -437,7 +437,7 @@ outputs/pgd_unet/<dataset>/<teacher_model>_teacher/<loss_tag>/<output_dir>/
 Ví dụ:
 
 ```text
-outputs/pgd_unet/kvasir_seg/unet_plus_plus_teacher/loss_seg_kd/output_s3_otsu_auto_no/
+outputs/pgd_unet/kvasir_seg/unet_resnet152_teacher/loss_seg_kd/output_s3_otsu_auto_no/
 ```
 
 Loss tag chính:
@@ -574,7 +574,7 @@ Threshold từng layer/block nằm trong:
 
 ## 18. Câu Chốt Để Trình Bày
 
-Cập nhật hiện tại: với `teacher_model=unet_plus_plus`, teacher/student chính dùng UNet++ với ResNet152 encoder. S1-S4 tính importance trên encoder để tạo mini `blueprint_unet_plus_plus`; S5-S8 copy UNet++ teacher rồi prune an toàn `conv2` trong từng bottleneck encoder; S9-S12 copy UNet++ teacher rồi prune full bottleneck encoder, gồm cả `conv3 output`, sau đó dùng stage expander để giữ feature width hợp với decoder SMP UNet++. Sau pruning, student được fine-tune bằng segmentation loss hoặc segmentation + KD. Gate/sparsity không còn là pipeline chính.
+Cập nhật hiện tại: với default `teacher_model=unet_resnet152`, teacher/student chính dùng ResNet152 encoder + U-Net decoder custom. S1-S4 tính importance trên encoder để tạo student `PDGUNet` theo `channel_config`; S5-S8 copy teacher rồi prune an toàn `conv2` trong từng bottleneck encoder; S9-S12 copy teacher rồi prune full bottleneck encoder, gồm cả `conv3 output`, sau đó rebuild residual/decoder shape để khớp skip connection. Sau pruning, student được fine-tune bằng segmentation loss hoặc segmentation + KD. Gate/sparsity không còn là pipeline chính.
 
 > PGD-UNet hiện là pipeline nén mô hình segmentation bằng structural channel pruning. Teacher thường là UNetResNet152, tức ResNet152 encoder + U-Net decoder. S1-S4 tạo student blueprint nhỏ theo stage; S5-S8 prune an toàn `conv2` trong bottleneck; S9-S12 prune full bottleneck path gồm cả `conv3 output` và rebuild residual/decoder shape. Sau pruning, student được fine-tune bằng segmentation loss hoặc segmentation + KD. Gate/sparsity không còn là pipeline chính.
 
