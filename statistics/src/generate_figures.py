@@ -21,6 +21,7 @@ PGD_TEACHER_DIR = "unet_resnet152_teacher"
 PGD_LOSS_TAG = "loss_seg_kd"
 PGD_LOSS_TAGS = (PGD_LOSS_TAG,)
 PGD_COMPARISON_LOSS_TAGS = (PGD_LOSS_TAG, "loss_seg_only")
+CANONICAL_STATIC_RATIO = 0.5
 CHANNEL_METHODS = {"static", "kneedle", "otsu", "gmm"}
 MIDDLE_METHODS = {"middle_static", "middle_kneedle", "middle_otsu", "middle_gmm"}
 FULL_METHODS = {"full_static", "full_kneedle", "full_otsu", "full_gmm"}
@@ -142,6 +143,8 @@ def _read_csv(path: Path) -> pd.DataFrame:
         frame = _normalize_table_labels(pd.read_csv(path))
         if not frame.empty:
             frame = frame.copy()
+            frame["csv_source_path"] = str(path)
+            frame["csv_source_file"] = path.name
             if "source_path" not in frame.columns:
                 frame["source_path"] = str(path)
             if "source_file" not in frame.columns:
@@ -733,6 +736,7 @@ def figure3_thresholds(outputs_root: Path, dataset: str, dataset_dir: Path) -> N
         layer_summaries = summaries.copy()
         if "layer_name" in layer_summaries.columns:
             layer_summaries = layer_summaries[layer_summaries["layer_name"].astype(str).eq(layer)]
+        layer_summaries = _prefer_static_display_ratio(layer_summaries)
         method_series = layer_summaries.get("prune_method", pd.Series(["Method"] * len(layer_summaries))).astype(str).str.lower()
         threshold_styles = {
             "static": {"color": "#d62728", "linestyle": "--"},
@@ -766,12 +770,8 @@ def _method_family(method: str) -> str:
     return method
 
 
-def _configured_static_ratio_from_row(row) -> float:
-    for column in ("requested_static_prune_ratio", "static_prune_ratio"):
-        value = _row_value(row, (column,))
-        if not np.isnan(value):
-            return float(value)
-    for column in ("source_path", "source_file"):
+def _static_ratio_from_output_folder(row) -> float:
+    for column in ("csv_source_path", "source_path", "csv_source_file", "source_file"):
         try:
             value = row.get(column)
         except AttributeError:
@@ -789,6 +789,17 @@ def _configured_static_ratio_from_row(row) -> float:
             method, ratio = _method_from_output_dir(Path(part))
             if _method_family(method) == "static" and not np.isnan(_safe_float(ratio)):
                 return float(ratio)
+    return float("nan")
+
+
+def _configured_static_ratio_from_row(row) -> float:
+    folder_ratio = _static_ratio_from_output_folder(row)
+    if not np.isnan(folder_ratio):
+        return folder_ratio
+    for column in ("requested_static_prune_ratio", "static_prune_ratio"):
+        value = _row_value(row, (column,))
+        if not np.isnan(value):
+            return float(value)
     for column in ("prune_ratio", "pruning_ratio"):
         value = _row_value(row, (column,))
         if not np.isnan(value):
@@ -803,6 +814,21 @@ def _representative_prune_ratio(frame: pd.DataFrame) -> float:
         if not np.isnan(ratio):
             values.append(ratio)
     return float(np.median(values)) if values else float("nan")
+
+
+def _prefer_static_display_ratio(frame: pd.DataFrame, target_ratio: float = CANONICAL_STATIC_RATIO) -> pd.DataFrame:
+    if frame.empty or "prune_method" not in frame.columns:
+        return frame.copy()
+    method_series = frame["prune_method"].fillna("").astype(str).str.lower()
+    static_mask = method_series.map(_method_family).eq("static")
+    if not static_mask.any():
+        return frame.copy()
+    static_frame = frame[static_mask].copy()
+    ratios = static_frame.apply(_configured_static_ratio_from_row, axis=1)
+    target_frame = static_frame[(pd.to_numeric(ratios, errors="coerce") - float(target_ratio)).abs() < 1e-9]
+    if target_frame.empty:
+        return frame.copy()
+    return pd.concat([frame[~static_mask], target_frame], axis=0).sort_index()
 
 
 def _threshold_method_label(method: str, frame: pd.DataFrame) -> str:
@@ -876,6 +902,7 @@ def _save_group_threshold_figures(details: pd.DataFrame, summaries: pd.DataFrame
         group_summaries = summaries[method_series_summaries.isin(methods)].copy()
         if "plot_role" in group_summaries.columns:
             group_summaries = group_summaries[group_summaries["plot_role"].astype(str).eq(channel_role)]
+        group_summaries = _prefer_static_display_ratio(group_summaries)
         if "pruning_threshold" in group_summaries.columns:
             group_methods = group_summaries.get("prune_method", pd.Series([""] * len(group_summaries), index=group_summaries.index)).astype(str).str.lower()
             for method in sorted(set(group_methods)):
@@ -1088,28 +1115,19 @@ def _hist_bins(values: np.ndarray) -> int:
     return max(8, min(40, int(np.sqrt(values.size) * 2)))
 
 
-def figure23_threshold_selection(outputs_root: Path, save_root: Path) -> None:
-    path = save_root / "figure23_threshold_selection_methods.pdf"
+def _figure23_dataset_panels(outputs_root: Path, dataset: str) -> tuple[str, str, List[Dict[str, object]]] | None:
+    details = _concat_csvs(_find_figure23_files(outputs_root, dataset, "channel_level_detail.csv"))
+    summaries = _concat_csvs(_find_figure23_files(outputs_root, dataset, "pruning_summary.csv"))
+    return _threshold_demo_panels(details, summaries)
+
+
+def _build_figure23_threshold_figure(
+    selected_dataset: str,
+    selected_layer: str,
+    selected_role: str,
+    selected_panels: List[Dict[str, object]],
+) -> tuple[plt.Figure, List[Dict[str, object]]]:
     metadata_rows: List[Dict[str, object]] = []
-    selected_dataset = ""
-    selected_layer = ""
-    selected_role = ""
-    selected_panels: List[Dict[str, object]] = []
-
-    for dataset in _datasets(outputs_root, save_root):
-        details = _concat_csvs(_find_figure23_files(outputs_root, dataset, "channel_level_detail.csv"))
-        summaries = _concat_csvs(_find_figure23_files(outputs_root, dataset, "pruning_summary.csv"))
-        result = _threshold_demo_panels(details, summaries)
-        if result is None:
-            continue
-        selected_layer, selected_role, selected_panels = result
-        selected_dataset = dataset
-        break
-
-    if not selected_panels:
-        _placeholder(path, "No channel-importance threshold data found for Kneedle, GMM, and Otsu.")
-        return
-
     fig, axes = plt.subplots(1, 3, figsize=(12.8, 4.25), sharey=False)
     colors = {"Kneedle": "#2ca02c", "GMM": "#9467bd", "Otsu": "#ff7f0e"}
     for ax, panel in zip(np.ravel(axes), selected_panels):
@@ -1257,9 +1275,57 @@ def figure23_threshold_selection(outputs_root: Path, save_root: Path) -> None:
                 "criterion_value": criterion_value,
             }
         )
-    pd.DataFrame(metadata_rows).to_csv(save_root / "figure23_threshold_selection_methods.csv", index=False)
     fig.tight_layout(w_pad=1.6, rect=(0.0, 0.12, 1.0, 1.0))
-    _save_pdf(fig, path)
+    return fig, metadata_rows
+
+
+def figure23_threshold_selection(outputs_root: Path, save_root: Path) -> None:
+    from matplotlib.backends.backend_pdf import PdfPages
+
+    path = save_root / "figure23_threshold_selection_methods.pdf"
+    all_metadata_rows: List[Dict[str, object]] = []
+    rendered_any = False
+    pdf: PdfPages | None = None
+
+    try:
+        for dataset in _datasets(outputs_root, save_root):
+            result = _figure23_dataset_panels(outputs_root, dataset)
+            if result is None:
+                logging.warning("Figure 23 has no complete Kneedle/GMM/Otsu threshold data for %s.", dataset)
+                continue
+            selected_layer, selected_role, selected_panels = result
+            fig, metadata_rows = _build_figure23_threshold_figure(dataset, selected_layer, selected_role, selected_panels)
+
+            dataset_dir = save_root / dataset
+            dataset_dir.mkdir(parents=True, exist_ok=True)
+            dataset_pdf = dataset_dir / "figure23_threshold_selection_methods.pdf"
+            dataset_csv = dataset_dir / "figure23_threshold_selection_methods.csv"
+            for row in metadata_rows:
+                row["figure_path"] = str(dataset_pdf)
+                row["global_figure_path"] = str(path)
+
+            fig.savefig(dataset_pdf, bbox_inches="tight")
+            logging.info("Saved figure: %s", dataset_pdf)
+            pd.DataFrame(metadata_rows).to_csv(dataset_csv, index=False)
+            logging.info("Saved Figure 23 metadata: %s", dataset_csv)
+
+            if pdf is None:
+                path.parent.mkdir(parents=True, exist_ok=True)
+                pdf = PdfPages(path)
+            pdf.savefig(fig, bbox_inches="tight")
+            plt.close(fig)
+            all_metadata_rows.extend(metadata_rows)
+            rendered_any = True
+    finally:
+        if pdf is not None:
+            pdf.close()
+            logging.info("Saved figure: %s", path)
+
+    if not rendered_any:
+        _placeholder(path, "No channel-importance threshold data found for Kneedle, GMM, and Otsu.")
+        return
+
+    pd.DataFrame(all_metadata_rows).to_csv(save_root / "figure23_threshold_selection_methods.csv", index=False)
 
 
 def figure5_layerwise(outputs_root: Path, dataset: str, dataset_dir: Path) -> None:
