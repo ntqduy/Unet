@@ -1,6 +1,7 @@
 ﻿from __future__ import annotations
 
 import argparse
+import hashlib
 import logging
 import re
 import textwrap
@@ -619,7 +620,8 @@ def _find_figure23_files(outputs_root: Path, dataset: str, filename: str) -> Lis
         if preferred:
             logging.info("Found %d Figure 23 files for %s/%s under %s", len(preferred), dataset, filename, preferred_root)
             return preferred
-    return _find_dataset_files(outputs_root, dataset, filename)
+    logging.warning("No Figure 23 files for %s/%s under exact KD dataset root: %s", dataset, filename, preferred_root)
+    return []
 
 
 def _find_teacher_channel_files(outputs_root: Path, dataset: str, filenames: Sequence[str]) -> List[Path]:
@@ -800,10 +802,6 @@ def _configured_static_ratio_from_row(row) -> float:
         value = _row_value(row, (column,))
         if not np.isnan(value):
             return float(value)
-    for column in ("prune_ratio", "pruning_ratio"):
-        value = _row_value(row, (column,))
-        if not np.isnan(value):
-            return float(value)
     return float("nan")
 
 
@@ -923,9 +921,12 @@ def _save_group_threshold_figures(details: pd.DataFrame, summaries: pd.DataFrame
 
 
 def _unique_source_paths(frame: pd.DataFrame) -> str:
-    if frame.empty or "source_path" not in frame.columns:
+    if frame.empty:
         return ""
-    sources = sorted({_clean_text(value) for value in frame["source_path"].dropna().tolist() if _clean_text(value)})
+    source_column = "csv_source_path" if "csv_source_path" in frame.columns else "source_path" if "source_path" in frame.columns else ""
+    if not source_column:
+        return ""
+    sources = sorted({_clean_text(value) for value in frame[source_column].dropna().tolist() if _clean_text(value)})
     return " | ".join(sources)
 
 
@@ -1115,6 +1116,15 @@ def _hist_bins(values: np.ndarray) -> int:
     return max(8, min(40, int(np.sqrt(values.size) * 2)))
 
 
+def _values_signature(values: np.ndarray) -> str:
+    values = np.asarray(values, dtype=float)
+    values = np.sort(values[np.isfinite(values)])
+    if values.size == 0:
+        return ""
+    rounded = np.round(values, decimals=12)
+    return hashlib.sha1(rounded.tobytes()).hexdigest()[:16]
+
+
 def _figure23_dataset_panels(outputs_root: Path, dataset: str) -> tuple[str, str, List[Dict[str, object]]] | None:
     details = _concat_csvs(_find_figure23_files(outputs_root, dataset, "channel_level_detail.csv"))
     summaries = _concat_csvs(_find_figure23_files(outputs_root, dataset, "pruning_summary.csv"))
@@ -1271,6 +1281,11 @@ def _build_figure23_threshold_figure(
                 "threshold_abs_error": threshold_abs_error,
                 "threshold_rows_used": int(panel.get("threshold_count", 0)),
                 "num_channels": int(values.size),
+                "importance_min": float(np.min(values)),
+                "importance_max": float(np.max(values)),
+                "importance_mean": float(np.mean(values)),
+                "importance_std": float(np.std(values, ddof=0)),
+                "importance_signature": _values_signature(values),
                 "closest_importance": closest_value,
                 "criterion_value": criterion_value,
             }
@@ -1302,7 +1317,7 @@ def figure23_threshold_selection(outputs_root: Path, save_root: Path) -> None:
             dataset_csv = dataset_dir / "figure23_threshold_selection_methods.csv"
             for row in metadata_rows:
                 row["figure_path"] = str(dataset_pdf)
-                row["global_figure_path"] = str(path)
+                row["aggregate_figure_path"] = str(path)
 
             fig.savefig(dataset_pdf, bbox_inches="tight")
             logging.info("Saved figure: %s", dataset_pdf)
@@ -1314,12 +1329,13 @@ def figure23_threshold_selection(outputs_root: Path, save_root: Path) -> None:
                 pdf = PdfPages(path)
             pdf.savefig(fig, bbox_inches="tight")
             plt.close(fig)
+
             all_metadata_rows.extend(metadata_rows)
             rendered_any = True
     finally:
         if pdf is not None:
             pdf.close()
-            logging.info("Saved figure: %s", path)
+            logging.info("Saved aggregate figure: %s", path)
 
     if not rendered_any:
         _placeholder(path, "No channel-importance threshold data found for Kneedle, GMM, and Otsu.")
