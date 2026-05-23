@@ -738,7 +738,7 @@ def _method_family(method: str) -> str:
 
 
 def _configured_static_ratio_from_row(row) -> float:
-    for column in ("requested_static_prune_ratio", "static_prune_ratio", "prune_ratio", "pruning_ratio"):
+    for column in ("requested_static_prune_ratio", "static_prune_ratio"):
         value = _row_value(row, (column,))
         if not np.isnan(value):
             return float(value)
@@ -760,6 +760,10 @@ def _configured_static_ratio_from_row(row) -> float:
             method, ratio = _method_from_output_dir(Path(part))
             if _method_family(method) == "static" and not np.isnan(_safe_float(ratio)):
                 return float(ratio)
+    for column in ("prune_ratio", "pruning_ratio"):
+        value = _row_value(row, (column,))
+        if not np.isnan(value):
+            return float(value)
     return float("nan")
 
 
@@ -860,6 +864,120 @@ def _save_group_threshold_figures(details: pd.DataFrame, summaries: pd.DataFrame
         if ax.get_legend_handles_labels()[0]:
             ax.legend(loc="upper right", fontsize=8, frameon=True, framealpha=0.9)
         _save_pdf(fig, path)
+
+
+def _threshold_demo_panels(details: pd.DataFrame, summaries: pd.DataFrame) -> tuple[str, str, List[Dict[str, object]]] | None:
+    if details.empty or summaries.empty or "importance" not in details.columns or "pruning_threshold" not in summaries.columns:
+        return None
+    methods = [("kneedle", "Kneedle"), ("gmm", "GMM"), ("otsu", "Otsu")]
+    method_series_details = details.get("prune_method", pd.Series([""] * len(details), index=details.index)).astype(str).str.lower()
+    method_series_summaries = summaries.get("prune_method", pd.Series([""] * len(summaries), index=summaries.index)).astype(str).str.lower()
+    role_candidates = ["stage_output", "conv2_output_to_conv3_input", "conv3_output", "conv1_output", "conv2_output", ""]
+
+    for role in role_candidates:
+        role_details = details.copy()
+        role_summaries = summaries.copy()
+        if role and "channel_role" in role_details.columns:
+            role_details = role_details[role_details["channel_role"].astype(str).eq(role)]
+        if role and "plot_role" in role_summaries.columns:
+            role_summaries = role_summaries[role_summaries["plot_role"].astype(str).eq(role)]
+        if role_details.empty or role_summaries.empty or "layer_name" not in role_details.columns or "layer_name" not in role_summaries.columns:
+            continue
+
+        common_layers: set[str] | None = None
+        for method, _ in methods:
+            detail_layers = set(role_details[method_series_details.reindex(role_details.index).eq(method)]["layer_name"].dropna().astype(str))
+            summary_layers = set(role_summaries[method_series_summaries.reindex(role_summaries.index).eq(method)]["layer_name"].dropna().astype(str))
+            layers = detail_layers & summary_layers
+            common_layers = layers if common_layers is None else common_layers & layers
+        if not common_layers:
+            continue
+
+        for layer in sorted(common_layers):
+            panels: List[Dict[str, object]] = []
+            valid = True
+            for method, label in methods:
+                detail_mask = method_series_details.reindex(role_details.index).eq(method) & role_details["layer_name"].astype(str).eq(layer)
+                summary_mask = method_series_summaries.reindex(role_summaries.index).eq(method) & role_summaries["layer_name"].astype(str).eq(layer)
+                values = pd.to_numeric(role_details[detail_mask]["importance"], errors="coerce").dropna().to_numpy()
+                thresholds = pd.to_numeric(role_summaries[summary_mask]["pruning_threshold"], errors="coerce").dropna()
+                if values.size == 0 or thresholds.empty:
+                    valid = False
+                    break
+                panels.append(
+                    {
+                        "method": method,
+                        "label": label,
+                        "layer_name": layer,
+                        "plot_role": role or "all",
+                        "values": values,
+                        "threshold": float(thresholds.median()),
+                    }
+                )
+            if valid:
+                return layer, role or "all", panels
+    return None
+
+
+def figure23_threshold_selection(outputs_root: Path, save_root: Path) -> None:
+    path = save_root / "figure23_threshold_selection_methods.pdf"
+    metadata_rows: List[Dict[str, object]] = []
+    selected_dataset = ""
+    selected_layer = ""
+    selected_role = ""
+    selected_panels: List[Dict[str, object]] = []
+
+    for dataset in _datasets(outputs_root, save_root):
+        details = _concat_csvs(_find_dataset_files(outputs_root, dataset, "channel_level_detail.csv"))
+        summaries = _concat_csvs(_find_dataset_files(outputs_root, dataset, "pruning_summary.csv"))
+        result = _threshold_demo_panels(details, summaries)
+        if result is None:
+            continue
+        selected_layer, selected_role, selected_panels = result
+        selected_dataset = dataset
+        break
+
+    if not selected_panels:
+        _placeholder(path, "No channel-importance threshold data found for Kneedle, GMM, and Otsu.")
+        return
+
+    fig, axes = plt.subplots(1, 3, figsize=(12.0, 3.8), sharey=False)
+    colors = {"Kneedle": "#2ca02c", "GMM": "#9467bd", "Otsu": "#ff7f0e"}
+    for ax, panel in zip(np.ravel(axes), selected_panels):
+        values = np.sort(np.asarray(panel["values"], dtype=float))
+        x = np.arange(1, values.size + 1)
+        threshold = float(panel["threshold"])
+        label = str(panel["label"])
+        closest_index = int(np.argmin(np.abs(values - threshold)))
+        ax.scatter(x, values, s=13, color="#4c78a8", alpha=0.72, linewidths=0)
+        ax.axhline(threshold, color=colors.get(label, "#d62728"), linewidth=1.6, linestyle="--", label="Threshold")
+        ax.scatter(
+            [x[closest_index]],
+            [values[closest_index]],
+            s=48,
+            color=colors.get(label, "#d62728"),
+            edgecolor="white",
+            linewidth=0.7,
+            zorder=3,
+        )
+        ax.set_xlabel(f"{label} channel rank")
+        ax.grid(alpha=0.25)
+        ax.legend(loc="lower right", fontsize=7, frameon=True, framealpha=0.9)
+        metadata_rows.append(
+            {
+                "dataset": selected_dataset,
+                "layer_name": selected_layer,
+                "plot_role": selected_role,
+                "method": str(panel["method"]),
+                "threshold": threshold,
+                "num_channels": int(values.size),
+                "closest_importance": float(values[closest_index]),
+            }
+        )
+    axes[0].set_ylabel("Channel importance")
+    pd.DataFrame(metadata_rows).to_csv(save_root / "figure23_threshold_selection_methods.csv", index=False)
+    fig.tight_layout(w_pad=1.6)
+    _save_pdf(fig, path)
 
 
 def figure5_layerwise(outputs_root: Path, dataset: str, dataset_dir: Path) -> None:
@@ -2046,6 +2164,7 @@ def main() -> int:
     _run_figure("figure16_performance_clinicdb", save_root / "figure16_performance_clinicdb.pdf", figure16, outputs_root, save_root)
     _run_figure("figure18_static_ratio_mean_dice", save_root / "figure18_static_ratio_mean_dice.pdf", figure18_static_ratio_mean_dice, outputs_root, save_root)
     _run_figure("figure19_static_ratio_params_dice", save_root / "figure19_static_ratio_params_dice.pdf", figure19_static_ratio_params_dice, outputs_root, save_root)
+    _run_figure("figure23_threshold_selection_methods", save_root / "figure23_threshold_selection_methods.pdf", figure23_threshold_selection, outputs_root, save_root)
     _run_figure("figure20_22_prediction_galleries", save_root / "figure20_22_prediction_galleries.pdf", figure_prediction_galleries, outputs_root, save_root)
     return 0
 

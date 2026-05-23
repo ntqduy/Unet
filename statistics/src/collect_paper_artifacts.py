@@ -36,6 +36,7 @@ MAIN_FIGURES = [
     ("figure20_kd", "loss_seg_kd/figure20_blueprint_prediction_gallery.pdf"),
     ("figure21_kd", "loss_seg_kd/figure21_middle_conv2_prediction_gallery.pdf"),
     ("figure22_kd", "loss_seg_kd/figure22_full_block_prediction_gallery.pdf"),
+    ("figure23", "figure23_threshold_selection_methods.pdf"),
 ]
 
 APPENDIX_FIGURES = [
