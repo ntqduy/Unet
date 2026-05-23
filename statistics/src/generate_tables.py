@@ -15,7 +15,8 @@ except ImportError as error:  # pragma: no cover - dependency guard
 
 PGD_TEACHER_DIR = "unet_resnet152_teacher"
 PGD_LOSS_TAG = "loss_seg_kd"
-PGD_LOSS_TAGS = {"loss_seg_kd", "loss_seg_only"}
+PGD_LOSS_TAGS = {PGD_LOSS_TAG}
+PGD_COMPARISON_LOSS_TAGS = {PGD_LOSS_TAG, "loss_seg_only"}
 CHANNEL_METHODS = {"static", "kneedle", "otsu", "gmm"}
 MIDDLE_METHODS = {"middle_static", "middle_kneedle", "middle_otsu", "middle_gmm"}
 FULL_METHODS = {"full_static", "full_kneedle", "full_otsu", "full_gmm"}
@@ -167,7 +168,7 @@ def _is_pgd_focus_path(path: Path, outputs_root: Path) -> bool:
 
 def _is_pgd_loss_metric_path(path: Path, outputs_root: Path) -> bool:
     parts = _path_parts(path, outputs_root)
-    return len(parts) >= 5 and parts[0] == "pgd_unet" and parts[2] == PGD_TEACHER_DIR and str(parts[3]).startswith("loss_")
+    return len(parts) >= 5 and parts[0] == "pgd_unet" and parts[2] == PGD_TEACHER_DIR and parts[3] in PGD_COMPARISON_LOSS_TAGS
 
 
 def _is_pgd_teacher_phase_metric_path(path: Path, outputs_root: Path) -> bool:
@@ -457,7 +458,7 @@ def _read_metrics_rows(outputs_root: Path) -> pd.DataFrame:
             if csv_path in seen:
                 continue
             seen.add(csv_path)
-            allow_loss_table_metric = csv_path.name == "student_metrics.csv" and _is_pgd_loss_metric_path(csv_path, outputs_root)
+            allow_loss_table_metric = csv_path.name in {"student_metrics.csv", "metrics_summary.csv"} and _is_pgd_loss_metric_path(csv_path, outputs_root)
             allow_teacher_metric = csv_path.name == "teacher_metrics.csv" and _is_pgd_teacher_phase_metric_path(csv_path, outputs_root)
             if csv_path.name != "basic_metrics.csv" and not _is_pgd_focus_path(csv_path, outputs_root) and not allow_loss_table_metric and not allow_teacher_metric:
                 logging.info("Skip non-target PGD metrics CSV: %s", csv_path)
@@ -764,6 +765,44 @@ def _preferred_metrics_frame(frame: pd.DataFrame) -> pd.DataFrame:
     return frame.copy()
 
 
+def _preferred_loss_comparison_frame(frame: pd.DataFrame) -> pd.DataFrame:
+    if frame.empty:
+        return frame.copy()
+    selected = frame.copy()
+    selected["_dataset_key"] = selected.get("dataset", pd.Series([""] * len(selected), index=selected.index)).fillna("").astype(str)
+    selected["_phase_key"] = selected.get("phase", pd.Series([""] * len(selected), index=selected.index)).fillna("").astype(str).str.lower()
+    selected["_loss_scope_key"] = selected.apply(lambda row: _row_loss_scope(row.to_dict()), axis=1)
+    selected["_prune_method_key"] = selected.apply(lambda row: _row_prune_method(row.to_dict()), axis=1)
+    selected["_static_ratio_key"] = selected.apply(lambda row: _fmt_ratio(_row_static_ratio(row.to_dict())), axis=1)
+    source_priority = {
+        "metrics_summary.csv": 0,
+        "student_metrics.csv": 1,
+        "pipeline_metrics.csv": 2,
+        "pruning_metrics.csv": 3,
+    }
+    selected["_source_priority"] = (
+        selected.get("source_file", pd.Series([""] * len(selected), index=selected.index))
+        .map(source_priority)
+        .fillna(99)
+    )
+    selected = selected.sort_values(["_source_priority", "_dataset_key", "_loss_scope_key", "_prune_method_key", "_static_ratio_key"])
+    selected = selected.drop_duplicates(
+        subset=["_dataset_key", "_phase_key", "_loss_scope_key", "_prune_method_key", "_static_ratio_key"],
+        keep="first",
+    )
+    return selected.drop(
+        columns=[
+            "_dataset_key",
+            "_phase_key",
+            "_loss_scope_key",
+            "_prune_method_key",
+            "_static_ratio_key",
+            "_source_priority",
+        ],
+        errors="ignore",
+    ).reset_index(drop=True)
+
+
 def _mean_metric_table(
     rows: Iterable[Dict[str, Any]],
     group_key: str,
@@ -923,6 +962,7 @@ def _tables_for_dataset(dataset: str, metrics: pd.DataFrame, timing: pd.DataFram
     focus_metrics = dataset_metrics[
         dataset_metrics.get("is_focus_loss", pd.Series([False] * len(dataset_metrics))).astype(bool)
     ].copy() if not dataset_metrics.empty else pd.DataFrame()
+    loss_comparison_metrics = _preferred_loss_comparison_frame(dataset_metrics)
     table1_rows = []
     table3_rows = []
     table4_rows = []
@@ -940,6 +980,11 @@ def _tables_for_dataset(dataset: str, metrics: pd.DataFrame, timing: pd.DataFram
         prune_method = _row_prune_method(row)
         if phase == "basic" or (not prune_method and "pgd_unet" not in str(row.get("source_path", ""))):
             table1_rows.append({key: value for key, value in _metric_row(row, "Model", model_name).items() if key in TABLE1_COLUMNS})
+
+    for _, row_series in loss_comparison_metrics.iterrows():
+        row = row_series.to_dict()
+        phase = str(row.get("phase") or "").lower()
+        prune_method = _row_prune_method(row)
         if prune_method and phase == "student":
             table3_rows.append(_metric_row(row, "Method", _loss_method(row)))
 
@@ -1032,7 +1077,7 @@ def _sort_by_known_order(table: pd.DataFrame, key: str, order: Dict[str, int]) -
 def _table7_loss_mean(metrics: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame]:
     if metrics.empty:
         return pd.DataFrame(columns=TABLE7_COLUMNS), pd.DataFrame(columns=TABLE7_NUMERIC_COLUMNS)
-    frame = _test_rows(_preferred_metrics_frame(metrics))
+    frame = _preferred_loss_comparison_frame(_test_rows(metrics))
     rows: List[Dict[str, Any]] = []
     for _, row_series in frame.iterrows():
         row = row_series.to_dict()

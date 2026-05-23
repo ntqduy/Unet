@@ -19,7 +19,8 @@ except ImportError as error:  # pragma: no cover - dependency guard
 
 PGD_TEACHER_DIR = "unet_resnet152_teacher"
 PGD_LOSS_TAG = "loss_seg_kd"
-PGD_LOSS_TAGS = ("loss_seg_kd", "loss_seg_only")
+PGD_LOSS_TAGS = (PGD_LOSS_TAG,)
+PGD_COMPARISON_LOSS_TAGS = (PGD_LOSS_TAG, "loss_seg_only")
 CHANNEL_METHODS = {"static", "kneedle", "otsu", "gmm"}
 MIDDLE_METHODS = {"middle_static", "middle_kneedle", "middle_otsu", "middle_gmm"}
 FULL_METHODS = {"full_static", "full_kneedle", "full_otsu", "full_gmm"}
@@ -256,25 +257,22 @@ def _method_sort_key(raw_method: str, ratio: float) -> tuple[int, float, str]:
 
 def _figure15_method_dirs(outputs_root: Path, dataset: str) -> List[tuple[str, Path]]:
     base_root = outputs_root / "pgd_unet" / dataset / PGD_TEACHER_DIR
-    loss_roots = [base_root / PGD_LOSS_TAG] if (base_root / PGD_LOSS_TAG).is_dir() else []
-    if not loss_roots:
-        loss_roots = [base_root / tag for tag in PGD_LOSS_TAGS if (base_root / tag).is_dir()]
-    if not loss_roots:
+    loss_root = base_root / PGD_LOSS_TAG
+    if not loss_root.is_dir():
         return FIGURE15_FALLBACK_METHOD_DIRS
 
     discovered = []
-    for loss_root in loss_roots:
-        for output_dir in loss_root.iterdir():
-            if not output_dir.is_dir() or not output_dir.name.startswith("output_"):
-                continue
-            raw_method, ratio = _method_from_output_dir(output_dir)
-            discovered.append(
-                (
-                    _method_sort_key(raw_method, ratio),
-                    _display_method(raw_method, ratio),
-                    Path(loss_root.name) / output_dir.name / "3_student",
-                )
+    for output_dir in loss_root.iterdir():
+        if not output_dir.is_dir() or not output_dir.name.startswith("output_"):
+            continue
+        raw_method, ratio = _method_from_output_dir(output_dir)
+        discovered.append(
+            (
+                _method_sort_key(raw_method, ratio),
+                _display_method(raw_method, ratio),
+                Path(PGD_LOSS_TAG) / output_dir.name / "3_student",
             )
+        )
     if not discovered:
         return FIGURE15_FALLBACK_METHOD_DIRS
 
@@ -542,7 +540,8 @@ def _pgd_focus_root(outputs_root: Path, dataset: str) -> Path:
 
 def _pgd_focus_roots(outputs_root: Path, dataset: str) -> List[Path]:
     base_root = outputs_root / "pgd_unet" / dataset / PGD_TEACHER_DIR
-    return [base_root / tag for tag in PGD_LOSS_TAGS if (base_root / tag).exists()]
+    focus_root = base_root / PGD_LOSS_TAG
+    return [focus_root] if focus_root.exists() else []
 
 
 def _pgd_teacher_phase_root(outputs_root: Path, dataset: str) -> Path:
@@ -555,6 +554,20 @@ def _is_pgd_focus_path(path: Path, outputs_root: Path, dataset: str) -> bool:
     except ValueError:
         return False
     return bool(relative.parts)
+
+
+def _is_non_default_loss_path(path: Path, outputs_root: Path) -> bool:
+    try:
+        parts = path.relative_to(outputs_root).parts
+    except ValueError:
+        parts = path.parts
+    return (
+        len(parts) >= 4
+        and parts[0] == "pgd_unet"
+        and parts[2] == PGD_TEACHER_DIR
+        and str(parts[3]).startswith("loss_")
+        and parts[3] != PGD_LOSS_TAG
+    )
 
 
 def _datasets(outputs_root: Path, save_root: Path) -> List[str]:
@@ -570,6 +583,8 @@ def _datasets(outputs_root: Path, save_root: Path) -> List[str]:
                 if _pgd_focus_roots(outputs_root, dataset_dir.name):
                     names.add(dataset_dir.name)
         for csv_path in outputs_root.rglob("*.csv"):
+            if _is_non_default_loss_path(csv_path, outputs_root):
+                continue
             dataset = _dataset_from_path(csv_path, outputs_root)
             if dataset != "unknown" and not Path(dataset).suffix:
                 names.add(dataset)
@@ -584,7 +599,11 @@ def _find_dataset_files(outputs_root: Path, dataset: str, filename: str) -> List
         if focused:
             logging.info("Found %d target PGD files for %s/%s under %s", len(focused), dataset, filename, focus_root)
             return focused
-    fallback = [path for path in outputs_root.rglob(filename) if dataset in path.parts and not Path(dataset).suffix]
+    fallback = [
+        path
+        for path in outputs_root.rglob(filename)
+        if dataset in path.parts and not Path(dataset).suffix and not _is_non_default_loss_path(path, outputs_root)
+    ]
     if fallback:
         logging.warning("Using fallback files for %s/%s because target PGD path has no matches.", dataset, filename)
     return fallback
