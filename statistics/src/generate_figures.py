@@ -138,7 +138,14 @@ def _read_csv(path: Path) -> pd.DataFrame:
     if not path.is_file():
         return pd.DataFrame()
     try:
-        return _normalize_table_labels(pd.read_csv(path))
+        frame = _normalize_table_labels(pd.read_csv(path))
+        if not frame.empty:
+            frame = frame.copy()
+            if "source_path" not in frame.columns:
+                frame["source_path"] = str(path)
+            if "source_file" not in frame.columns:
+                frame["source_file"] = path.name
+        return frame
     except Exception as error:
         logging.warning("Cannot read CSV %s | %s", path, error)
         return pd.DataFrame()
@@ -730,14 +737,39 @@ def _method_family(method: str) -> str:
     return method
 
 
-def _representative_prune_ratio(frame: pd.DataFrame) -> float:
-    for column in ("actual_prune_ratio", "pruning_ratio", "prune_ratio", "static_prune_ratio", "requested_static_prune_ratio"):
-        if column not in frame.columns:
+def _configured_static_ratio_from_row(row) -> float:
+    for column in ("requested_static_prune_ratio", "static_prune_ratio", "prune_ratio", "pruning_ratio"):
+        value = _row_value(row, (column,))
+        if not np.isnan(value):
+            return float(value)
+    for column in ("source_path", "source_file"):
+        try:
+            value = row.get(column)
+        except AttributeError:
+            value = None
+        if value is None:
             continue
-        values = pd.to_numeric(frame[column], errors="coerce").dropna()
-        if not values.empty:
-            return float(values.median())
+        try:
+            if pd.isna(value):
+                continue
+        except (TypeError, ValueError):
+            pass
+        for part in Path(str(value)).parts:
+            if not part.startswith("output_"):
+                continue
+            method, ratio = _method_from_output_dir(Path(part))
+            if _method_family(method) == "static" and not np.isnan(_safe_float(ratio)):
+                return float(ratio)
     return float("nan")
+
+
+def _representative_prune_ratio(frame: pd.DataFrame) -> float:
+    values = []
+    for _, row_series in frame.iterrows():
+        ratio = _configured_static_ratio_from_row(row_series)
+        if not np.isnan(ratio):
+            values.append(ratio)
+    return float(np.median(values)) if values else float("nan")
 
 
 def _threshold_method_label(method: str, frame: pd.DataFrame) -> str:
@@ -894,10 +926,13 @@ def figure5_layerwise(outputs_root: Path, dataset: str, dataset_dir: Path) -> No
 
 
 def _pruning_ratio_series(frame: pd.DataFrame) -> pd.Series:
-    for column in ("static_prune_ratio", "requested_static_prune_ratio", "prune_ratio"):
-        if column in frame.columns:
-            return frame[column]
-    return pd.Series([np.nan] * len(frame), index=frame.index)
+    method_series = frame.get("prune_method", pd.Series([""] * len(frame), index=frame.index)).astype(str).str.lower()
+    ratios = pd.Series([np.nan] * len(frame), index=frame.index, dtype=float)
+    for index, row_series in frame.iterrows():
+        if _method_family(method_series.loc[index]) != "static":
+            continue
+        ratios.loc[index] = _configured_static_ratio_from_row(row_series)
+    return ratios
 
 
 def _filter_pruning_group(frame: pd.DataFrame, methods: set[str]) -> pd.DataFrame:
