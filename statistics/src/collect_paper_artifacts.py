@@ -28,6 +28,8 @@ MAIN_FIGURES = [
     ("figure15", "figure15_params_dice_tradeoff.pdf"),
     ("figure16", "figure16_performance_clinicdb.pdf"),
     ("figure17", "{dataset}/figure17_kd_vs_seg_validation_dice.pdf"),
+    ("figure18", "figure18_static_ratio_mean_dice.pdf"),
+    ("figure19", "figure19_static_ratio_params_dice.pdf"),
 ]
 
 APPENDIX_FIGURES = [

@@ -270,6 +270,144 @@ def _figure15_method_dirs(outputs_root: Path, dataset: str) -> List[tuple[str, P
     return method_dirs
 
 
+def _method_group_label(raw_method: str) -> str:
+    method = str(raw_method or "").lower()
+    if method in CHANNEL_METHODS:
+        return "S1-S4 Blueprint"
+    if method in MIDDLE_METHODS:
+        return "S5-S8 Middle Conv2"
+    if method in FULL_METHODS:
+        return "S9-S12 Full Block"
+    if method == "teacher":
+        return "Teacher"
+    return "Other"
+
+
+def _is_static_method(raw_method: str) -> bool:
+    return str(raw_method or "").lower() in {"static", "middle_static", "full_static"}
+
+
+def _ratio_matches(value: float, target: float) -> bool:
+    number = _safe_float(value)
+    return not np.isnan(number) and abs(number - float(target)) < 1e-9
+
+
+def _global_metric_rows(
+    outputs_root: Path,
+    save_root: Path,
+    *,
+    include_teacher: bool = False,
+    canonical_static_ratio: float | None = None,
+    static_only: bool = False,
+) -> pd.DataFrame:
+    rows = []
+    for dataset in _datasets(outputs_root, save_root):
+        base_root = outputs_root / "pgd_unet" / dataset / PGD_TEACHER_DIR
+        if include_teacher and not static_only:
+            teacher_row = _best_test_row(base_root / "1_teacher" / "metrics_summary.csv")
+            if teacher_row is not None:
+                rows.append(
+                    {
+                        "Dataset": dataset,
+                        "Method": "Teacher",
+                        "Group": "Teacher",
+                        "Raw Method": "teacher",
+                        "Static Ratio": np.nan,
+                        "Params (M)": _params_from_row(teacher_row),
+                        "Dice": _dice_from_row(teacher_row),
+                        "Sort": -1.0,
+                    }
+                )
+
+        loss_root = base_root / PGD_LOSS_TAG
+        if not loss_root.is_dir():
+            continue
+        for output_dir in loss_root.iterdir():
+            if not output_dir.is_dir() or not output_dir.name.startswith("output_"):
+                continue
+            raw_method, ratio = _method_from_output_dir(output_dir)
+            is_static = _is_static_method(raw_method)
+            if static_only and not is_static:
+                continue
+            if canonical_static_ratio is not None and is_static and not _ratio_matches(ratio, canonical_static_ratio):
+                continue
+            metrics_path = output_dir / "3_student" / "metrics_summary.csv"
+            row = _best_test_row(metrics_path)
+            if row is None:
+                continue
+            rows.append(
+                {
+                    "Dataset": dataset,
+                    "Method": _display_method(raw_method, ratio),
+                    "Group": _method_group_label(raw_method),
+                    "Raw Method": raw_method,
+                    "Static Ratio": ratio,
+                    "Params (M)": _params_from_row(row),
+                    "Dice": _dice_from_row(row),
+                    "Sort": float(_method_sort_key(raw_method, ratio)[0]) + (0.001 * (ratio if not np.isnan(_safe_float(ratio)) else 999.0)),
+                }
+            )
+    frame = pd.DataFrame(rows)
+    if frame.empty:
+        return frame
+    frame["Params (M)"] = pd.to_numeric(frame["Params (M)"], errors="coerce")
+    frame["Dice"] = pd.to_numeric(frame["Dice"], errors="coerce")
+    return frame.dropna(subset=["Params (M)", "Dice"]).reset_index(drop=True)
+
+
+def _mean_metric_summary(frame: pd.DataFrame, group_cols: Sequence[str]) -> pd.DataFrame:
+    if frame.empty:
+        return pd.DataFrame()
+    dataset_level = (
+        frame.groupby(["Dataset", *group_cols], dropna=False)
+        .agg(
+            **{
+                "Mean Dice": ("Dice", "mean"),
+                "Mean Params (M)": ("Params (M)", "mean"),
+                "Sort": ("Sort", "min"),
+            }
+        )
+        .reset_index()
+    )
+    summary = (
+        dataset_level.groupby(list(group_cols), dropna=False)
+        .agg(
+            **{
+                "Mean Dice": ("Mean Dice", "mean"),
+                "Std Dice": ("Mean Dice", "std"),
+                "Mean Params (M)": ("Mean Params (M)", "mean"),
+                "Std Params (M)": ("Mean Params (M)", "std"),
+                "Datasets": ("Dataset", "nunique"),
+                "Sort": ("Sort", "min"),
+            }
+        )
+        .reset_index()
+    )
+    return summary.fillna({"Std Dice": 0.0, "Std Params (M)": 0.0}).sort_values("Sort").reset_index(drop=True)
+
+
+def _plot_params_dice_summary(frame: pd.DataFrame, path: Path, *, label_column: str = "Method") -> None:
+    if frame.empty:
+        _placeholder(path, "No valid mean Params/Dice rows found.")
+        return
+    x = np.arange(len(frame))
+    labels = frame[label_column].astype(str).tolist()
+    fig_width = max(8.5, min(18.0, 0.72 * len(labels) + 4.0))
+    fig, ax_params = plt.subplots(figsize=(fig_width, 4.9))
+    ax_dice = ax_params.twinx()
+    params_bar = ax_params.bar(x, frame["Mean Params (M)"], width=0.58, color="#4c78a8", alpha=0.72, label="Mean Params (M)")
+    dice_line = ax_dice.plot(x, frame["Mean Dice"], marker="s", linewidth=1.9, color="#f58518", label="Mean Dice")
+    ax_params.set_xlabel("Method")
+    ax_params.set_ylabel("Mean Params (M)")
+    ax_dice.set_ylabel("Mean Dice")
+    ax_params.set_xticks(x)
+    ax_params.set_xticklabels(_wrap_labels(labels, width=13), rotation=25, ha="right", fontsize=8)
+    ax_params.grid(alpha=0.25, axis="y")
+    lines = [params_bar, *dice_line]
+    ax_params.legend(lines, [line.get_label() for line in lines], loc="best", fontsize=8, frameon=True, framealpha=0.9)
+    _save_pdf(fig, path)
+
+
 def _decode_mojibake(value: str) -> str:
     text = str(value)
     for _ in range(2):
@@ -1322,85 +1460,79 @@ def figure14_cost(dataset_dir: Path) -> None:
 
 def figure15(outputs_root: Path, save_root: Path, dataset: str = FIGURE15_DATASET) -> None:
     path = save_root / "figure15_params_dice_tradeoff.pdf"
-    base_root = outputs_root / "pgd_unet" / dataset / PGD_TEACHER_DIR
-    rows = []
-    for label, relative_dir in _figure15_method_dirs(outputs_root, dataset):
-        row = _best_test_row(base_root / relative_dir / "metrics_summary.csv")
-        if row is None:
-            continue
-        rows.append(
-            {
-                "Method": label,
-                "Params (M)": _params_from_row(row),
-                "Dice": _dice_from_row(row),
-            }
-        )
-    frame = pd.DataFrame(rows, columns=["Method", "Params (M)", "Dice"]).dropna(subset=["Params (M)", "Dice"])
+    raw_frame = _global_metric_rows(outputs_root, save_root, include_teacher=True, canonical_static_ratio=0.5)
+    frame = _mean_metric_summary(raw_frame, ["Method"])
     if frame.empty:
-        _placeholder(path, f"No valid Params/Dice rows found for Figure 15 ({dataset}).")
+        _placeholder(path, "No valid mean Params/Dice rows found for Figure 15.")
         return
-
-    x = np.arange(len(frame))
-    labels = frame["Method"].astype(str).tolist()
-    fig_width = max(8.5, min(13.5, 0.72 * len(labels) + 4.0))
-    fig, ax_params = plt.subplots(figsize=(fig_width, 4.8))
-    ax_dice = ax_params.twinx()
-
-    params_bar = ax_params.bar(x, frame["Params (M)"], width=0.58, color="#4c78a8", alpha=0.72, label="Params (M)")
-    dice_line = ax_dice.plot(x, frame["Dice"], marker="s", linewidth=1.9, color="#f58518", label="Dice")
-
-    ax_params.set_xlabel("Method")
-    ax_params.set_ylabel("Params (M)")
-    ax_dice.set_ylabel("Dice")
-    ax_params.set_xticks(x)
-    ax_params.set_xticklabels(_wrap_labels(labels, width=13), rotation=25, ha="right", fontsize=8)
-    ax_params.grid(alpha=0.25, axis="y")
-    lines = [params_bar, *dice_line]
-    ax_params.legend(lines, [line.get_label() for line in lines], loc="best", fontsize=8, frameon=True, framealpha=0.9)
-    _save_pdf(fig, path)
+    frame.to_csv(save_root / "figure15_mean_params_dice.csv", index=False)
+    _plot_params_dice_summary(frame, path)
 
 
 def figure16(outputs_root: Path, save_root: Path, dataset: str = "cvc_clinicdb") -> None:
     path = save_root / "figure16_performance_clinicdb.pdf"
-    base_root = outputs_root / "pgd_unet" / dataset / PGD_TEACHER_DIR
-    rows = []
-    for label, relative_dir in _figure15_method_dirs(outputs_root, dataset):
-        metrics_path = base_root / relative_dir / "metrics_summary.csv"
-        row = _best_test_row(metrics_path)
-        if row is None:
-            continue
-        rows.append(
-            {
-                "Method": label,
-                "Params (M)": _params_from_row(row),
-                "Dice": _dice_from_row(row),
-            }
-        )
-
-    frame = pd.DataFrame(rows, columns=["Method", "Params (M)", "Dice"]).dropna(subset=["Params (M)", "Dice"])
-    logging.info("Figure 16 clinicdb rows loaded: %d", len(frame))
+    raw_frame = _global_metric_rows(outputs_root, save_root, include_teacher=True, canonical_static_ratio=0.5)
+    frame = _mean_metric_summary(raw_frame, ["Method"])
+    logging.info("Figure 16 mean rows loaded: %d", len(frame))
     if frame.empty:
-        _placeholder(path, f"No valid Params/Dice rows found for Figure 16 ({dataset}).")
+        _placeholder(path, "No valid mean Params/Dice rows found for Figure 16.")
         return
+    frame.to_csv(save_root / "figure16_mean_params_dice.csv", index=False)
+    _plot_params_dice_summary(frame, path)
 
-    x = np.arange(len(frame))
-    labels = frame["Method"].astype(str).tolist()
-    fig_width = max(9.5, min(16.0, 0.78 * len(labels) + 4.0))
-    fig, ax_params = plt.subplots(figsize=(fig_width, 5.0))
-    ax_dice = ax_params.twinx()
 
-    params_bar = ax_params.bar(x, frame["Params (M)"], width=0.58, color="#4c78a8", alpha=0.72, label="Params (M)")
-    dice_line = ax_dice.plot(x, frame["Dice"], marker="s", linewidth=1.9, color="#f58518", label="Dice")
+def figure18_static_ratio_mean_dice(outputs_root: Path, save_root: Path) -> None:
+    path = save_root / "figure18_static_ratio_mean_dice.pdf"
+    raw_frame = _global_metric_rows(outputs_root, save_root, static_only=True)
+    frame = _mean_metric_summary(raw_frame, ["Group", "Static Ratio"])
+    frame = frame.dropna(subset=["Static Ratio"]) if not frame.empty else frame
+    if frame.empty:
+        _placeholder(path, "No valid static-ratio Dice rows found for Figure 18.")
+        return
+    frame.to_csv(save_root / "figure18_static_ratio_mean_dice.csv", index=False)
 
-    ax_params.set_xlabel("Method")
-    ax_params.set_ylabel("Params (M)")
-    ax_dice.set_ylabel("Dice")
-    ax_params.set_xticks(x)
-    ax_params.set_xticklabels(_wrap_labels(labels, width=13), rotation=25, ha="right", fontsize=8)
-    ax_params.grid(alpha=0.25, axis="y")
-    lines = [params_bar, *dice_line]
-    ax_params.legend(lines, [line.get_label() for line in lines], loc="best", fontsize=8, frameon=True, framealpha=0.9)
+    fig, ax = plt.subplots(figsize=(7.4, 4.8))
+    colors = {
+        "S1-S4 Blueprint": "#4c78a8",
+        "S5-S8 Middle Conv2": "#f58518",
+        "S9-S12 Full Block": "#54a24b",
+    }
+    for group, group_frame in frame.groupby("Group", sort=False):
+        group_frame = group_frame.sort_values("Static Ratio")
+        ax.plot(
+            group_frame["Static Ratio"],
+            group_frame["Mean Dice"],
+            marker="o",
+            linewidth=1.9,
+            label=str(group),
+            color=colors.get(str(group)),
+        )
+    ax.set_xlabel("Static pruning ratio")
+    ax.set_ylabel("Mean Dice")
+    ax.set_xticks(sorted(frame["Static Ratio"].dropna().unique()))
+    ax.grid(alpha=0.25)
+    ax.legend(loc="best", fontsize=8, frameon=True, framealpha=0.9)
     _save_pdf(fig, path)
+
+
+def figure19_static_ratio_params_dice(outputs_root: Path, save_root: Path) -> None:
+    path = save_root / "figure19_static_ratio_params_dice.pdf"
+    raw_frame = _global_metric_rows(outputs_root, save_root, static_only=True)
+    frame = _mean_metric_summary(raw_frame, ["Group", "Static Ratio"])
+    frame = frame.dropna(subset=["Static Ratio"]) if not frame.empty else frame
+    if frame.empty:
+        _placeholder(path, "No valid static-ratio Params/Dice rows found for Figure 19.")
+        return
+    group_order = {"S1-S4 Blueprint": 0, "S5-S8 Middle Conv2": 1, "S9-S12 Full Block": 2}
+    frame = (
+        frame.assign(_group_order=frame["Group"].map(group_order).fillna(99))
+        .sort_values(["_group_order", "Static Ratio"])
+        .drop(columns="_group_order")
+        .reset_index(drop=True)
+    )
+    frame["Label"] = frame.apply(lambda row: f"{row['Group']} r={_fmt_ratio(row['Static Ratio'])}", axis=1)
+    frame.to_csv(save_root / "figure19_static_ratio_params_dice.csv", index=False)
+    _plot_params_dice_summary(frame, path, label_column="Label")
 
 
 def _classify_train_log_run(path: Path, frame: pd.DataFrame) -> str | None:
@@ -1515,6 +1647,8 @@ def main() -> int:
 
     _run_figure("figure15_params_dice_tradeoff", save_root / "figure15_params_dice_tradeoff.pdf", figure15, outputs_root, save_root)
     _run_figure("figure16_performance_clinicdb", save_root / "figure16_performance_clinicdb.pdf", figure16, outputs_root, save_root)
+    _run_figure("figure18_static_ratio_mean_dice", save_root / "figure18_static_ratio_mean_dice.pdf", figure18_static_ratio_mean_dice, outputs_root, save_root)
+    _run_figure("figure19_static_ratio_params_dice", save_root / "figure19_static_ratio_params_dice.pdf", figure19_static_ratio_params_dice, outputs_root, save_root)
     return 0
 
 

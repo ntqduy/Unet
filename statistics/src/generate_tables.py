@@ -98,6 +98,21 @@ MEAN_STD_COLUMNS = [
     "Mean Search Time (s)",
     "Std Search Time (s)",
 ]
+MEAN_TABLE_METRICS = ["Dice", "IoU", "HD95", "Params", "FLOPs", "FPS", "Inf (s)", "Search Time (s)"]
+TABLE7_COLUMNS = [
+    "Method",
+    "Runs",
+    "Datasets",
+    *[f"Mean {metric}" for metric in MEAN_TABLE_METRICS],
+    *[f"Std {metric}" for metric in MEAN_TABLE_METRICS],
+]
+TABLE8_COLUMNS = [
+    "Component",
+    "Runs",
+    "Datasets",
+    *[f"Mean {metric}" for metric in MEAN_TABLE_METRICS],
+    *[f"Std {metric}" for metric in MEAN_TABLE_METRICS],
+]
 
 def _path_parts(path: Path, outputs_root: Path) -> tuple[str, ...]:
     try:
@@ -701,6 +716,44 @@ def _dedupe_best(rows: Iterable[Dict[str, Any]], key_name: str) -> pd.DataFrame:
     return frame.drop_duplicates(subset=[key_name], keep="first").reset_index(drop=True)
 
 
+def _preferred_metrics_frame(frame: pd.DataFrame) -> pd.DataFrame:
+    if frame.empty or "source_file" not in frame.columns:
+        return frame.copy()
+    preferred_sources = {"teacher_metrics.csv", "pruning_metrics.csv", "student_metrics.csv", "basic_metrics.csv"}
+    if frame["source_file"].isin(preferred_sources).any():
+        return frame[frame["source_file"].isin(preferred_sources)].copy()
+    return frame.copy()
+
+
+def _mean_metric_table(rows: Iterable[Dict[str, Any]], group_key: str, columns: List[str]) -> pd.DataFrame:
+    frame = pd.DataFrame(list(rows))
+    if frame.empty:
+        return pd.DataFrame(columns=columns)
+    for metric in MEAN_TABLE_METRICS:
+        frame[metric] = pd.to_numeric(frame.get(metric, pd.Series(dtype=float)), errors="coerce")
+    if "Dataset" not in frame.columns:
+        frame["Dataset"] = "unknown"
+    dataset_level = (
+        frame.groupby([group_key, "Dataset"], dropna=True)[MEAN_TABLE_METRICS]
+        .mean(numeric_only=True)
+        .reset_index()
+    )
+    rows_out: List[Dict[str, Any]] = []
+    for group_name, group_frame in dataset_level.groupby(group_key, dropna=True):
+        source_rows = frame[frame[group_key].astype(str).eq(str(group_name))]
+        row: Dict[str, Any] = {
+            group_key: group_name,
+            "Runs": int(len(source_rows)),
+            "Datasets": int(group_frame["Dataset"].nunique()),
+        }
+        for metric in MEAN_TABLE_METRICS:
+            values = pd.to_numeric(group_frame[metric], errors="coerce").dropna()
+            row[f"Mean {metric}"] = float(values.mean()) if not values.empty else float("nan")
+            row[f"Std {metric}"] = float(values.std()) if len(values) > 1 else 0.0 if len(values) == 1 else float("nan")
+        rows_out.append(row)
+    return pd.DataFrame(rows_out).reindex(columns=columns)
+
+
 def _table2_entry(
     row: Dict[str, Any],
     group: str,
@@ -885,6 +938,47 @@ def _tables_for_dataset(dataset: str, metrics: pd.DataFrame, timing: pd.DataFram
     }
 
 
+def _table7_loss_mean(metrics: pd.DataFrame) -> pd.DataFrame:
+    if metrics.empty:
+        return pd.DataFrame(columns=TABLE7_COLUMNS)
+    frame = _test_rows(_preferred_metrics_frame(metrics))
+    rows: List[Dict[str, Any]] = []
+    for _, row_series in frame.iterrows():
+        row = row_series.to_dict()
+        if str(row.get("phase") or "").lower() != "student" or not _row_prune_method(row):
+            continue
+        entry = _metric_row(row, "Method", _loss_method(row))
+        entry["Dataset"] = _clean_text(row.get("dataset")) or "unknown"
+        rows.append(entry)
+    table = _mean_metric_table(rows, "Method", TABLE7_COLUMNS)
+    return table.sort_values("Method").reset_index(drop=True) if not table.empty else table
+
+
+def _table8_ablation_group_mean(metrics: pd.DataFrame) -> pd.DataFrame:
+    if metrics.empty:
+        return pd.DataFrame(columns=TABLE8_COLUMNS)
+    frame = _test_rows(_preferred_metrics_frame(metrics))
+    rows: List[Dict[str, Any]] = []
+    for _, row_series in frame.iterrows():
+        row = row_series.to_dict()
+        if str(row.get("phase") or "").lower() != "student":
+            continue
+        raw_method = _row_prune_method(row)
+        if not raw_method or _row_loss_scope(row) not in {"", PGD_LOSS_TAG}:
+            continue
+        component = _method_group_component(raw_method)
+        if component == "Other":
+            continue
+        entry = _metric_row(row, "Component", component)
+        entry["Dataset"] = _clean_text(row.get("dataset")) or "unknown"
+        rows.append(entry)
+    table = _mean_metric_table(rows, "Component", TABLE8_COLUMNS)
+    order = {"S1-S4 Blueprint": 0, "S5-S8 Middle Conv2": 1, "S9-S12 Full Block": 2}
+    if not table.empty:
+        table = table.assign(_order=table["Component"].map(order).fillna(99)).sort_values("_order").drop(columns="_order").reset_index(drop=True)
+    return table
+
+
 def _mean_std_table(all_tables: List[pd.DataFrame]) -> pd.DataFrame:
     frames = [frame.rename(columns={"Model": "Method", "Component": "Method"}) for frame in all_tables if not frame.empty]
     if not frames:
@@ -974,6 +1068,8 @@ def main() -> int:
     if metrics.empty and timing.empty:
         logging.warning("No outputs found. Empty statistics folder is still prepared at %s", save_root)
         _mean_std_table([]).to_csv(save_root / "table_mean_std_across_datasets.csv", index=False)
+        pd.DataFrame(columns=TABLE7_COLUMNS).to_csv(save_root / "table7_loss_mean.csv", index=False)
+        pd.DataFrame(columns=TABLE8_COLUMNS).to_csv(save_root / "table8_ablation_mean.csv", index=False)
         return 0
 
     raw_datasets = set(metrics.get("dataset", pd.Series(dtype=str)).dropna().astype(str)) | set(timing.get("dataset", pd.Series(dtype=str)).dropna().astype(str))
@@ -1014,6 +1110,18 @@ def main() -> int:
     logging.info("Processing table: table_mean_std_across_datasets.csv rows=%d -> %s", len(mean_std), mean_std_path)
     mean_std.to_csv(mean_std_path, index=False)
     logging.info("Saved table: %s", mean_std_path)
+
+    table7 = _table7_loss_mean(metrics)
+    table7_path = save_root / "table7_loss_mean.csv"
+    logging.info("Processing table: table7_loss_mean.csv rows=%d -> %s", len(table7), table7_path)
+    table7.to_csv(table7_path, index=False)
+    logging.info("Saved table: %s", table7_path)
+
+    table8 = _table8_ablation_group_mean(metrics)
+    table8_path = save_root / "table8_ablation_mean.csv"
+    logging.info("Processing table: table8_ablation_mean.csv rows=%d -> %s", len(table8), table8_path)
+    table8.to_csv(table8_path, index=False)
+    logging.info("Saved table: %s", table8_path)
     return 0
 
 
