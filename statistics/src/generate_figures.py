@@ -590,6 +590,16 @@ def _find_dataset_files(outputs_root: Path, dataset: str, filename: str) -> List
     return fallback
 
 
+def _find_figure23_files(outputs_root: Path, dataset: str, filename: str) -> List[Path]:
+    preferred_root = _pgd_focus_root(outputs_root, dataset)
+    if preferred_root.exists():
+        preferred = [path for path in preferred_root.rglob(filename)]
+        if preferred:
+            logging.info("Found %d Figure 23 files for %s/%s under %s", len(preferred), dataset, filename, preferred_root)
+            return preferred
+    return _find_dataset_files(outputs_root, dataset, filename)
+
+
 def _find_teacher_channel_files(outputs_root: Path, dataset: str, filenames: Sequence[str]) -> List[Path]:
     teacher_root = _pgd_teacher_phase_root(outputs_root, dataset)
     if not teacher_root.exists():
@@ -866,6 +876,13 @@ def _save_group_threshold_figures(details: pd.DataFrame, summaries: pd.DataFrame
         _save_pdf(fig, path)
 
 
+def _unique_source_paths(frame: pd.DataFrame) -> str:
+    if frame.empty or "source_path" not in frame.columns:
+        return ""
+    sources = sorted({_clean_text(value) for value in frame["source_path"].dropna().tolist() if _clean_text(value)})
+    return " | ".join(sources)
+
+
 def _threshold_demo_panels(details: pd.DataFrame, summaries: pd.DataFrame) -> tuple[str, str, List[Dict[str, object]]] | None:
     if details.empty or summaries.empty or "importance" not in details.columns or "pruning_threshold" not in summaries.columns:
         return None
@@ -873,6 +890,7 @@ def _threshold_demo_panels(details: pd.DataFrame, summaries: pd.DataFrame) -> tu
     method_series_details = details.get("prune_method", pd.Series([""] * len(details), index=details.index)).astype(str).str.lower()
     method_series_summaries = summaries.get("prune_method", pd.Series([""] * len(summaries), index=summaries.index)).astype(str).str.lower()
     role_candidates = ["stage_output", "conv2_output_to_conv3_input", "conv3_output", "conv1_output", "conv2_output", ""]
+    best_result: tuple[int, str, str, List[Dict[str, object]]] | None = None
 
     for role in role_candidates:
         role_details = details.copy()
@@ -899,8 +917,10 @@ def _threshold_demo_panels(details: pd.DataFrame, summaries: pd.DataFrame) -> tu
             for method, label in methods:
                 detail_mask = method_series_details.reindex(role_details.index).eq(method) & role_details["layer_name"].astype(str).eq(layer)
                 summary_mask = method_series_summaries.reindex(role_summaries.index).eq(method) & role_summaries["layer_name"].astype(str).eq(layer)
-                values = pd.to_numeric(role_details[detail_mask]["importance"], errors="coerce").dropna().to_numpy()
-                thresholds = pd.to_numeric(role_summaries[summary_mask]["pruning_threshold"], errors="coerce").dropna()
+                detail_rows = role_details[detail_mask]
+                summary_rows = role_summaries[summary_mask]
+                values = pd.to_numeric(detail_rows["importance"], errors="coerce").dropna().to_numpy()
+                thresholds = pd.to_numeric(summary_rows["pruning_threshold"], errors="coerce").dropna()
                 if values.size == 0 or thresholds.empty:
                     valid = False
                     break
@@ -912,11 +932,141 @@ def _threshold_demo_panels(details: pd.DataFrame, summaries: pd.DataFrame) -> tu
                         "plot_role": role or "all",
                         "values": values,
                         "threshold": float(thresholds.median()),
+                        "detail_source_paths": _unique_source_paths(detail_rows),
+                        "summary_source_paths": _unique_source_paths(summary_rows),
+                        "threshold_count": int(thresholds.size),
                     }
                 )
             if valid:
-                return layer, role or "all", panels
-    return None
+                score = min(int(np.asarray(panel["values"]).size) for panel in panels)
+                if best_result is None or score > best_result[0]:
+                    best_result = (score, layer, role or "all", panels)
+    if best_result is None:
+        return None
+    _, layer, role, panels = best_result
+    return layer, role, panels
+
+
+def _normalize01(values: np.ndarray) -> np.ndarray:
+    values = np.asarray(values, dtype=float)
+    if values.size == 0:
+        return values
+    low = float(np.nanmin(values))
+    high = float(np.nanmax(values))
+    if not np.isfinite(low) or not np.isfinite(high) or high - low < 1e-12:
+        return np.zeros_like(values, dtype=float)
+    return (values - low) / (high - low)
+
+
+def _normal_pdf(x: np.ndarray, mean: float, variance: float) -> np.ndarray:
+    variance = max(float(variance), 1e-12)
+    scale = np.sqrt(2.0 * np.pi * variance)
+    return np.exp(-0.5 * ((x - float(mean)) ** 2) / variance) / scale
+
+
+def _gmm_density_curves(values: np.ndarray):
+    values = np.asarray(values, dtype=float)
+    values = values[np.isfinite(values)]
+    if values.size < 3 or np.allclose(values, values[0]):
+        return None
+    try:
+        from sklearn.mixture import GaussianMixture
+    except ImportError:
+        return None
+
+    try:
+        model = GaussianMixture(n_components=2, random_state=42)
+        model.fit(values.reshape(-1, 1))
+        grid = np.linspace(float(values.min()), float(values.max()), 300)
+        means = model.means_.reshape(-1)
+        variances = model.covariances_.reshape(-1)
+        weights = model.weights_.reshape(-1)
+    except Exception as error:
+        logging.warning("Could not fit GMM curve for Figure 23: %s", error)
+        return None
+    order = np.argsort(means)
+    components = [weights[index] * _normal_pdf(grid, means[index], variances[index]) for index in order]
+    mixture = np.sum(components, axis=0)
+    return grid, components, mixture
+
+
+def _gmm_threshold_from_values(values: np.ndarray) -> float:
+    values = np.asarray(values, dtype=float)
+    values = values[np.isfinite(values)]
+    if values.size < 3 or np.allclose(values, values[0]):
+        return float(values[0]) if values.size else np.nan
+    try:
+        from sklearn.mixture import GaussianMixture
+    except ImportError:
+        return np.nan
+
+    try:
+        model = GaussianMixture(n_components=2, random_state=42)
+        model.fit(values.reshape(-1, 1))
+    except Exception as error:
+        logging.warning("Could not recompute GMM threshold for Figure 23: %s", error)
+        return np.nan
+
+    means = model.means_.reshape(-1)
+    variances = model.covariances_.reshape(-1)
+    weights = model.weights_.reshape(-1)
+    order = np.argsort(means)
+    mu1, mu2 = float(means[order[0]]), float(means[order[1]])
+    var1, var2 = max(float(variances[order[0]]), 1e-12), max(float(variances[order[1]]), 1e-12)
+    w1, w2 = max(float(weights[order[0]]), 1e-12), max(float(weights[order[1]]), 1e-12)
+    sigma1 = np.sqrt(var1)
+    sigma2 = np.sqrt(var2)
+    a = 1.0 / (2.0 * var2) - 1.0 / (2.0 * var1)
+    b = mu1 / var1 - mu2 / var2
+    c = (mu2**2) / (2.0 * var2) - (mu1**2) / (2.0 * var1) + np.log((w2 * sigma1) / (w1 * sigma2))
+    if abs(a) < 1e-12:
+        return float(0.5 * (mu1 + mu2)) if abs(b) < 1e-12 else float(-c / b)
+    roots = np.roots([a, b, c])
+    roots = np.real(roots[np.isreal(roots)])
+    valid = roots[(roots >= mu1) & (roots <= mu2)]
+    if len(valid) > 0:
+        return float(valid[0])
+    return float((mu1 * sigma2 + mu2 * sigma1) / (sigma1 + sigma2))
+
+
+def _otsu_between_class_curve(values: np.ndarray, num_bins: int = 256):
+    values = np.asarray(values, dtype=float)
+    values = values[np.isfinite(values)]
+    if values.size < 3 or np.allclose(values, values[0]):
+        return None
+    hist, bin_edges = np.histogram(values, bins=num_bins)
+    hist = hist.astype(np.float64)
+    total = hist.sum()
+    if total <= 0:
+        return None
+    centers = (bin_edges[:-1] + bin_edges[1:]) / 2.0
+    prob = hist / total
+    omega = np.cumsum(prob)
+    mu = np.cumsum(prob * centers)
+    mu_t = mu[-1]
+    numerator = (mu_t * omega - mu) ** 2
+    denominator = omega * (1.0 - omega)
+    denominator[denominator == 0] = 1e-12
+    sigma_b2 = numerator / denominator
+    return centers, _normalize01(sigma_b2)
+
+
+def _otsu_threshold_from_values(values: np.ndarray, num_bins: int = 256) -> float:
+    curve = _otsu_between_class_curve(values, num_bins=num_bins)
+    if curve is None:
+        values = np.asarray(values, dtype=float)
+        values = values[np.isfinite(values)]
+        return float(values[0]) if values.size else np.nan
+    centers, variance_curve = curve
+    return float(centers[int(np.argmax(variance_curve))])
+
+
+def _hist_bins(values: np.ndarray) -> int:
+    values = np.asarray(values, dtype=float)
+    values = values[np.isfinite(values)]
+    if values.size <= 1:
+        return 1
+    return max(8, min(40, int(np.sqrt(values.size) * 2)))
 
 
 def figure23_threshold_selection(outputs_root: Path, save_root: Path) -> None:
@@ -928,8 +1078,8 @@ def figure23_threshold_selection(outputs_root: Path, save_root: Path) -> None:
     selected_panels: List[Dict[str, object]] = []
 
     for dataset in _datasets(outputs_root, save_root):
-        details = _concat_csvs(_find_dataset_files(outputs_root, dataset, "channel_level_detail.csv"))
-        summaries = _concat_csvs(_find_dataset_files(outputs_root, dataset, "pruning_summary.csv"))
+        details = _concat_csvs(_find_figure23_files(outputs_root, dataset, "channel_level_detail.csv"))
+        summaries = _concat_csvs(_find_figure23_files(outputs_root, dataset, "pruning_summary.csv"))
         result = _threshold_demo_panels(details, summaries)
         if result is None:
             continue
@@ -941,42 +1091,155 @@ def figure23_threshold_selection(outputs_root: Path, save_root: Path) -> None:
         _placeholder(path, "No channel-importance threshold data found for Kneedle, GMM, and Otsu.")
         return
 
-    fig, axes = plt.subplots(1, 3, figsize=(12.0, 3.8), sharey=False)
+    fig, axes = plt.subplots(1, 3, figsize=(12.8, 4.25), sharey=False)
     colors = {"Kneedle": "#2ca02c", "GMM": "#9467bd", "Otsu": "#ff7f0e"}
     for ax, panel in zip(np.ravel(axes), selected_panels):
-        values = np.sort(np.asarray(panel["values"], dtype=float))
-        x = np.arange(1, values.size + 1)
+        values = np.asarray(panel["values"], dtype=float)
+        values = values[np.isfinite(values)]
+        if values.size == 0:
+            continue
         threshold = float(panel["threshold"])
+        method = str(panel["method"])
         label = str(panel["label"])
+        method_color = colors.get(label, "#d62728")
         closest_index = int(np.argmin(np.abs(values - threshold)))
-        ax.scatter(x, values, s=13, color="#4c78a8", alpha=0.72, linewidths=0)
-        ax.axhline(threshold, color=colors.get(label, "#d62728"), linewidth=1.6, linestyle="--", label="Threshold")
-        ax.scatter(
-            [x[closest_index]],
-            [values[closest_index]],
-            s=48,
-            color=colors.get(label, "#d62728"),
-            edgecolor="white",
-            linewidth=0.7,
-            zorder=3,
+        closest_value = float(values[closest_index])
+        criterion_value = np.nan
+        recomputed_threshold = np.nan
+        selection_view = ""
+
+        if method == "kneedle":
+            sorted_values = np.sort(values)
+            x_norm = np.linspace(0.0, 1.0, sorted_values.size)
+            y_norm = _normalize01(sorted_values)
+            diff = y_norm - x_norm
+            knee_index = int(np.argmax(diff)) if diff.size else 0
+            criterion_value = float(diff[knee_index]) if diff.size else np.nan
+            recomputed_threshold = float(sorted_values[knee_index]) if sorted_values.size else np.nan
+            value_span = float(values.max() - values.min())
+            if value_span < 1e-12:
+                threshold_norm = 0.0
+            else:
+                threshold_norm = float(np.clip((threshold - values.min()) / value_span, 0.0, 1.0))
+            ax.plot(x_norm, y_norm, color="#4c78a8", linewidth=1.8, label="Sorted importance")
+            ax.plot([0.0, 1.0], [0.0, 1.0], color="#7f7f7f", linewidth=1.1, linestyle=":", label="Reference")
+            ax.plot(
+                [x_norm[knee_index], x_norm[knee_index]],
+                [x_norm[knee_index], y_norm[knee_index]],
+                color=method_color,
+                linewidth=2.0,
+                label="Max gap",
+            )
+            ax.scatter(
+                [x_norm[knee_index]],
+                [threshold_norm],
+                s=52,
+                color=method_color,
+                edgecolor="white",
+                linewidth=0.8,
+                zorder=3,
+                label="Threshold",
+            )
+            ax.set_xlabel("Kneedle: normalized sorted index")
+            ax.set_ylabel("Normalized importance")
+            selection_view = "Maximize y - x on normalized sorted importance"
+            _legend_below_compact(ax, fontsize=6, max_rows=2)
+        elif method == "gmm":
+            bins = _hist_bins(values)
+            ax.hist(values, bins=bins, density=True, color="#4c78a8", alpha=0.34, label="Importance density")
+            curves = _gmm_density_curves(values)
+            if curves is not None:
+                grid, components, mixture = curves
+                for component_index, component in enumerate(components, start=1):
+                    ax.plot(grid, component, linewidth=1.4, linestyle="--", label=f"Gaussian {component_index}")
+                ax.plot(grid, mixture, color=method_color, linewidth=1.9, label="GMM mixture")
+            ax.axvline(threshold, color=method_color, linewidth=1.7, linestyle="--", label="Threshold")
+            ax.set_xlabel("GMM: channel importance")
+            ax.set_ylabel("Density")
+            recomputed_threshold = _gmm_threshold_from_values(values)
+            selection_view = "Intersection of two weighted Gaussian components"
+            _legend_below_compact(ax, fontsize=6, max_rows=2)
+        elif method == "otsu":
+            bins = _hist_bins(values)
+            ax.hist(values, bins=bins, density=True, color="#4c78a8", alpha=0.32, label="Importance density")
+            ax.axvline(threshold, color=method_color, linewidth=1.7, linestyle="--", label="Threshold")
+            ax.set_xlabel("Otsu: channel importance")
+            ax.set_ylabel("Density")
+            recomputed_threshold = _otsu_threshold_from_values(values)
+            selection_view = "Maximize between-class variance"
+            curve = _otsu_between_class_curve(values)
+            if curve is not None:
+                centers, variance_curve = curve
+                ax_var = ax.twinx()
+                ax_var.plot(centers, variance_curve, color=method_color, linewidth=1.9, label="Between-class variance")
+                ax_var.set_ylabel("Normalized variance")
+                handles, labels = ax.get_legend_handles_labels()
+                handles_var, labels_var = ax_var.get_legend_handles_labels()
+                all_handles = handles + handles_var
+                all_labels = labels + labels_var
+                ncol = min(len(all_labels), max(1, int(np.ceil(len(all_labels) / 2))))
+                ax.legend(
+                    all_handles,
+                    all_labels,
+                    loc="upper center",
+                    bbox_to_anchor=(0.5, -0.22),
+                    fontsize=6,
+                    frameon=True,
+                    framealpha=0.9,
+                    ncol=ncol,
+                    columnspacing=0.95,
+                    handlelength=1.7,
+                    borderaxespad=0.2,
+                )
+            else:
+                _legend_below_compact(ax, fontsize=6, max_rows=2)
+        else:
+            sorted_values = np.sort(values)
+            x = np.arange(1, sorted_values.size + 1)
+            ax.scatter(x, sorted_values, s=13, color="#4c78a8", alpha=0.72, linewidths=0)
+            ax.axhline(threshold, color=method_color, linewidth=1.6, linestyle="--", label="Threshold")
+            ax.set_xlabel("Sorted channel index")
+            ax.set_ylabel("Channel importance")
+            selection_view = "Threshold on sorted importance"
+            _legend_below_compact(ax, fontsize=6, max_rows=2)
+
+        threshold_abs_error = (
+            float(abs(threshold - recomputed_threshold))
+            if np.isfinite(threshold) and np.isfinite(recomputed_threshold)
+            else np.nan
         )
-        ax.set_xlabel(f"{label} channel rank")
+        if np.isfinite(threshold_abs_error) and threshold_abs_error > 1e-5:
+            logging.warning(
+                "Figure 23 threshold check differs for %s/%s/%s: CSV=%.8f, recomputed=%.8f",
+                selected_dataset,
+                method,
+                selected_layer,
+                threshold,
+                recomputed_threshold,
+            )
         ax.grid(alpha=0.25)
-        ax.legend(loc="lower right", fontsize=7, frameon=True, framealpha=0.9)
         metadata_rows.append(
             {
                 "dataset": selected_dataset,
                 "layer_name": selected_layer,
                 "plot_role": selected_role,
-                "method": str(panel["method"]),
+                "method": method,
+                "selection_view": selection_view,
+                "importance_source_column": "importance",
+                "threshold_source_column": "pruning_threshold",
+                "detail_source_paths": str(panel.get("detail_source_paths", "")),
+                "summary_source_paths": str(panel.get("summary_source_paths", "")),
                 "threshold": threshold,
+                "recomputed_threshold_from_importance": recomputed_threshold,
+                "threshold_abs_error": threshold_abs_error,
+                "threshold_rows_used": int(panel.get("threshold_count", 0)),
                 "num_channels": int(values.size),
-                "closest_importance": float(values[closest_index]),
+                "closest_importance": closest_value,
+                "criterion_value": criterion_value,
             }
         )
-    axes[0].set_ylabel("Channel importance")
     pd.DataFrame(metadata_rows).to_csv(save_root / "figure23_threshold_selection_methods.csv", index=False)
-    fig.tight_layout(w_pad=1.6)
+    fig.tight_layout(w_pad=1.6, rect=(0.0, 0.12, 1.0, 1.0))
     _save_pdf(fig, path)
 
 
