@@ -386,6 +386,50 @@ def _mean_metric_summary(frame: pd.DataFrame, group_cols: Sequence[str]) -> pd.D
     return summary.fillna({"Std Dice": 0.0, "Std Params (M)": 0.0}).sort_values("Sort").reset_index(drop=True)
 
 
+def _teacher_ratio_zero_points(outputs_root: Path, save_root: Path, group_order: Dict[str, int]) -> pd.DataFrame:
+    rows = []
+    for dataset in _datasets(outputs_root, save_root):
+        teacher_row = _best_test_row(outputs_root / "pgd_unet" / dataset / PGD_TEACHER_DIR / "1_teacher" / "metrics_summary.csv")
+        if teacher_row is None:
+            continue
+        rows.append(
+            {
+                "Dataset": dataset,
+                "Dice": _dice_from_row(teacher_row),
+                "Params (M)": _params_from_row(teacher_row),
+            }
+        )
+    teacher_frame = pd.DataFrame(rows)
+    if teacher_frame.empty:
+        return pd.DataFrame()
+    teacher_frame["Dice"] = pd.to_numeric(teacher_frame["Dice"], errors="coerce")
+    teacher_frame["Params (M)"] = pd.to_numeric(teacher_frame["Params (M)"], errors="coerce")
+    teacher_frame = teacher_frame.dropna(subset=["Dice"])
+    if teacher_frame.empty:
+        return pd.DataFrame()
+
+    dice_values = teacher_frame["Dice"].dropna()
+    param_values = teacher_frame["Params (M)"].dropna()
+    teacher_summary = {
+        "Static Ratio": 0.0,
+        "Mean Dice": float(dice_values.mean()),
+        "Std Dice": float(dice_values.std()) if len(dice_values) > 1 else 0.0,
+        "Mean Params (M)": float(param_values.mean()) if not param_values.empty else float("nan"),
+        "Std Params (M)": float(param_values.std()) if len(param_values) > 1 else 0.0 if len(param_values) == 1 else float("nan"),
+        "Datasets": int(teacher_frame["Dataset"].nunique()),
+    }
+    return pd.DataFrame(
+        [
+            {
+                "Group": group,
+                "Sort": float(order) - 0.1,
+                **teacher_summary,
+            }
+            for group, order in group_order.items()
+        ]
+    )
+
+
 def _plot_params_dice_summary(frame: pd.DataFrame, path: Path, *, label_column: str = "Method") -> None:
     if frame.empty:
         _placeholder(path, "No valid mean Params/Dice rows found.")
@@ -1486,6 +1530,21 @@ def figure18_static_ratio_mean_dice(outputs_root: Path, save_root: Path) -> None
     raw_frame = _global_metric_rows(outputs_root, save_root, static_only=True)
     frame = _mean_metric_summary(raw_frame, ["Group", "Static Ratio"])
     frame = frame.dropna(subset=["Static Ratio"]) if not frame.empty else frame
+    group_order = {"S1-S4 Blueprint": 0, "S5-S8 Middle Conv2": 1, "S9-S12 Full Block": 2}
+    teacher_points = _teacher_ratio_zero_points(outputs_root, save_root, group_order)
+    if not teacher_points.empty:
+        if not frame.empty:
+            ratio_values = pd.to_numeric(frame["Static Ratio"], errors="coerce")
+            teacher_groups = frame["Group"].isin(group_order)
+            ratio_zero = ratio_values.sub(0.0).abs().lt(1e-9)
+            frame = frame[~(teacher_groups & ratio_zero)].copy()
+        frame = pd.concat([teacher_points, frame], ignore_index=True)
+        frame = (
+            frame.assign(_group_order=frame["Group"].map(group_order).fillna(99))
+            .sort_values(["_group_order", "Static Ratio"])
+            .drop(columns="_group_order")
+            .reset_index(drop=True)
+        )
     if frame.empty:
         _placeholder(path, "No valid static-ratio Dice rows found for Figure 18.")
         return
