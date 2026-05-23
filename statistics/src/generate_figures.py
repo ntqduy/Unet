@@ -1725,14 +1725,51 @@ def figure7_training(outputs_root: Path, dataset: str, dataset_dir: Path) -> Non
         _save_pdf(fig, dataset_dir / "figure7_training_curve.pdf")
 
 
-def _read_image(path_value) -> np.ndarray | None:
+def _read_image(path_value, base_dir: Path | None = None) -> np.ndarray | None:
     try:
-        path = Path(str(path_value))
-        if not path.is_file():
+        text = _clean_text(path_value)
+        if not text:
             return None
-        return mpimg.imread(path)
+        candidates: List[Path] = []
+        for variant in dict.fromkeys([text, text.replace("\\", "/")]):
+            path = Path(variant)
+            candidates.append(path)
+            if base_dir is not None and not path.is_absolute():
+                candidates.append(base_dir / path)
+        for path in candidates:
+            if path.is_file():
+                return mpimg.imread(path)
+        return None
     except Exception:
         return None
+
+
+def _row_base_dirs(row: Dict[str, object]) -> List[Path]:
+    base_dirs: List[Path] = []
+    for key in ("csv_source_path", "source_path"):
+        source = _clean_text(row.get(key))
+        if not source:
+            continue
+        source_path = Path(source)
+        base_dir = source_path.parent if source_path.suffix else source_path
+        if base_dir not in base_dirs:
+            base_dirs.append(base_dir)
+    return base_dirs
+
+
+def _read_row_image(row: Dict[str, object] | pd.Series | None, key: str) -> np.ndarray | None:
+    if row is None:
+        return None
+    if isinstance(row, pd.Series):
+        row = row.to_dict()
+    image = _read_image(row.get(key))
+    if image is not None:
+        return image
+    for base_dir in _row_base_dirs(row):
+        image = _read_image(row.get(key), base_dir=base_dir)
+        if image is not None:
+            return image
+    return None
 
 
 def _as_2d_mask(image: np.ndarray | None) -> np.ndarray | None:
@@ -1802,7 +1839,7 @@ def _row_for_sample(frame: pd.DataFrame, sample_id: str) -> Dict[str, object] | 
 
 
 def _row_prediction_is_drawable(row: Dict[str, object] | None) -> bool:
-    return row is not None and _read_image(row.get("prediction_path")) is not None
+    return row is not None and _read_row_image(row, "prediction_path") is not None
 
 
 def _path_leaf(value) -> str:
@@ -1846,7 +1883,7 @@ def _strict_gallery_sample(anchor_frame: pd.DataFrame, required_prediction_frame
         anchor_row = _row_for_sample(anchor_frame, sample_id)
         if anchor_row is None:
             continue
-        if _read_image(anchor_row.get("image_path")) is None or _read_image(anchor_row.get("mask_path")) is None:
+        if _read_row_image(anchor_row, "image_path") is None or _read_row_image(anchor_row, "mask_path") is None:
             continue
         if not _row_prediction_is_drawable(anchor_row):
             continue
@@ -1934,8 +1971,8 @@ def _prediction_gallery(outputs_root: Path, save_root: Path, spec: Dict[str, obj
         sample_id, image_source = strict_sample
 
         panels = [
-            _read_image(image_source.get("image_path")),
-            _read_image(image_source.get("mask_path")),
+            _read_row_image(image_source, "image_path"),
+            _read_row_image(image_source, "mask_path"),
         ]
         metadata_rows.extend(
             [
@@ -1968,7 +2005,7 @@ def _prediction_gallery(outputs_root: Path, save_root: Path, spec: Dict[str, obj
             ]
         )
         teacher_row = _matching_prediction_row(teacher_frame, sample_id, image_source)
-        panels.append(_read_image(teacher_row.get("prediction_path")) if teacher_row is not None else None)
+        panels.append(_read_row_image(teacher_row, "prediction_path") if teacher_row is not None else None)
         metadata_rows.append(
             {
                 "dataset": dataset,
@@ -1989,7 +2026,7 @@ def _prediction_gallery(outputs_root: Path, save_root: Path, spec: Dict[str, obj
 
         for raw_method, _, method_label in methods:
             row = _matching_prediction_row(method_frames[raw_method], sample_id, image_source)
-            panels.append(_read_image(row.get("prediction_path")) if row is not None else None)
+            panels.append(_read_row_image(row, "prediction_path") if row is not None else None)
             metadata_rows.append(
                 {
                     "dataset": dataset,
@@ -2053,22 +2090,50 @@ def figure8_visual(outputs_root: Path, dataset: str, dataset_dir: Path) -> None:
     if frame.empty or "prediction_path" not in frame.columns:
         logging.warning("Skip figure8 for %s because sample_metrics/predictions are missing.", dataset)
         return
-    frame = frame[frame["prediction_path"].astype(str).ne("NaN")]
+    frame = frame[~frame["prediction_path"].fillna("").astype(str).str.lower().isin({"", "nan", "none"})].copy()
     if frame.empty:
         logging.warning("Skip figure8 for %s because no prediction paths are available.", dataset)
         return
-    row = frame.iloc[(pd.to_numeric(frame["dice"], errors="coerce") - pd.to_numeric(frame["dice"], errors="coerce").median()).abs().argsort().iloc[0]]
-    sample_id = row["sample_id"]
-    sample_rows = frame[frame["sample_id"].astype(str).eq(str(sample_id))].head(4)
-    panels = [("Image", _read_image(row.get("image_path"))), ("GT", _read_image(row.get("mask_path")))]
-    for _, sample_row in sample_rows.iterrows():
-        panels.append((str(sample_row.get("method", "Prediction"))[:18], _read_image(sample_row.get("prediction_path"))))
-    panels = [(label, image) for label, image in panels if image is not None]
-    if len(panels) < 3:
-        logging.warning("Skip figure8 for %s because images cannot be loaded.", dataset)
+    id_col = _sample_id_column(frame)
+    if id_col is None:
+        logging.warning("Skip figure8 for %s because sample id column is missing.", dataset)
         return
-    fig, axes = plt.subplots(1, len(panels), figsize=(3.0 * len(panels), 3.2))
-    for ax, (label, image) in zip(np.ravel(axes), panels):
+    candidate_frame = frame.drop_duplicates(subset=[id_col], keep="first")
+    selected_panels: List[tuple[str, np.ndarray]] = []
+    selected_sample_id = ""
+    inspected: List[Dict[str, object]] = []
+    for _, row_series in candidate_frame.iterrows():
+        row = row_series.to_dict()
+        sample_id = _clean_text(row.get(id_col))
+        if not sample_id:
+            continue
+        sample_rows = frame[frame[id_col].astype(str).eq(str(sample_id))].head(4)
+        panels = [("Image", _read_row_image(row, "image_path")), ("GT", _read_row_image(row, "mask_path"))]
+        for _, sample_row_series in sample_rows.iterrows():
+            sample_row = sample_row_series.to_dict()
+            panels.append((str(sample_row.get("method", "Prediction"))[:18], _read_row_image(sample_row, "prediction_path")))
+        panels = [(label, image) for label, image in panels if image is not None]
+        inspected.append(
+            {
+                "sample_id": sample_id,
+                "source_path": row.get("csv_source_path", row.get("source_path", "")),
+                "image_path": row.get("image_path", ""),
+                "mask_path": row.get("mask_path", ""),
+                "prediction_path": row.get("prediction_path", ""),
+                "loaded_panels": len(panels),
+            }
+        )
+        if len(panels) >= 3:
+            selected_panels = panels
+            selected_sample_id = sample_id
+            break
+    if not selected_panels:
+        pd.DataFrame(inspected).to_csv(dataset_dir / "figure8_unloadable_samples.csv", index=False)
+        logging.warning("Skip figure8 for %s because images cannot be loaded. See %s", dataset, dataset_dir / "figure8_unloadable_samples.csv")
+        return
+    logging.info("Figure 8 selected sample for %s: %s", dataset, selected_sample_id)
+    fig, axes = plt.subplots(1, len(selected_panels), figsize=(3.0 * len(selected_panels), 3.2))
+    for ax, (label, image) in zip(np.ravel(axes), selected_panels):
         ax.imshow(image, cmap="gray")
         ax.axis("off")
     _save_pdf(fig, dataset_dir / "figure8_visual_comparison.pdf")
