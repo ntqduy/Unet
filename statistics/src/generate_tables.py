@@ -257,29 +257,29 @@ def _method_display(raw_method: str, ratio: Any = np.nan, *, kd: bool = False, s
     if summary:
         label = summary
     elif raw_method == "static":
-        label = f"S1 Static Blueprint r={_fmt_ratio(ratio)}"
+        label = f"Static Blueprint r={_fmt_ratio(ratio)}"
     elif raw_method == "kneedle":
-        label = "S2 Kneedle Blueprint"
+        label = "Kneedle Blueprint"
     elif raw_method == "otsu":
-        label = "S3 Otsu Blueprint"
+        label = "Otsu Blueprint"
     elif raw_method == "gmm":
-        label = "S4 GMM Blueprint"
+        label = "GMM Blueprint"
     elif raw_method == "middle_static":
-        label = f"S5 Middle-Static Conv2 r={_fmt_ratio(ratio)}"
+        label = f"Middle-Static Conv2 r={_fmt_ratio(ratio)}"
     elif raw_method == "middle_kneedle":
-        label = "S6 Middle-Kneedle Conv2"
+        label = "Middle-Kneedle Conv2"
     elif raw_method == "middle_otsu":
-        label = "S7 Middle-Otsu Conv2"
+        label = "Middle-Otsu Conv2"
     elif raw_method == "middle_gmm":
-        label = "S8 Middle-GMM Conv2"
+        label = "Middle-GMM Conv2"
     elif raw_method == "full_static":
-        label = f"S9 Full-Static Block r={_fmt_ratio(ratio)}"
+        label = f"Full-Static Block r={_fmt_ratio(ratio)}"
     elif raw_method == "full_kneedle":
-        label = "S10 Full-Kneedle Block"
+        label = "Full-Kneedle Block"
     elif raw_method == "full_otsu":
-        label = "S11 Full-Otsu Block"
+        label = "Full-Otsu Block"
     elif raw_method == "full_gmm":
-        label = "S12 Full-GMM Block"
+        label = "Full-GMM Block"
     else:
         label = raw_method.replace("_", " ").title() if raw_method else "Unknown"
     return f"{label} + KD" if kd and "KD" not in label else label
@@ -364,11 +364,11 @@ def _discover_method_dirs(
 def _method_group_component(raw_method: str) -> str:
     method = str(raw_method or "").lower()
     if method in CHANNEL_METHODS:
-        return "S1-S4 Blueprint"
+        return "Blueprint"
     if method in MIDDLE_METHODS:
-        return "S5-S8 Middle Conv2"
+        return "Middle Conv2"
     if method in FULL_METHODS:
-        return "S9-S12 Full Block"
+        return "Full Block"
     return "Other"
 
 
@@ -673,9 +673,9 @@ def _table4_group_ablation_rows(dataset_metrics: pd.DataFrame) -> List[Dict[str,
         ]
     rows = []
     for component, methods in (
-        ("S1-S4 Blueprint", CHANNEL_METHODS),
-        ("S5-S8 Middle Conv2", MIDDLE_METHODS),
-        ("S9-S12 Full Block", FULL_METHODS),
+        ("Blueprint", CHANNEL_METHODS),
+        ("Middle Conv2", MIDDLE_METHODS),
+        ("Full Block", FULL_METHODS),
     ):
         best = _best_by_dice([row for row in student_rows if _row_prune_method(row) in methods])
         if best:
@@ -1048,7 +1048,7 @@ def _table8_ablation_group_mean(metrics: pd.DataFrame) -> tuple[pd.DataFrame, pd
         entry = _metric_row(row, "Component", component)
         entry["Dataset"] = _clean_text(row.get("dataset")) or "unknown"
         rows.append(entry)
-    order = {"S1-S4 Blueprint": 0, "S5-S8 Middle Conv2": 1, "S9-S12 Full Block": 2}
+    order = {"Blueprint": 0, "Middle Conv2": 1, "Full Block": 2}
     numeric = _mean_metric_table(rows, "Component", TABLE8_NUMERIC_COLUMNS, MEAN_TABLE_METRICS)
     numeric = _sort_by_known_order(numeric, "Component", order)
     formatted = _format_mean_metric_table(numeric, "Component", MEAN_TABLE_METRICS, TABLE8_COLUMNS)
