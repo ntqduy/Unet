@@ -1805,6 +1805,37 @@ def _row_prediction_is_drawable(row: Dict[str, object] | None) -> bool:
     return row is not None and _read_image(row.get("prediction_path")) is not None
 
 
+def _path_leaf(value) -> str:
+    text = _clean_text(value)
+    return Path(text).name.lower() if text else ""
+
+
+def _row_matches_anchor_media(row: Dict[str, object], anchor_row: Dict[str, object]) -> bool:
+    for key in ("image_path", "mask_path"):
+        row_leaf = _path_leaf(row.get(key))
+        anchor_leaf = _path_leaf(anchor_row.get(key))
+        if row_leaf and anchor_leaf and row_leaf != anchor_leaf:
+            return False
+    return True
+
+
+def _matching_prediction_row(frame: pd.DataFrame, sample_id: str, anchor_row: Dict[str, object]) -> Dict[str, object] | None:
+    if frame.empty:
+        return None
+    id_col = _sample_id_column(frame)
+    if id_col is None:
+        return None
+    subset = frame[frame[id_col].astype(str).eq(str(sample_id))]
+    subset = _valid_prediction_frame(subset)
+    if subset.empty:
+        return None
+    for _, row_series in subset.iterrows():
+        row = row_series.to_dict()
+        if _row_prediction_is_drawable(row) and _row_matches_anchor_media(row, anchor_row):
+            return row
+    return None
+
+
 def _strict_gallery_sample(anchor_frame: pd.DataFrame, required_prediction_frames: Iterable[pd.DataFrame]) -> tuple[str, Dict[str, object]] | None:
     anchor_frame = _valid_prediction_frame(anchor_frame)
     id_col = _sample_id_column(anchor_frame)
@@ -1821,8 +1852,8 @@ def _strict_gallery_sample(anchor_frame: pd.DataFrame, required_prediction_frame
             continue
         valid = True
         for frame in required_prediction_frames:
-            row = _row_for_sample(frame, sample_id)
-            if not _row_prediction_is_drawable(row):
+            row = _matching_prediction_row(frame, sample_id, anchor_row)
+            if row is None:
                 valid = False
                 break
         if valid:
@@ -1936,7 +1967,7 @@ def _prediction_gallery(outputs_root: Path, save_root: Path, spec: Dict[str, obj
                 },
             ]
         )
-        teacher_row = _row_for_sample(teacher_frame, sample_id)
+        teacher_row = _matching_prediction_row(teacher_frame, sample_id, image_source)
         panels.append(_read_image(teacher_row.get("prediction_path")) if teacher_row is not None else None)
         metadata_rows.append(
             {
@@ -1957,7 +1988,7 @@ def _prediction_gallery(outputs_root: Path, save_root: Path, spec: Dict[str, obj
         )
 
         for raw_method, _, method_label in methods:
-            row = _row_for_sample(method_frames[raw_method], sample_id)
+            row = _matching_prediction_row(method_frames[raw_method], sample_id, image_source)
             panels.append(_read_image(row.get("prediction_path")) if row is not None else None)
             metadata_rows.append(
                 {
