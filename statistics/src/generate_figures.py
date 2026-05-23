@@ -19,7 +19,7 @@ except ImportError as error:  # pragma: no cover - dependency guard
 
 PGD_TEACHER_DIR = "unet_resnet152_teacher"
 PGD_LOSS_TAG = "loss_seg_kd"
-PGD_LOSS_TAGS = ("loss_seg_kd", "loss_seg_kd_sparsity", "loss_seg_only")
+PGD_LOSS_TAGS = ("loss_seg_kd", "loss_seg_only")
 CHANNEL_METHODS = {"static", "kneedle", "otsu", "gmm"}
 MIDDLE_METHODS = {"middle_static", "middle_kneedle", "middle_otsu", "middle_gmm"}
 FULL_METHODS = {"full_static", "full_kneedle", "full_otsu", "full_gmm"}
@@ -45,7 +45,14 @@ FIGURE15_FALLBACK_METHOD_DIRS = [
 
 def _safe_float(value, default: float = np.nan) -> float:
     try:
-        if value in ("", None):
+        if value is None:
+            return default
+        try:
+            if pd.isna(value):
+                return default
+        except (TypeError, ValueError):
+            pass
+        if value == "":
             return default
         return float(value)
     except (TypeError, ValueError):
@@ -146,10 +153,11 @@ def _best_test_row(path: Path) -> pd.Series | None:
         test_frame = frame[frame["split"].fillna("").astype(str).str.lower().eq("test")]
         if not test_frame.empty:
             frame = test_frame
-    if "dice" not in frame.columns:
+    dice_col = _first_existing_column(frame, ("dice", "Dice", "test_dice", "val_dice", "val_macro_dice"))
+    if dice_col is None:
         logging.warning("Figure 15 metrics CSV has no dice column: %s", path)
         return None
-    scores = pd.to_numeric(frame["dice"], errors="coerce").fillna(-np.inf)
+    scores = pd.to_numeric(frame[dice_col], errors="coerce").fillna(-np.inf)
     if scores.empty or float(scores.max()) == -np.inf:
         return None
     return frame.loc[scores.idxmax()]
@@ -160,6 +168,54 @@ def _params_to_millions(value) -> float:
     if np.isnan(number):
         return number
     return number / 1e6 if abs(number) > 1e5 else number
+
+
+def _first_existing_column(frame: pd.DataFrame, candidates: Sequence[str]) -> str | None:
+    for column in candidates:
+        if column in frame.columns:
+            return column
+    lower_lookup = {str(column).lower(): column for column in frame.columns}
+    for column in candidates:
+        match = lower_lookup.get(str(column).lower())
+        if match is not None:
+            return match
+    return None
+
+
+def _row_value(row, candidates: Sequence[str], default=np.nan):
+    for key in candidates:
+        try:
+            value = row.get(key)
+        except AttributeError:
+            value = None
+        if value is None:
+            continue
+        try:
+            if pd.isna(value):
+                continue
+        except (TypeError, ValueError):
+            pass
+        if value == "":
+            continue
+        number = _safe_float(value)
+        if not np.isnan(number):
+            return number
+    return default
+
+
+def _params_from_row(row) -> float:
+    value = _row_value(row, ("params", "Params", "parameters", "num_params", "Params (M)"))
+    if np.isnan(value):
+        return value
+    if "Params (M)" in getattr(row, "index", []):
+        params_m = _safe_float(row.get("Params (M)"))
+        if not np.isnan(params_m):
+            return params_m
+    return _params_to_millions(value)
+
+
+def _dice_from_row(row) -> float:
+    return _row_value(row, ("dice", "Dice", "val_dice", "val_macro_dice", "test_dice"))
 
 
 def _method_sort_key(raw_method: str, ratio: float) -> tuple[int, float, str]:
@@ -186,7 +242,9 @@ def _method_sort_key(raw_method: str, ratio: float) -> tuple[int, float, str]:
 
 def _figure15_method_dirs(outputs_root: Path, dataset: str) -> List[tuple[str, Path]]:
     base_root = outputs_root / "pgd_unet" / dataset / PGD_TEACHER_DIR
-    loss_roots = [base_root / tag for tag in PGD_LOSS_TAGS if (base_root / tag).is_dir()]
+    loss_roots = [base_root / PGD_LOSS_TAG] if (base_root / PGD_LOSS_TAG).is_dir() else []
+    if not loss_roots:
+        loss_roots = [base_root / tag for tag in PGD_LOSS_TAGS if (base_root / tag).is_dir()]
     if not loss_roots:
         return FIGURE15_FALLBACK_METHOD_DIRS
 
@@ -554,7 +612,6 @@ def _save_group_threshold_figures(details: pd.DataFrame, summaries: pd.DataFrame
                 if x_low <= value <= x_high:
                     ax.axvline(value, linewidth=1.7, label=_display_method(method), **threshold_styles.get(family, {}))
         ax.set_xlim(x_low, x_high)
-        ax.set_title(title)
         ax.set_xlabel("Channel importance")
         ax.set_ylabel("Number of channels")
         if ax.get_legend_handles_labels()[0]:
@@ -621,7 +678,6 @@ def figure5_layerwise(outputs_root: Path, dataset: str, dataset_dir: Path) -> No
         plt.close(fig)
         _placeholder(path, f"No S1-S12 pruning rows found for {dataset}.")
         return
-    fig.suptitle("Figure 5. Pruning ratio by pruning group", y=0.995, fontsize=12)
     fig.tight_layout()
     _save_pdf(fig, path)
 
@@ -648,6 +704,8 @@ def _plot_pruning_ratio_group(ax, frame: pd.DataFrame, *, title: str, xlabel: st
         if "plot_index" in group.columns:
             group = group.assign(_plot_index=pd.to_numeric(group["plot_index"], errors="coerce")).sort_values(["_plot_index", "layer_name"], na_position="last")
         ratios = pd.to_numeric(group["actual_prune_ratio"], errors="coerce").dropna().to_numpy()
+        if str(method).endswith("static") and not np.isnan(_safe_float(ratio)) and ratios.size:
+            ratios = np.full_like(ratios, fill_value=float(ratio), dtype=float)
         if ratios.size == 0:
             continue
         label = _display_method(method, ratio)
@@ -658,7 +716,6 @@ def _plot_pruning_ratio_group(ax, frame: pd.DataFrame, *, title: str, xlabel: st
             label=label,
             color=colors[index % len(colors)] if colors else None,
         )
-    ax.set_title(title)
     ax.set_xlabel(xlabel)
     ax.set_ylabel("Pruning ratio")
     ax.set_xticks([])
@@ -752,34 +809,138 @@ def figure6_tradeoff(dataset_dir: Path) -> None:
 
     ax.set_xlabel(xlabel)
     ax.set_ylabel("Dice after fine-tuning")
-    ax.set_title("Accuracy-efficiency trade-off after student fine-tuning")
     ax.grid(alpha=0.25)
     ax.legend(loc="lower right", fontsize=7, frameon=True, framealpha=0.9)
     _save_pdf(fig, path)
 
 
+def _student_dirs_for_loss(outputs_root: Path, dataset: str, loss_tag: str) -> List[Path]:
+    loss_root = outputs_root / "pgd_unet" / dataset / PGD_TEACHER_DIR / loss_tag
+    if not loss_root.is_dir():
+        return []
+    discovered = []
+    for output_dir in loss_root.iterdir():
+        if not output_dir.is_dir() or not output_dir.name.startswith("output_"):
+            continue
+        student_dir = output_dir / "3_student"
+        if not student_dir.is_dir():
+            continue
+        raw_method, ratio = _method_from_output_dir(output_dir)
+        discovered.append((_method_sort_key(raw_method, ratio), student_dir))
+    return [student_dir for _, student_dir in sorted(discovered, key=lambda item: item[0])]
+
+
+def _curve_paths_for_student_dir(student_dir: Path) -> List[Path]:
+    return [
+        student_dir / "metrics" / "student_epoch_diagnostics.csv",
+        student_dir / "checkpoints" / "train_log.csv",
+        student_dir / "metrics_summary.csv",
+        student_dir / "metrics" / "student_metrics.csv",
+    ]
+
+
+def _training_curve_frame(path: Path) -> pd.DataFrame:
+    frame = _read_csv(path)
+    if frame.empty:
+        return pd.DataFrame()
+    if "phase" in frame.columns:
+        student = frame[frame["phase"].fillna("").astype(str).str.lower().eq("student")]
+        if not student.empty:
+            frame = student
+    if "split" in frame.columns:
+        val_frame = frame[frame["split"].fillna("").astype(str).str.lower().eq("val")]
+        if not val_frame.empty:
+            frame = val_frame
+    if "checkpoint_name" in frame.columns:
+        last_rows = frame[frame["checkpoint_name"].fillna("").astype(str).eq("last.pth")]
+        if not last_rows.empty:
+            frame = last_rows
+    dice_col = _first_existing_column(frame, ("val_macro_dice", "val_dice", "best_val_dice", "dice", "Dice"))
+    train_loss_col = _first_existing_column(frame, ("train_total_loss", "total_loss", "train_seg_loss"))
+    if dice_col is None and train_loss_col is None:
+        return pd.DataFrame()
+    frame = frame.copy()
+    frame["_epoch"] = pd.to_numeric(frame.get("epoch", pd.Series(range(1, len(frame) + 1))), errors="coerce")
+    if dice_col is not None:
+        frame["_dice"] = pd.to_numeric(frame[dice_col], errors="coerce")
+    if train_loss_col is not None:
+        frame["_train_loss"] = pd.to_numeric(frame[train_loss_col], errors="coerce")
+    required = ["_epoch"]
+    if dice_col is not None:
+        required.append("_dice")
+    if train_loss_col is not None:
+        required.append("_train_loss")
+    frame = frame.dropna(subset=required).sort_values("_epoch")
+    return frame.drop_duplicates(subset=["_epoch"], keep="last")
+
+
+def _select_training_curve(outputs_root: Path, dataset: str, loss_tag: str) -> tuple[Path | None, pd.DataFrame]:
+    base_root = outputs_root / "pgd_unet" / dataset / PGD_TEACHER_DIR / loss_tag
+    preferred_dir = base_root / "output_s2_kneedle_auto_no" / "3_student"
+    candidate_paths = []
+    if preferred_dir.is_dir():
+        candidate_paths.extend(_curve_paths_for_student_dir(preferred_dir))
+    for student_dir in _student_dirs_for_loss(outputs_root, dataset, loss_tag):
+        candidate_paths.extend(_curve_paths_for_student_dir(student_dir))
+
+    seen = set()
+    best_path: Path | None = None
+    best_frame = pd.DataFrame()
+    best_score = (-1, -np.inf)
+    for candidate_path in candidate_paths:
+        if candidate_path in seen or not candidate_path.is_file():
+            continue
+        seen.add(candidate_path)
+        frame = _training_curve_frame(candidate_path)
+        if frame.empty:
+            continue
+        final_dice = float(frame["_dice"].dropna().iloc[-1]) if "_dice" in frame and frame["_dice"].dropna().size else -np.inf
+        score = (len(frame), final_dice)
+        if best_path is None or score > best_score:
+            best_path = candidate_path
+            best_frame = frame
+            best_score = score
+    return best_path, best_frame
+
+
 def figure7_training(outputs_root: Path, dataset: str, dataset_dir: Path) -> None:
-    frame = _concat_csvs(_find_dataset_files(outputs_root, dataset, "student_epoch_diagnostics.csv") + _find_dataset_files(outputs_root, dataset, "train_log.csv"))
+    curve_path, frame = _select_training_curve(outputs_root, dataset, PGD_LOSS_TAG)
     if frame.empty:
         _placeholder(dataset_dir / "figure7_training_curve.pdf", f"No training log found for {dataset}.")
         return
-    epoch = pd.to_numeric(frame.get("epoch", pd.Series(range(1, len(frame) + 1))), errors="coerce")
-    if "train_total_loss" in frame.columns:
+    logging.info("Figure 7 training curve for %s uses %s", dataset, curve_path)
+    epoch = frame["_epoch"]
+    saved_loss = False
+    saved_dice = False
+    if "_train_loss" in frame.columns:
         fig, ax = plt.subplots(figsize=(7, 4.2))
-        ax.plot(epoch, _smooth(frame["train_total_loss"]), label="Training loss")
+        ax.plot(epoch, _smooth(frame["_train_loss"]), label="Training loss")
         ax.set_xlabel("Epoch")
         ax.set_ylabel("Training loss")
         ax.grid(alpha=0.25)
         ax.legend()
         _save_pdf(fig, dataset_dir / "figure7a_training_loss_curve.pdf")
-    if "val_macro_dice" in frame.columns:
+        saved_loss = True
+    if "_dice" in frame.columns:
         fig, ax = plt.subplots(figsize=(7, 4.2))
-        ax.plot(epoch, _smooth(frame["val_macro_dice"]), label="Validation Dice")
+        ax.plot(epoch, _smooth(frame["_dice"]), label="Validation Dice")
         ax.set_xlabel("Epoch")
         ax.set_ylabel("Validation Dice")
         ax.grid(alpha=0.25)
         ax.legend()
         _save_pdf(fig, dataset_dir / "figure7b_validation_dice_curve.pdf")
+        saved_dice = True
+    if saved_loss and saved_dice:
+        fig, axes = plt.subplots(2, 1, figsize=(7, 6.2), sharex=True)
+        axes[0].plot(epoch, _smooth(frame["_train_loss"]), label="Training loss", color="#4c78a8")
+        axes[0].set_ylabel("Training loss")
+        axes[0].grid(alpha=0.25)
+        axes[1].plot(epoch, _smooth(frame["_dice"]), label="Validation Dice", color="#f58518")
+        axes[1].set_xlabel("Epoch")
+        axes[1].set_ylabel("Validation Dice")
+        axes[1].grid(alpha=0.25)
+        fig.tight_layout()
+        _save_pdf(fig, dataset_dir / "figure7_training_curve.pdf")
 
 
 def _read_image(path_value) -> np.ndarray | None:
@@ -831,7 +992,6 @@ def figure8_visual(outputs_root: Path, dataset: str, dataset_dir: Path) -> None:
     fig, axes = plt.subplots(1, len(panels), figsize=(3.0 * len(panels), 3.2))
     for ax, (label, image) in zip(np.ravel(axes), panels):
         ax.imshow(image, cmap="gray")
-        ax.set_title(label if label in {"Image", "GT"} else "PR", fontsize=9)
         ax.axis("off")
     _save_pdf(fig, dataset_dir / "figure8_visual_comparison.pdf")
 
@@ -1171,8 +1331,8 @@ def figure15(outputs_root: Path, save_root: Path, dataset: str = FIGURE15_DATASE
         rows.append(
             {
                 "Method": label,
-                "Params (M)": _params_to_millions(row.get("params")),
-                "Dice": _safe_float(row.get("dice")),
+                "Params (M)": _params_from_row(row),
+                "Dice": _dice_from_row(row),
             }
         )
     frame = pd.DataFrame(rows, columns=["Method", "Params (M)", "Dice"]).dropna(subset=["Params (M)", "Dice"])
@@ -1186,7 +1346,7 @@ def figure15(outputs_root: Path, save_root: Path, dataset: str = FIGURE15_DATASE
     fig, ax_params = plt.subplots(figsize=(fig_width, 4.8))
     ax_dice = ax_params.twinx()
 
-    params_line = ax_params.plot(x, frame["Params (M)"], marker="o", linewidth=1.9, color="#4c78a8", label="Params (M)")
+    params_bar = ax_params.bar(x, frame["Params (M)"], width=0.58, color="#4c78a8", alpha=0.72, label="Params (M)")
     dice_line = ax_dice.plot(x, frame["Dice"], marker="s", linewidth=1.9, color="#f58518", label="Dice")
 
     ax_params.set_xlabel("Method")
@@ -1195,7 +1355,7 @@ def figure15(outputs_root: Path, save_root: Path, dataset: str = FIGURE15_DATASE
     ax_params.set_xticks(x)
     ax_params.set_xticklabels(_wrap_labels(labels, width=13), rotation=25, ha="right", fontsize=8)
     ax_params.grid(alpha=0.25, axis="y")
-    lines = params_line + dice_line
+    lines = [params_bar, *dice_line]
     ax_params.legend(lines, [line.get_label() for line in lines], loc="best", fontsize=8, frameon=True, framealpha=0.9)
     _save_pdf(fig, path)
 
@@ -1212,8 +1372,8 @@ def figure16(outputs_root: Path, save_root: Path, dataset: str = "cvc_clinicdb")
         rows.append(
             {
                 "Method": label,
-                "Params (M)": _params_to_millions(row.get("params")),
-                "Dice": _safe_float(row.get("dice")),
+                "Params (M)": _params_from_row(row),
+                "Dice": _dice_from_row(row),
             }
         )
 
@@ -1229,7 +1389,7 @@ def figure16(outputs_root: Path, save_root: Path, dataset: str = "cvc_clinicdb")
     fig, ax_params = plt.subplots(figsize=(fig_width, 5.0))
     ax_dice = ax_params.twinx()
 
-    params_line = ax_params.plot(x, frame["Params (M)"], marker="o", linewidth=1.9, color="#4c78a8", label="Params (M)")
+    params_bar = ax_params.bar(x, frame["Params (M)"], width=0.58, color="#4c78a8", alpha=0.72, label="Params (M)")
     dice_line = ax_dice.plot(x, frame["Dice"], marker="s", linewidth=1.9, color="#f58518", label="Dice")
 
     ax_params.set_xlabel("Method")
@@ -1238,7 +1398,7 @@ def figure16(outputs_root: Path, save_root: Path, dataset: str = "cvc_clinicdb")
     ax_params.set_xticks(x)
     ax_params.set_xticklabels(_wrap_labels(labels, width=13), rotation=25, ha="right", fontsize=8)
     ax_params.grid(alpha=0.25, axis="y")
-    lines = params_line + dice_line
+    lines = [params_bar, *dice_line]
     ax_params.legend(lines, [line.get_label() for line in lines], loc="best", fontsize=8, frameon=True, framealpha=0.9)
     _save_pdf(fig, path)
 
@@ -1282,16 +1442,15 @@ def _train_log_curve_from_path(path: Path) -> tuple[str | None, pd.DataFrame]:
 
 def figure17_kd_vs_seg(outputs_root: Path, dataset: str, dataset_dir: Path) -> None:
     path = dataset_dir / "figure17_kd_vs_seg_validation_dice.pdf"
-    logs = _find_dataset_files(outputs_root, dataset, "train_log.csv")
     curves: Dict[str, pd.DataFrame] = {}
     warnings = []
-    for log_path in logs:
-        label, frame = _train_log_curve_from_path(log_path)
-        if label is None or frame.empty:
+    for label, loss_tag in (("Seg only", "loss_seg_only"), ("Seg + KD", PGD_LOSS_TAG)):
+        curve_path, frame = _select_training_curve(outputs_root, dataset, loss_tag)
+        if frame.empty or "_dice" not in frame.columns:
+            logging.warning("Figure 17 missing curve for %s/%s under %s", dataset, label, loss_tag)
             continue
-        current = curves.get(label)
-        if current is None or len(frame) > len(current) or float(frame["_dice"].iloc[-1]) > float(current["_dice"].iloc[-1]):
-            curves[label] = frame
+        logging.info("Figure 17 %s curve for %s uses %s", label, dataset, curve_path)
+        curves[label] = frame
 
     fig, ax = plt.subplots(figsize=(7.4, 4.4))
     for label, color in (("Seg only", "#4c78a8"), ("Seg + KD", "#f58518")):
@@ -1307,7 +1466,6 @@ def figure17_kd_vs_seg(outputs_root: Path, dataset: str, dataset_dir: Path) -> N
         return
     ax.set_xlabel("Epoch")
     ax.set_ylabel("Validation Dice")
-    ax.set_title("Validation Dice: Segmentation Only vs Segmentation + KD")
     ax.grid(alpha=0.25)
     ax.legend(loc="best", fontsize=8, frameon=True, framealpha=0.9)
     if warnings:

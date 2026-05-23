@@ -15,7 +15,10 @@ except ImportError as error:  # pragma: no cover - dependency guard
 
 PGD_TEACHER_DIR = "unet_resnet152_teacher"
 PGD_LOSS_TAG = "loss_seg_kd"
-PGD_LOSS_TAGS = {"loss_seg_kd", "loss_seg_kd_sparsity"}
+PGD_LOSS_TAGS = {"loss_seg_kd", "loss_seg_only"}
+CHANNEL_METHODS = {"static", "kneedle", "otsu", "gmm"}
+MIDDLE_METHODS = {"middle_static", "middle_kneedle", "middle_otsu", "middle_gmm"}
+FULL_METHODS = {"full_static", "full_kneedle", "full_otsu", "full_gmm"}
 
 TABLE1_COLUMNS = ["Model", "Dice", "IoU", "HD95", "Params", "FLOPs", "FPS", "Inf (s)"]
 PERFORMANCE_COLUMNS = ["Dice", "IoU", "HD95", "Params", "FLOPs", "FPS", "Inf (s)", "Search Time (s)"]
@@ -141,11 +144,36 @@ def _read_json(path: Path) -> Dict[str, Any]:
 
 def _safe_float(value: Any) -> float:
     try:
-        if value in ("", None):
+        if value is None:
+            return float("nan")
+        try:
+            if pd.isna(value):
+                return float("nan")
+        except (TypeError, ValueError):
+            pass
+        if value == "":
             return float("nan")
         return float(value)
     except (TypeError, ValueError):
         return float("nan")
+
+
+def _row_number(row: Dict[str, Any], *keys: str) -> float:
+    for key in keys:
+        value = row.get(key)
+        if value is None:
+            continue
+        try:
+            if pd.isna(value):
+                continue
+        except (TypeError, ValueError):
+            pass
+        if value == "":
+            continue
+        number = _safe_float(value)
+        if not np.isnan(number):
+            return number
+    return float("nan")
 
 
 def _safe_int(value: Any, default: int = 0) -> int:
@@ -178,6 +206,14 @@ def _row_static_ratio(row: Dict[str, Any]) -> float:
             row.get("config_static_prune_ratio", row.get("pruning_ratio", row.get("prune_ratio"))),
         )
     )
+
+
+def _row_loss_scope(row: Dict[str, Any]) -> str:
+    return (
+        _clean_text(row.get("loss_scope"))
+        or _clean_text(row.get("loss_tag"))
+        or _clean_text(row.get("config_loss_tag"))
+    ).lower()
 
 
 def _method_display(raw_method: str, ratio: Any = np.nan, *, kd: bool = False, summary: str = "") -> str:
@@ -213,6 +249,93 @@ def _method_display(raw_method: str, ratio: Any = np.nan, *, kd: bool = False, s
     return f"{label} + KD" if kd and "KD" not in label else label
 
 
+def _method_from_output_dir(output_dir: Path) -> tuple[str, float]:
+    parts = output_dir.name.split("_")
+    if len(parts) >= 3 and parts[0] == "output" and parts[1].startswith("s") and parts[1][1:].isdigit():
+        parts = [parts[0], *parts[2:]]
+    if len(parts) >= 3 and parts[1] == "middle":
+        method = f"middle_{parts[2]}"
+        ratio = _safe_float(parts[3]) if len(parts) >= 5 and parts[3] != "auto" else np.nan
+        return method, ratio
+    if len(parts) >= 3 and parts[1] == "full":
+        method = f"full_{parts[2]}"
+        ratio = _safe_float(parts[3]) if len(parts) >= 5 and parts[3] != "auto" else np.nan
+        return method, ratio
+    if len(parts) >= 2 and parts[0] == "output":
+        method = parts[1]
+        ratio = _safe_float(parts[2]) if len(parts) >= 4 and parts[2] != "auto" else np.nan
+        return method, ratio
+    return output_dir.name, np.nan
+
+
+def _method_sort_key(raw_method: str, ratio: float) -> tuple[int, float, str]:
+    priorities = {
+        "static": 0,
+        "kneedle": 1,
+        "otsu": 2,
+        "gmm": 3,
+        "middle_static": 4,
+        "middle_kneedle": 5,
+        "middle_otsu": 6,
+        "middle_gmm": 7,
+        "full_static": 8,
+        "full_kneedle": 9,
+        "full_otsu": 10,
+        "full_gmm": 11,
+    }
+    method = str(raw_method or "").lower()
+    ratio_key = _safe_float(ratio)
+    if np.isnan(ratio_key):
+        ratio_key = float("inf")
+    return priorities.get(method, 99), ratio_key, method
+
+
+def _discover_method_dirs(
+    outputs_root: Path,
+    dataset: str,
+    phase_dir: str,
+    fallback_dirs: List[tuple[str, Path]],
+    *,
+    include_teacher: bool = False,
+) -> List[tuple[str, Path]]:
+    base_root = outputs_root / "pgd_unet" / dataset / PGD_TEACHER_DIR
+    loss_root = base_root / PGD_LOSS_TAG
+    discovered = []
+    if loss_root.is_dir():
+        for output_dir in loss_root.iterdir():
+            if not output_dir.is_dir() or not output_dir.name.startswith("output_"):
+                continue
+            phase_path = output_dir / phase_dir
+            if not phase_path.exists():
+                continue
+            raw_method, ratio = _method_from_output_dir(output_dir)
+            discovered.append(
+                (
+                    _method_sort_key(raw_method, ratio),
+                    _method_display(raw_method, ratio),
+                    Path(PGD_LOSS_TAG) / output_dir.name / phase_dir,
+                )
+            )
+    if not discovered:
+        return fallback_dirs
+    method_dirs = sorted(discovered, key=lambda item: item[0])
+    rows = [(label, relative_dir) for _, label, relative_dir in method_dirs]
+    if include_teacher:
+        return [("Teacher (UNet-ResNet152)", Path("1_teacher")), *rows]
+    return rows
+
+
+def _method_group_component(raw_method: str) -> str:
+    method = str(raw_method or "").lower()
+    if method in CHANNEL_METHODS:
+        return "S1-S4 Blueprint"
+    if method in MIDDLE_METHODS:
+        return "S5-S8 Middle Conv2"
+    if method in FULL_METHODS:
+        return "S9-S12 Full Block"
+    return "Other"
+
+
 def _metric_from_row(row: Dict[str, Any], name_key: str, name: str) -> Dict[str, Any]:
     metric = _metric_row(row, name_key, name)
     return metric
@@ -222,8 +345,8 @@ def _best_by_dice(rows: List[Dict[str, Any]]) -> Dict[str, Any] | None:
     if not rows:
         return None
     def score(item: Dict[str, Any]) -> tuple[float, float]:
-        dice = _safe_float(item.get("dice"))
-        hd95 = _safe_float(item.get("hd95"))
+        dice = _row_number(item, "dice", "Dice", "val_dice", "val_macro_dice", "test_dice")
+        hd95 = _row_number(item, "hd95", "HD95", "val_hd95", "test_hd95")
         return (-np.inf if np.isnan(dice) else dice, -np.inf if np.isnan(hd95) else -hd95)
 
     return max(rows, key=score)
@@ -366,14 +489,14 @@ def _test_rows(frame: pd.DataFrame) -> pd.DataFrame:
 def _metric_row(row: Dict[str, Any], name_key: str, name: str) -> Dict[str, Any]:
     return {
         name_key: name,
-        "Dice": _safe_float(row.get("dice")),
-        "IoU": _safe_float(row.get("iou")),
-        "HD95": _safe_float(row.get("hd95")),
-        "Params": _safe_float(row.get("params")),
-        "FLOPs": _safe_float(row.get("flops")),
-        "FPS": _safe_float(row.get("fps")),
-        "Inf (s)": _safe_float(row.get("inference_time_seconds", row.get("Inf (s)"))),
-        "Search Time (s)": _safe_float(row.get("search_time_seconds", row.get("Search Time (s)"))),
+        "Dice": _row_number(row, "dice", "Dice", "val_dice", "val_macro_dice", "test_dice"),
+        "IoU": _row_number(row, "iou", "IoU", "val_iou", "test_iou"),
+        "HD95": _row_number(row, "hd95", "HD95", "val_hd95", "test_hd95"),
+        "Params": _row_number(row, "params", "Params", "parameters", "num_params"),
+        "FLOPs": _row_number(row, "flops", "FLOPs"),
+        "FPS": _row_number(row, "fps", "FPS"),
+        "Inf (s)": _row_number(row, "inference_time_seconds", "Inf (s)", "Inference Time (s)"),
+        "Search Time (s)": _row_number(row, "search_time_seconds", "Search Time (s)"),
     }
 
 
@@ -417,19 +540,20 @@ def _table6_row(method: str, row: Dict[str, Any] | None) -> Dict[str, Any]:
         }
     return {
         "Method": method,
-        "Dice $\\uparrow$": _safe_float(row.get("dice")),
-        "IoU $\\uparrow$": _safe_float(row.get("iou")),
-        "HD95 $\\downarrow$": _safe_float(row.get("hd95")),
-        "Params (M)": _params_to_millions(row.get("params")),
-        "FPS $\\uparrow$": _safe_float(row.get("fps")),
-        "Inf (s) $\\downarrow$": _safe_float(row.get("inference_time_seconds", row.get("Inf (s)"))),
+        "Dice $\\uparrow$": _row_number(row, "dice", "Dice", "val_dice", "val_macro_dice", "test_dice"),
+        "IoU $\\uparrow$": _row_number(row, "iou", "IoU", "val_iou", "test_iou"),
+        "HD95 $\\downarrow$": _row_number(row, "hd95", "HD95", "val_hd95", "test_hd95"),
+        "Params (M)": _params_to_millions(_row_number(row, "params", "Params", "parameters", "num_params", "Params (M)")),
+        "FPS $\\uparrow$": _row_number(row, "fps", "FPS"),
+        "Inf (s) $\\downarrow$": _row_number(row, "inference_time_seconds", "Inf (s)", "Inference Time (s)"),
     }
 
 
 def _table6_method_comparison(outputs_root: Path, dataset: str) -> pd.DataFrame:
     base_root = outputs_root / "pgd_unet" / dataset / PGD_TEACHER_DIR
     rows = []
-    for method, relative_dir in TABLE6_METHOD_DIRS:
+    method_dirs = _discover_method_dirs(outputs_root, dataset, "3_student", TABLE6_METHOD_DIRS, include_teacher=True)
+    for method, relative_dir in method_dirs:
         metrics_path = base_root / relative_dir / "metrics_summary.csv"
         rows.append(_table6_row(method, _best_test_row_from_csv(metrics_path)))
     return pd.DataFrame(rows).reindex(columns=TABLE6_COLUMNS)
@@ -477,7 +601,8 @@ def _first_timing_row_from_csv(csv_path: Path) -> Dict[str, Any] | None:
 def _table5_timing_method_comparison(outputs_root: Path, dataset: str) -> pd.DataFrame:
     base_root = outputs_root / "pgd_unet" / dataset / PGD_TEACHER_DIR
     rows = []
-    for method, relative_dir in TABLE5_METHOD_DIRS:
+    method_dirs = _discover_method_dirs(outputs_root, dataset, "3_student", TABLE5_METHOD_DIRS)
+    for method, relative_dir in method_dirs:
         timing_path = base_root / relative_dir / "timing_summary.csv"
         rows.append(_timing_row(method, _first_timing_row_from_csv(timing_path)))
     return pd.DataFrame(rows).reindex(columns=TABLE5_COLUMNS)
@@ -486,10 +611,40 @@ def _table5_timing_method_comparison(outputs_root: Path, dataset: str) -> pd.Dat
 def _table2_pruning_method_comparison(outputs_root: Path, dataset: str) -> pd.DataFrame:
     base_root = outputs_root / "pgd_unet" / dataset / PGD_TEACHER_DIR
     rows = []
-    for method, relative_dir in TABLE2_METHOD_DIRS:
+    method_dirs = _discover_method_dirs(outputs_root, dataset, "2_pruning", TABLE2_METHOD_DIRS, include_teacher=True)
+    for method, relative_dir in method_dirs:
         metrics_path = base_root / relative_dir / "metrics_summary.csv"
         rows.append(_table6_row(method, _best_test_row_from_csv(metrics_path)))
     return pd.DataFrame(rows).reindex(columns=TABLE2_COLUMNS)
+
+
+def _table4_group_ablation_rows(dataset_metrics: pd.DataFrame) -> List[Dict[str, Any]]:
+    if dataset_metrics.empty:
+        return []
+    records = [row.to_dict() for _, row in dataset_metrics.iterrows()]
+    student_rows = [
+        row
+        for row in records
+        if str(row.get("phase") or "").lower() == "student"
+        and _row_loss_scope(row) in {"", PGD_LOSS_TAG}
+        and _row_prune_method(row)
+    ]
+    if not student_rows:
+        student_rows = [
+            row
+            for row in records
+            if str(row.get("phase") or "").lower() == "student" and _row_prune_method(row)
+        ]
+    rows = []
+    for component, methods in (
+        ("S1-S4 Blueprint", CHANNEL_METHODS),
+        ("S5-S8 Middle Conv2", MIDDLE_METHODS),
+        ("S9-S12 Full Block", FULL_METHODS),
+    ):
+        best = _best_by_dice([row for row in student_rows if _row_prune_method(row) in methods])
+        if best:
+            rows.append(_metric_row(best, "Component", component))
+    return rows
 
 
 def _loss_method(row: Dict[str, Any]) -> str:
@@ -498,10 +653,14 @@ def _loss_method(row: Dict[str, Any]) -> str:
         label = display_name.upper() if display_name.lower() in {"ce", "dice", "kl", "mse"} else display_name.replace("_", " + ").title()
         kd = _safe_int(row.get("use_kd_output", row.get("config_use_kd_output", 0)))
         return f"Proposed + {label} KD" if kd else label
-    loss_tag = str(row.get("loss_tag") or row.get("config_loss_tag") or row.get("loss_scope") or "").lower()
-    if loss_tag and loss_tag != "nan":
+    loss_tag = _row_loss_scope(row)
+    if loss_tag:
+        if loss_tag == "loss_seg_only":
+            return "Seg only"
+        if loss_tag == "loss_seg_kd":
+            return "Seg + KD"
         label = loss_tag.replace("loss_", "").replace("_", " + ")
-        return label.title()
+        return label.title().replace("Kd", "KD")
     kd = _safe_int(row.get("use_kd_output", row.get("config_use_kd_output", 0)))
     feat = _safe_int(row.get("use_feature_distill", row.get("config_use_feature_distill", 0)))
     aux = _safe_int(row.get("use_aux_loss", row.get("config_use_aux_loss", 0)))
@@ -686,12 +845,14 @@ def _tables_for_dataset(dataset: str, metrics: pd.DataFrame, timing: pd.DataFram
         if prune_method and phase == "student":
             table3_rows.append(_metric_row(row, "Method", _loss_method(row)))
 
-    for _, row_series in focus_metrics.iterrows():
-        row = row_series.to_dict()
-        phase = str(row.get("phase") or "").lower()
-        prune_method = _row_prune_method(row)
-        if prune_method and phase == "student":
-            table4_rows.append(_metric_row(row, "Component", _component(row)))
+    table4_rows = _table4_group_ablation_rows(focus_metrics)
+    if not table4_rows:
+        for _, row_series in focus_metrics.iterrows():
+            row = row_series.to_dict()
+            phase = str(row.get("phase") or "").lower()
+            prune_method = _row_prune_method(row)
+            if prune_method and phase == "student":
+                table4_rows.append(_metric_row(row, "Component", _component(row)))
 
     dataset_timing = timing[timing["dataset"].astype(str).eq(dataset)] if not timing.empty else pd.DataFrame()
     table2_rows = _build_pruning_table2_rows(focus_metrics, dataset_timing)
