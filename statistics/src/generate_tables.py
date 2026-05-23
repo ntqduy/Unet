@@ -37,7 +37,7 @@ TABLE5_METHOD_DIRS = [
     ("Full GMM Block", Path(PGD_LOSS_TAG) / "output_s12_full_gmm_auto_no" / "3_student"),
 ]
 TABLE6_COLUMNS = [
-    "PhÆ°Æ¡ng phÃ¡p",
+    "Method",
     "Dice $\\uparrow$",
     "IoU $\\uparrow$",
     "HD95 $\\downarrow$",
@@ -47,7 +47,7 @@ TABLE6_COLUMNS = [
 ]
 TABLE2_COLUMNS = TABLE6_COLUMNS
 TABLE2_METHOD_DIRS = [
-    ("GiÃ¡o viÃªn (UNet-ResNet152)", Path("1_teacher")),
+    ("Teacher (UNet-ResNet152)", Path("1_teacher")),
     ("Static pruning r = 0.5", Path(PGD_LOSS_TAG) / "output_s1_static_0.5_no" / "2_pruning"),
     ("Kneedle", Path(PGD_LOSS_TAG) / "output_s2_kneedle_auto_no" / "2_pruning"),
     ("Otsu", Path(PGD_LOSS_TAG) / "output_s3_otsu_auto_no" / "2_pruning"),
@@ -62,7 +62,7 @@ TABLE2_METHOD_DIRS = [
     ("Full GMM Block", Path(PGD_LOSS_TAG) / "output_s12_full_gmm_auto_no" / "2_pruning"),
 ]
 TABLE6_METHOD_DIRS = [
-    ("GiÃ¡o viÃªn (UNet-ResNet152)", Path("1_teacher")),
+    ("Teacher (UNet-ResNet152)", Path("1_teacher")),
     ("Static pruning r = 0.5", Path(PGD_LOSS_TAG) / "output_s1_static_0.5_no" / "3_student"),
     ("Kneedle", Path(PGD_LOSS_TAG) / "output_s2_kneedle_auto_no" / "3_student"),
     ("Otsu", Path(PGD_LOSS_TAG) / "output_s3_otsu_auto_no" / "3_student"),
@@ -407,7 +407,7 @@ def _best_test_row_from_csv(csv_path: Path) -> Dict[str, Any] | None:
 def _table6_row(method: str, row: Dict[str, Any] | None) -> Dict[str, Any]:
     if row is None:
         return {
-            "PhÆ°Æ¡ng phÃ¡p": method,
+            "Method": method,
             "Dice $\\uparrow$": np.nan,
             "IoU $\\uparrow$": np.nan,
             "HD95 $\\downarrow$": np.nan,
@@ -416,7 +416,7 @@ def _table6_row(method: str, row: Dict[str, Any] | None) -> Dict[str, Any]:
             "Inf (s) $\\downarrow$": np.nan,
         }
     return {
-        "PhÆ°Æ¡ng phÃ¡p": method,
+        "Method": method,
         "Dice $\\uparrow$": _safe_float(row.get("dice")),
         "IoU $\\uparrow$": _safe_float(row.get("iou")),
         "HD95 $\\downarrow$": _safe_float(row.get("hd95")),

@@ -4,6 +4,7 @@ import argparse
 import logging
 import re
 import textwrap
+import unicodedata
 from pathlib import Path
 from typing import Dict, List, Sequence
 
@@ -22,6 +23,8 @@ PGD_LOSS_TAGS = ("loss_seg_kd", "loss_seg_kd_sparsity", "loss_seg_only")
 CHANNEL_METHODS = {"static", "kneedle", "otsu", "gmm"}
 MIDDLE_METHODS = {"middle_static", "middle_kneedle", "middle_otsu", "middle_gmm"}
 FULL_METHODS = {"full_static", "full_kneedle", "full_otsu", "full_gmm"}
+LEGACY_METHOD_COLUMN_KEY = bytes.fromhex("7068756f6e672070686170").decode("ascii")
+LEGACY_TEACHER_LABEL_KEY = bytes.fromhex("6769616f207669656e").decode("ascii")
 FIGURE15_DATASET = "cvc_clinicdb"
 FIGURE15_FALLBACK_METHOD_DIRS = [
     ("Teacher", Path("1_teacher")),
@@ -128,7 +131,7 @@ def _read_csv(path: Path) -> pd.DataFrame:
     if not path.is_file():
         return pd.DataFrame()
     try:
-        return pd.read_csv(path)
+        return _normalize_table_labels(pd.read_csv(path))
     except Exception as error:
         logging.warning("Cannot read CSV %s | %s", path, error)
         return pd.DataFrame()
@@ -209,9 +212,60 @@ def _figure15_method_dirs(outputs_root: Path, dataset: str) -> List[tuple[str, P
     return method_dirs
 
 
+def _decode_mojibake(value: str) -> str:
+    text = str(value)
+    for _ in range(2):
+        decoded = None
+        for encoding in ("latin-1", "cp1252"):
+            try:
+                decoded = text.encode(encoding).decode("utf-8")
+                break
+            except UnicodeError:
+                continue
+        if decoded is None or decoded == text:
+            break
+        text = decoded
+    return text
+
+
+def _ascii_key(value) -> str:
+    text = _decode_mojibake(str(value or ""))
+    normalized = unicodedata.normalize("NFKD", text)
+    return normalized.encode("ascii", "ignore").decode("ascii").lower().strip()
+
+
+def _is_method_column(column) -> bool:
+    return _ascii_key(column) in {"method", LEGACY_METHOD_COLUMN_KEY}
+
+
+def _normalize_method_label(value):
+    try:
+        if pd.isna(value):
+            return value
+    except (TypeError, ValueError):
+        pass
+    text = _decode_mojibake(str(value)).strip()
+    key = _ascii_key(text)
+    if LEGACY_TEACHER_LABEL_KEY in key:
+        return "Teacher (UNet-ResNet152)" if "unet-resnet152" in key else "Teacher"
+    return text
+
+
+def _normalize_table_labels(frame: pd.DataFrame) -> pd.DataFrame:
+    if frame.empty:
+        return frame
+    frame = frame.copy()
+    rename_map = {column: "Method" for column in frame.columns if column != "Method" and _is_method_column(column)}
+    if rename_map:
+        frame = frame.rename(columns=rename_map)
+    if "Method" in frame.columns:
+        frame["Method"] = frame["Method"].map(_normalize_method_label)
+    return frame
+
+
 def _method_column(frame: pd.DataFrame) -> str | None:
-    for column in ("Method", "PhÆ°Æ¡ng phÃ¡p", "PhÃ†Â°Ã†Â¡ng phÃƒÂ¡p"):
-        if column in frame.columns:
+    for column in frame.columns:
+        if _is_method_column(column):
             return column
     return str(frame.columns[0]) if len(frame.columns) else None
 
@@ -639,7 +693,10 @@ def figure6_tradeoff(dataset_dir: Path) -> None:
     if frame.empty:
         _placeholder(path, "No after fine-tuning table metrics available for trade-off figure.")
         return
-    method_col = "Method" if "Method" in frame.columns else "PhÆ°Æ¡ng phÃ¡p" if "PhÆ°Æ¡ng phÃ¡p" in frame.columns else frame.columns[0]
+    method_col = _method_column(frame)
+    if method_col is None:
+        _placeholder(path, "No Method column available for trade-off figure.")
+        return
     dice_col = "Dice" if "Dice" in frame.columns else "Dice $\\uparrow$"
     if dice_col not in frame.columns:
         _placeholder(path, "No Dice column available for trade-off figure.")
@@ -668,7 +725,7 @@ def figure6_tradeoff(dataset_dir: Path) -> None:
         ax.scatter(group_frame["_x"], group_frame["_y"], s=52, alpha=0.88, label=group)
 
     label_candidates = frame[
-        frame[method_col].astype(str).str.contains("Teacher|GiÃ¡o viÃªn|GMM|Middle", regex=True, case=False, na=False)
+        frame[method_col].astype(str).str.contains("Teacher|GMM|Middle", regex=True, case=False, na=False)
     ]
     for offset_index, (_, row) in enumerate(label_candidates.iterrows()):
         offset = (6, 6 + 5 * (offset_index % 2))
@@ -681,7 +738,7 @@ def figure6_tradeoff(dataset_dir: Path) -> None:
             arrowprops={"arrowstyle": "-", "lw": 0.6, "alpha": 0.55},
         )
 
-    teacher = frame[frame[method_col].astype(str).str.contains("Teacher|GiÃ¡o viÃªn", regex=True, case=False, na=False)]
+    teacher = frame[frame[method_col].astype(str).str.contains("Teacher", regex=True, case=False, na=False)]
     proposed = frame[frame[method_col].astype(str).str.contains("Middle GMM|GMM", regex=True, case=False, na=False)]
     if not teacher.empty and not proposed.empty:
         src = teacher.iloc[0]
