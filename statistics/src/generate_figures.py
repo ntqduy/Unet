@@ -6,7 +6,7 @@ import re
 import textwrap
 import unicodedata
 from pathlib import Path
-from typing import Dict, List, Sequence
+from typing import Dict, Iterable, List, Sequence
 
 import numpy as np
 try:
@@ -741,12 +741,13 @@ def _representative_prune_ratio(frame: pd.DataFrame) -> float:
 
 
 def _threshold_method_label(method: str, frame: pd.DataFrame) -> str:
+    method = str(method or "").lower()
+    if _method_family(method) != "static":
+        return _display_method(method)
     ratio = _representative_prune_ratio(frame)
-    if np.isnan(_safe_float(ratio)):
-        return _display_method(method).replace(" r=auto", "").replace(" (r = auto)", "")
     label = _display_method(method, ratio)
-    if "r=" not in label and "r =" not in label:
-        label = f"{label} r={_fmt_ratio(ratio)}"
+    if np.isnan(_safe_float(ratio)):
+        return label.replace(" r=auto", "").replace(" (r = auto)", "")
     return label
 
 
@@ -910,6 +911,26 @@ def _filter_plot_role(frame: pd.DataFrame, plot_role: str) -> pd.DataFrame:
     return frame[frame["plot_role"].fillna("").astype(str).eq(plot_role)].copy()
 
 
+def _legend_below_compact(ax, *, fontsize: int = 7, max_rows: int = 2) -> None:
+    handles, labels = ax.get_legend_handles_labels()
+    if not handles:
+        return
+    ncol = min(len(labels), max(1, int(np.ceil(len(labels) / max(1, max_rows)))))
+    ax.legend(
+        handles,
+        labels,
+        loc="upper center",
+        bbox_to_anchor=(0.5, -0.22),
+        fontsize=fontsize,
+        frameon=True,
+        framealpha=0.9,
+        ncol=ncol,
+        columnspacing=0.95,
+        handlelength=1.7,
+        borderaxespad=0.2,
+    )
+
+
 def _plot_pruning_ratio_group(ax, frame: pd.DataFrame, *, title: str, xlabel: str) -> None:
     method_series = frame.get("prune_method", pd.Series(["Method"] * len(frame), index=frame.index)).astype(str).str.lower()
     ratio_series = _pruning_ratio_series(frame)
@@ -936,18 +957,7 @@ def _plot_pruning_ratio_group(ax, frame: pd.DataFrame, *, title: str, xlabel: st
     ax.set_ylabel("Pruning ratio")
     ax.set_xticks([])
     ax.grid(alpha=0.25)
-    handles, labels = ax.get_legend_handles_labels()
-    if handles:
-        ax.legend(
-            handles,
-            labels,
-            loc="upper center",
-            bbox_to_anchor=(0.5, -0.26),
-            fontsize=7,
-            frameon=True,
-            framealpha=0.9,
-            ncol=min(4, max(1, len(labels))),
-        )
+    _legend_below_compact(ax)
 
 
 def _save_pruning_ratio_group_pdf(frame: pd.DataFrame, path: Path, *, title: str, xlabel: str) -> None:
@@ -1223,6 +1233,226 @@ def _as_2d_mask(image: np.ndarray | None) -> np.ndarray | None:
 
 def _sample_metrics(outputs_root: Path, dataset: str) -> pd.DataFrame:
     return _concat_csvs(_find_dataset_files(outputs_root, dataset, "sample_metrics.csv"))
+
+
+def _sample_id_column(frame: pd.DataFrame) -> str | None:
+    return _first_existing_column(frame, ("sample_id", "case"))
+
+
+def _valid_prediction_frame(frame: pd.DataFrame) -> pd.DataFrame:
+    if frame.empty or "prediction_path" not in frame.columns:
+        return pd.DataFrame()
+    prediction = frame["prediction_path"].fillna("").astype(str)
+    return frame[~prediction.str.lower().isin({"", "nan", "none"})].copy()
+
+
+def _teacher_sample_frame(outputs_root: Path, dataset: str) -> pd.DataFrame:
+    return _read_csv(outputs_root / "pgd_unet" / dataset / PGD_TEACHER_DIR / "1_teacher" / "evaluations" / "test" / "sample_metrics.csv")
+
+
+def _student_sample_frame(outputs_root: Path, dataset: str, loss_tag: str, raw_method: str, target_ratio: float | None = None) -> pd.DataFrame:
+    loss_root = outputs_root / "pgd_unet" / dataset / PGD_TEACHER_DIR / loss_tag
+    if not loss_root.is_dir():
+        return pd.DataFrame()
+    candidates = []
+    for output_dir in loss_root.iterdir():
+        if not output_dir.is_dir() or not output_dir.name.startswith("output_"):
+            continue
+        method, ratio = _method_from_output_dir(output_dir)
+        if method != raw_method:
+            continue
+        if target_ratio is not None and not _ratio_matches(ratio, target_ratio):
+            continue
+        candidates.append((_method_sort_key(method, ratio), output_dir / "3_student" / "evaluations" / "test" / "sample_metrics.csv"))
+    for _, csv_path in sorted(candidates, key=lambda item: item[0]):
+        frame = _read_csv(csv_path)
+        if not frame.empty:
+            return frame
+    return pd.DataFrame()
+
+
+def _gallery_sample_id(outputs_root: Path, dataset: str) -> str | None:
+    candidates = [
+        _student_sample_frame(outputs_root, dataset, PGD_LOSS_TAG, "static", 0.5),
+        _student_sample_frame(outputs_root, dataset, "loss_seg_only", "static", 0.5),
+        _teacher_sample_frame(outputs_root, dataset),
+    ]
+    for frame in candidates:
+        frame = _valid_prediction_frame(frame)
+        id_col = _sample_id_column(frame)
+        if frame.empty or id_col is None:
+            continue
+        values = sorted(str(value) for value in frame[id_col].dropna().astype(str).unique())
+        if values:
+            return values[0]
+    return None
+
+
+def _row_for_sample(frame: pd.DataFrame, sample_id: str) -> Dict[str, object] | None:
+    if frame.empty:
+        return None
+    id_col = _sample_id_column(frame)
+    if id_col is None:
+        return None
+    subset = frame[frame[id_col].astype(str).eq(str(sample_id))]
+    if subset.empty:
+        return None
+    valid = _valid_prediction_frame(subset)
+    return (valid if not valid.empty else subset).iloc[0].to_dict()
+
+
+def _first_sample_image_row(frames: Iterable[pd.DataFrame], sample_id: str) -> Dict[str, object] | None:
+    for frame in frames:
+        row = _row_for_sample(frame, sample_id)
+        if row is None:
+            continue
+        if _read_image(row.get("image_path")) is not None and _read_image(row.get("mask_path")) is not None:
+            return row
+    return None
+
+
+def _gallery_group_specs() -> List[Dict[str, object]]:
+    return [
+        {
+            "figure_id": "figure20",
+            "name": "blueprint_prediction_gallery",
+            "path": "figure20_blueprint_prediction_gallery.pdf",
+            "csv": "figure20_blueprint_prediction_gallery.csv",
+            "methods": [("static", 0.5, "Static 0.5"), ("kneedle", None, "Kneedle"), ("otsu", None, "Otsu"), ("gmm", None, "GMM")],
+        },
+        {
+            "figure_id": "figure21",
+            "name": "middle_conv2_prediction_gallery",
+            "path": "figure21_middle_conv2_prediction_gallery.pdf",
+            "csv": "figure21_middle_conv2_prediction_gallery.csv",
+            "methods": [
+                ("middle_static", 0.5, "Static 0.5"),
+                ("middle_kneedle", None, "Kneedle"),
+                ("middle_otsu", None, "Otsu"),
+                ("middle_gmm", None, "GMM"),
+            ],
+        },
+        {
+            "figure_id": "figure22",
+            "name": "full_block_prediction_gallery",
+            "path": "figure22_full_block_prediction_gallery.pdf",
+            "csv": "figure22_full_block_prediction_gallery.csv",
+            "methods": [
+                ("full_static", 0.5, "Static 0.5"),
+                ("full_kneedle", None, "Kneedle"),
+                ("full_otsu", None, "Otsu"),
+                ("full_gmm", None, "GMM"),
+            ],
+        },
+    ]
+
+
+def _loss_gallery_specs() -> List[tuple[str, str]]:
+    return [("loss_seg_only", "loss_seg_only"), ("loss_seg_kd", PGD_LOSS_TAG)]
+
+
+def _dataset_display_name(dataset: str) -> str:
+    return str(dataset).replace("_", " ").upper()
+
+
+def _prediction_gallery(outputs_root: Path, save_root: Path, spec: Dict[str, object], loss_label: str, loss_tag: str) -> None:
+    gallery_dir = save_root / loss_label
+    gallery_dir.mkdir(parents=True, exist_ok=True)
+    output_path = gallery_dir / str(spec["path"])
+    methods = list(spec["methods"])
+    columns = ["Image", "GT", "Teacher", *[method_label for _, _, method_label in methods]]
+
+    rows = []
+    metadata_rows = []
+    for dataset in _datasets(outputs_root, save_root):
+        sample_id = _gallery_sample_id(outputs_root, dataset)
+        if not sample_id:
+            logging.warning("Prediction gallery has no drawable sample for %s.", dataset)
+            continue
+
+        teacher_frame = _teacher_sample_frame(outputs_root, dataset)
+        method_frames: Dict[str, pd.DataFrame] = {}
+        for raw_method, target_ratio, _ in methods:
+            method_frames[raw_method] = _student_sample_frame(outputs_root, dataset, loss_tag, raw_method, target_ratio)
+
+        image_source = _first_sample_image_row([teacher_frame, *method_frames.values()], sample_id)
+        if image_source is None:
+            logging.warning("Prediction gallery cannot load image/GT for %s sample=%s.", dataset, sample_id)
+            continue
+
+        panels = [
+            _read_image(image_source.get("image_path")),
+            _read_image(image_source.get("mask_path")),
+        ]
+        teacher_row = _row_for_sample(teacher_frame, sample_id)
+        panels.append(_read_image(teacher_row.get("prediction_path")) if teacher_row is not None else None)
+        metadata_rows.append(
+            {
+                "dataset": dataset,
+                "sample_id": sample_id,
+                "column": "Teacher",
+                "loss_tag": "teacher",
+                "method": "teacher",
+                "image_path": image_source.get("image_path"),
+                "mask_path": image_source.get("mask_path"),
+                "prediction_path": teacher_row.get("prediction_path") if teacher_row is not None else "NaN",
+            }
+        )
+
+        for raw_method, _, method_label in methods:
+            row = _row_for_sample(method_frames[raw_method], sample_id)
+            panels.append(_read_image(row.get("prediction_path")) if row is not None else None)
+            metadata_rows.append(
+                {
+                    "dataset": dataset,
+                    "sample_id": sample_id,
+                    "column": method_label,
+                    "loss_tag": loss_tag,
+                    "method": raw_method,
+                    "image_path": image_source.get("image_path"),
+                    "mask_path": image_source.get("mask_path"),
+                    "prediction_path": row.get("prediction_path") if row is not None else "NaN",
+                }
+            )
+        rows.append({"dataset": dataset, "sample_id": sample_id, "panels": panels})
+
+    pd.DataFrame(metadata_rows).to_csv(gallery_dir / str(spec["csv"]), index=False)
+    if not rows:
+        _placeholder(output_path, "No drawable gallery samples found.")
+        return
+
+    nrows = len(rows)
+    ncols = len(columns)
+    fig_width = max(11.0, min(24.0, 1.34 * ncols + 1.4))
+    fig_height = max(2.8, 1.45 * nrows + 0.85)
+    fig, axes = plt.subplots(nrows, ncols, figsize=(fig_width, fig_height), squeeze=False)
+    for col_index, label in enumerate(columns):
+        axes[0, col_index].text(0.5, 1.06, label, transform=axes[0, col_index].transAxes, ha="center", va="bottom", fontsize=7)
+    for row_index, row in enumerate(rows):
+        axes[row_index, 0].text(
+            -0.10,
+            0.5,
+            _dataset_display_name(str(row["dataset"])),
+            transform=axes[row_index, 0].transAxes,
+            ha="right",
+            va="center",
+            fontsize=8,
+        )
+        for col_index, image in enumerate(row["panels"]):
+            ax = axes[row_index, col_index]
+            ax.axis("off")
+            if image is None:
+                ax.text(0.5, 0.5, "NA", ha="center", va="center", fontsize=7, color="#777777", transform=ax.transAxes)
+                continue
+            ax.imshow(image, cmap="gray")
+    fig.subplots_adjust(left=0.08, right=0.995, top=0.91, bottom=0.02, wspace=0.03, hspace=0.08)
+    _save_pdf(fig, output_path)
+
+
+def figure_prediction_galleries(outputs_root: Path, save_root: Path) -> None:
+    for loss_label, loss_tag in _loss_gallery_specs():
+        for spec in _gallery_group_specs():
+            _prediction_gallery(outputs_root, save_root, spec, loss_label, loss_tag)
 
 
 def figure8_visual(outputs_root: Path, dataset: str, dataset_dir: Path) -> None:
@@ -1781,6 +2011,7 @@ def main() -> int:
     _run_figure("figure16_performance_clinicdb", save_root / "figure16_performance_clinicdb.pdf", figure16, outputs_root, save_root)
     _run_figure("figure18_static_ratio_mean_dice", save_root / "figure18_static_ratio_mean_dice.pdf", figure18_static_ratio_mean_dice, outputs_root, save_root)
     _run_figure("figure19_static_ratio_params_dice", save_root / "figure19_static_ratio_params_dice.pdf", figure19_static_ratio_params_dice, outputs_root, save_root)
+    _run_figure("figure20_22_prediction_galleries", save_root / "figure20_22_prediction_galleries.pdf", figure_prediction_galleries, outputs_root, save_root)
     return 0
 
 

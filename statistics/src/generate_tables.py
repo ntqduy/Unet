@@ -134,6 +134,24 @@ TABLE9_NUMERIC_COLUMNS = [
     *[f"Mean {metric}" for metric in TABLE9_METRICS],
     *[f"Std {metric}" for metric in TABLE9_METRICS],
 ]
+TABLE10_METRICS = TABLE2_COLUMNS[1:]
+TABLE10_COLUMNS = ["Method", "Runs", "Datasets", *TABLE10_METRICS]
+TABLE10_NUMERIC_COLUMNS = [
+    "Method",
+    "Runs",
+    "Datasets",
+    *[f"Mean {metric}" for metric in TABLE10_METRICS],
+    *[f"Std {metric}" for metric in TABLE10_METRICS],
+]
+TABLE11_METRICS = TABLE5_COLUMNS[1:]
+TABLE11_COLUMNS = ["Method", "Runs", "Datasets", *TABLE11_METRICS]
+TABLE11_NUMERIC_COLUMNS = [
+    "Method",
+    "Runs",
+    "Datasets",
+    *[f"Mean {metric}" for metric in TABLE11_METRICS],
+    *[f"Std {metric}" for metric in TABLE11_METRICS],
+]
 
 def _path_parts(path: Path, outputs_root: Path) -> tuple[str, ...]:
     try:
@@ -1092,6 +1110,41 @@ def _table9_method_mean(outputs_root: Path, datasets: Iterable[str]) -> tuple[pd
     return formatted, numeric
 
 
+def _mean_from_dataset_tables(
+    tables: Iterable[pd.DataFrame],
+    metrics: List[str],
+    columns: List[str],
+    numeric_columns: List[str],
+) -> tuple[pd.DataFrame, pd.DataFrame]:
+    rows: List[Dict[str, Any]] = []
+    method_order: Dict[str, int] = {}
+    for frame in tables:
+        if frame.empty or "Method" not in frame.columns:
+            continue
+        for _, row_series in frame.iterrows():
+            source = row_series.to_dict()
+            method = _clean_text(source.get("Method"))
+            if not method:
+                continue
+            entry: Dict[str, Any] = {
+                "Method": method,
+                "Dataset": _clean_text(source.get("Dataset")) or "unknown",
+            }
+            has_value = False
+            for metric in metrics:
+                value = _safe_float(source.get(metric))
+                entry[metric] = value
+                has_value = has_value or not np.isnan(value)
+            if not has_value:
+                continue
+            method_order.setdefault(method, len(method_order))
+            rows.append(entry)
+    numeric = _mean_metric_table(rows, "Method", numeric_columns, metrics)
+    numeric = _sort_by_known_order(numeric, "Method", method_order)
+    formatted = _format_mean_metric_table(numeric, "Method", metrics, columns)
+    return formatted, numeric
+
+
 def _mean_std_table(all_tables: List[pd.DataFrame]) -> pd.DataFrame:
     frames = [frame.rename(columns={"Model": "Method", "Component": "Method"}) for frame in all_tables if not frame.empty]
     if not frames:
@@ -1179,12 +1232,18 @@ def main() -> int:
         pd.DataFrame(columns=TABLE8_NUMERIC_COLUMNS).to_csv(save_root / "table8_ablation_mean_numeric.csv", index=False)
         pd.DataFrame(columns=TABLE9_COLUMNS).to_csv(save_root / "table9_method_mean.csv", index=False)
         pd.DataFrame(columns=TABLE9_NUMERIC_COLUMNS).to_csv(save_root / "table9_method_mean_numeric.csv", index=False)
+        pd.DataFrame(columns=TABLE10_COLUMNS).to_csv(save_root / "table10_pruning_mean.csv", index=False)
+        pd.DataFrame(columns=TABLE10_NUMERIC_COLUMNS).to_csv(save_root / "table10_pruning_mean_numeric.csv", index=False)
+        pd.DataFrame(columns=TABLE11_COLUMNS).to_csv(save_root / "table11_computational_cost_mean.csv", index=False)
+        pd.DataFrame(columns=TABLE11_NUMERIC_COLUMNS).to_csv(save_root / "table11_computational_cost_mean_numeric.csv", index=False)
         return 0
 
     raw_datasets = set(metrics.get("dataset", pd.Series(dtype=str)).dropna().astype(str)) | set(timing.get("dataset", pd.Series(dtype=str)).dropna().astype(str))
     datasets = sorted(dataset for dataset in raw_datasets if dataset != "unknown" and not Path(dataset).suffix)
     all_performance_tables: List[pd.DataFrame] = []
     table1_tables: List[pd.DataFrame] = []
+    table2_tables: List[pd.DataFrame] = []
+    table5_tables: List[pd.DataFrame] = []
     for dataset in datasets:
         dataset_dir = save_root / dataset
         dataset_dir.mkdir(parents=True, exist_ok=True)
@@ -1201,6 +1260,14 @@ def main() -> int:
                 table_for_mean = table.copy()
                 table_for_mean.insert(0, "Dataset", dataset)
                 table1_tables.append(table_for_mean)
+            if filename == "table2_pruning.csv" and not table.empty:
+                table_for_mean = table.copy()
+                table_for_mean.insert(0, "Dataset", dataset)
+                table2_tables.append(table_for_mean)
+            if filename == "table5_computational_cost.csv" and not table.empty:
+                table_for_mean = table.copy()
+                table_for_mean.insert(0, "Dataset", dataset)
+                table5_tables.append(table_for_mean)
             if filename != "table5_computational_cost.csv":
                 all_performance_tables.append(table)
             logging.info("Saved table: %s", output_path)
@@ -1246,6 +1313,24 @@ def main() -> int:
     table9_numeric.to_csv(table9_numeric_path, index=False)
     logging.info("Saved table: %s", table9_path)
     logging.info("Saved table: %s", table9_numeric_path)
+
+    table10, table10_numeric = _mean_from_dataset_tables(table2_tables, TABLE10_METRICS, TABLE10_COLUMNS, TABLE10_NUMERIC_COLUMNS)
+    table10_path = save_root / "table10_pruning_mean.csv"
+    table10_numeric_path = save_root / "table10_pruning_mean_numeric.csv"
+    logging.info("Processing table: table10_pruning_mean.csv rows=%d -> %s", len(table10), table10_path)
+    table10.to_csv(table10_path, index=False)
+    table10_numeric.to_csv(table10_numeric_path, index=False)
+    logging.info("Saved table: %s", table10_path)
+    logging.info("Saved table: %s", table10_numeric_path)
+
+    table11, table11_numeric = _mean_from_dataset_tables(table5_tables, TABLE11_METRICS, TABLE11_COLUMNS, TABLE11_NUMERIC_COLUMNS)
+    table11_path = save_root / "table11_computational_cost_mean.csv"
+    table11_numeric_path = save_root / "table11_computational_cost_mean_numeric.csv"
+    logging.info("Processing table: table11_computational_cost_mean.csv rows=%d -> %s", len(table11), table11_path)
+    table11.to_csv(table11_path, index=False)
+    table11_numeric.to_csv(table11_numeric_path, index=False)
+    logging.info("Saved table: %s", table11_path)
+    logging.info("Saved table: %s", table11_numeric_path)
     return 0
 
 

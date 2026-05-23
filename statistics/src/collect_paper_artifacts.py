@@ -30,6 +30,12 @@ MAIN_FIGURES = [
     ("figure17", "{dataset}/figure17_kd_vs_seg_validation_dice.pdf"),
     ("figure18", "figure18_static_ratio_mean_dice.pdf"),
     ("figure19", "figure19_static_ratio_params_dice.pdf"),
+    ("figure20_seg", "loss_seg_only/figure20_blueprint_prediction_gallery.pdf"),
+    ("figure21_seg", "loss_seg_only/figure21_middle_conv2_prediction_gallery.pdf"),
+    ("figure22_seg", "loss_seg_only/figure22_full_block_prediction_gallery.pdf"),
+    ("figure20_kd", "loss_seg_kd/figure20_blueprint_prediction_gallery.pdf"),
+    ("figure21_kd", "loss_seg_kd/figure21_middle_conv2_prediction_gallery.pdf"),
+    ("figure22_kd", "loss_seg_kd/figure22_full_block_prediction_gallery.pdf"),
 ]
 
 APPENDIX_FIGURES = [
