@@ -1788,23 +1788,6 @@ def _student_sample_frame(outputs_root: Path, dataset: str, loss_tag: str, raw_m
     return pd.DataFrame()
 
 
-def _gallery_sample_id(outputs_root: Path, dataset: str) -> str | None:
-    candidates = [
-        _student_sample_frame(outputs_root, dataset, PGD_LOSS_TAG, "static", 0.5),
-        _student_sample_frame(outputs_root, dataset, "loss_seg_only", "static", 0.5),
-        _teacher_sample_frame(outputs_root, dataset),
-    ]
-    for frame in candidates:
-        frame = _valid_prediction_frame(frame)
-        id_col = _sample_id_column(frame)
-        if frame.empty or id_col is None:
-            continue
-        values = sorted(str(value) for value in frame[id_col].dropna().astype(str).unique())
-        if values:
-            return values[0]
-    return None
-
-
 def _row_for_sample(frame: pd.DataFrame, sample_id: str) -> Dict[str, object] | None:
     if frame.empty:
         return None
@@ -1818,13 +1801,32 @@ def _row_for_sample(frame: pd.DataFrame, sample_id: str) -> Dict[str, object] | 
     return (valid if not valid.empty else subset).iloc[0].to_dict()
 
 
-def _first_sample_image_row(frames: Iterable[pd.DataFrame], sample_id: str) -> Dict[str, object] | None:
-    for frame in frames:
-        row = _row_for_sample(frame, sample_id)
-        if row is None:
+def _row_prediction_is_drawable(row: Dict[str, object] | None) -> bool:
+    return row is not None and _read_image(row.get("prediction_path")) is not None
+
+
+def _strict_gallery_sample(anchor_frame: pd.DataFrame, required_prediction_frames: Iterable[pd.DataFrame]) -> tuple[str, Dict[str, object]] | None:
+    anchor_frame = _valid_prediction_frame(anchor_frame)
+    id_col = _sample_id_column(anchor_frame)
+    if anchor_frame.empty or id_col is None:
+        return None
+    sample_ids = sorted(str(value) for value in anchor_frame[id_col].dropna().astype(str).unique())
+    for sample_id in sample_ids:
+        anchor_row = _row_for_sample(anchor_frame, sample_id)
+        if anchor_row is None:
             continue
-        if _read_image(row.get("image_path")) is not None and _read_image(row.get("mask_path")) is not None:
-            return row
+        if _read_image(anchor_row.get("image_path")) is None or _read_image(anchor_row.get("mask_path")) is None:
+            continue
+        if not _row_prediction_is_drawable(anchor_row):
+            continue
+        valid = True
+        for frame in required_prediction_frames:
+            row = _row_for_sample(frame, sample_id)
+            if not _row_prediction_is_drawable(row):
+                valid = False
+                break
+        if valid:
+            return sample_id, anchor_row
     return None
 
 
@@ -1882,25 +1884,58 @@ def _prediction_gallery(outputs_root: Path, save_root: Path, spec: Dict[str, obj
     rows = []
     metadata_rows = []
     for dataset in _datasets(outputs_root, save_root):
-        sample_id = _gallery_sample_id(outputs_root, dataset)
-        if not sample_id:
-            logging.warning("Prediction gallery has no drawable sample for %s.", dataset)
-            continue
-
         teacher_frame = _teacher_sample_frame(outputs_root, dataset)
         method_frames: Dict[str, pd.DataFrame] = {}
         for raw_method, target_ratio, _ in methods:
             method_frames[raw_method] = _student_sample_frame(outputs_root, dataset, loss_tag, raw_method, target_ratio)
 
-        image_source = _first_sample_image_row([teacher_frame, *method_frames.values()], sample_id)
-        if image_source is None:
-            logging.warning("Prediction gallery cannot load image/GT for %s sample=%s.", dataset, sample_id)
+        anchor_method = str(methods[0][0])
+        anchor_frame = method_frames.get(anchor_method, pd.DataFrame())
+        strict_sample = _strict_gallery_sample(anchor_frame, [teacher_frame, *method_frames.values()])
+        if strict_sample is None:
+            logging.warning(
+                "Prediction gallery skips %s/%s/%s because no exact static-ratio sample has image, GT, teacher prediction, and all method predictions.",
+                dataset,
+                loss_tag,
+                spec["name"],
+            )
             continue
+        sample_id, image_source = strict_sample
 
         panels = [
             _read_image(image_source.get("image_path")),
             _read_image(image_source.get("mask_path")),
         ]
+        metadata_rows.extend(
+            [
+                {
+                    "dataset": dataset,
+                    "sample_id": sample_id,
+                    "column": "Image",
+                    "loss_tag": loss_tag,
+                    "method": "image",
+                    "anchor_method": anchor_method,
+                    "source_csv_path": image_source.get("csv_source_path", image_source.get("source_path", "")),
+                    "image_path": image_source.get("image_path"),
+                    "mask_path": image_source.get("mask_path"),
+                    "prediction_path": "NaN",
+                    "strict_exact_sample": True,
+                },
+                {
+                    "dataset": dataset,
+                    "sample_id": sample_id,
+                    "column": "GT",
+                    "loss_tag": loss_tag,
+                    "method": "ground_truth",
+                    "anchor_method": anchor_method,
+                    "source_csv_path": image_source.get("csv_source_path", image_source.get("source_path", "")),
+                    "image_path": image_source.get("image_path"),
+                    "mask_path": image_source.get("mask_path"),
+                    "prediction_path": "NaN",
+                    "strict_exact_sample": True,
+                },
+            ]
+        )
         teacher_row = _row_for_sample(teacher_frame, sample_id)
         panels.append(_read_image(teacher_row.get("prediction_path")) if teacher_row is not None else None)
         metadata_rows.append(
@@ -1910,9 +1945,14 @@ def _prediction_gallery(outputs_root: Path, save_root: Path, spec: Dict[str, obj
                 "column": "Teacher",
                 "loss_tag": "teacher",
                 "method": "teacher",
+                "anchor_method": anchor_method,
+                "source_csv_path": teacher_row.get("csv_source_path", teacher_row.get("source_path", "")) if teacher_row is not None else "NaN",
                 "image_path": image_source.get("image_path"),
                 "mask_path": image_source.get("mask_path"),
+                "row_image_path": teacher_row.get("image_path") if teacher_row is not None else "NaN",
+                "row_mask_path": teacher_row.get("mask_path") if teacher_row is not None else "NaN",
                 "prediction_path": teacher_row.get("prediction_path") if teacher_row is not None else "NaN",
+                "strict_exact_sample": True,
             }
         )
 
@@ -1926,9 +1966,14 @@ def _prediction_gallery(outputs_root: Path, save_root: Path, spec: Dict[str, obj
                     "column": method_label,
                     "loss_tag": loss_tag,
                     "method": raw_method,
+                    "anchor_method": anchor_method,
+                    "source_csv_path": row.get("csv_source_path", row.get("source_path", "")) if row is not None else "NaN",
                     "image_path": image_source.get("image_path"),
                     "mask_path": image_source.get("mask_path"),
+                    "row_image_path": row.get("image_path") if row is not None else "NaN",
+                    "row_mask_path": row.get("mask_path") if row is not None else "NaN",
                     "prediction_path": row.get("prediction_path") if row is not None else "NaN",
+                    "strict_exact_sample": True,
                 }
             )
         rows.append({"dataset": dataset, "sample_id": sample_id, "panels": panels})
