@@ -1487,7 +1487,6 @@ def _plot_pruning_ratio_group(ax, frame: pd.DataFrame, *, title: str, xlabel: st
             label=label,
             color=colors[index % len(colors)] if colors else None,
         )
-    ax.set_title(title, fontsize=10, fontweight="semibold", pad=7)
     ax.set_xlabel(xlabel)
     ax.set_ylabel("Pruning ratio")
     ax.set_xticks([])
