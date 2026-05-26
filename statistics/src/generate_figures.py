@@ -1441,22 +1441,20 @@ def _filter_plot_role(frame: pd.DataFrame, plot_role: str) -> pd.DataFrame:
     return frame[frame["plot_role"].fillna("").astype(str).eq(plot_role)].copy()
 
 
-def _legend_below_compact(ax, *, fontsize: int = 7, max_rows: int = 2) -> None:
+def _legend_below_single_row(ax, *, fontsize: int = 7.5) -> None:
     handles, labels = ax.get_legend_handles_labels()
     if not handles:
         return
-    ncol = min(len(labels), max(1, int(np.ceil(len(labels) / max(1, max_rows)))))
     ax.legend(
         handles,
         labels,
         loc="upper center",
-        bbox_to_anchor=(0.5, -0.22),
+        bbox_to_anchor=(0.5, -0.20),
         fontsize=fontsize,
-        frameon=True,
-        framealpha=0.9,
-        ncol=ncol,
-        columnspacing=0.95,
-        handlelength=1.7,
+        frameon=False,
+        ncol=len(labels),
+        columnspacing=1.15,
+        handlelength=1.9,
         borderaxespad=0.2,
     )
 
@@ -1466,7 +1464,11 @@ def _plot_pruning_ratio_group(ax, frame: pd.DataFrame, *, title: str, xlabel: st
     ratio_series = _pruning_ratio_series(frame)
     grouped_keys = pd.DataFrame({"method": method_series, "ratio": ratio_series}, index=frame.index)
     colors = plt.rcParams["axes.prop_cycle"].by_key().get("color", [])
-    for index, ((method, ratio), group_index) in enumerate(grouped_keys.groupby(["method", "ratio"], dropna=False).groups.items()):
+    grouped_items = sorted(
+        grouped_keys.groupby(["method", "ratio"], dropna=False, sort=False).groups.items(),
+        key=lambda item: _method_sort_key(item[0][0], item[0][1]),
+    )
+    for index, ((method, ratio), group_index) in enumerate(grouped_items):
         group = frame.loc[list(group_index)]
         if "plot_index" in group.columns:
             group = group.assign(_plot_index=pd.to_numeric(group["plot_index"], errors="coerce")).sort_values(["_plot_index", "layer_name"], na_position="last")
@@ -1480,14 +1482,20 @@ def _plot_pruning_ratio_group(ax, frame: pd.DataFrame, *, title: str, xlabel: st
             np.arange(1, len(ratios) + 1),
             ratios,
             linewidth=1.6,
+            marker="o",
+            markersize=2.8,
             label=label,
             color=colors[index % len(colors)] if colors else None,
         )
+    ax.set_title(title, fontsize=10, fontweight="semibold", pad=7)
     ax.set_xlabel(xlabel)
     ax.set_ylabel("Pruning ratio")
     ax.set_xticks([])
-    ax.grid(alpha=0.25)
-    _legend_below_compact(ax)
+    ax.grid(axis="y", alpha=0.25, linewidth=0.7)
+    ax.spines["top"].set_visible(False)
+    ax.spines["right"].set_visible(False)
+    ax.tick_params(axis="both", labelsize=8)
+    _legend_below_single_row(ax)
 
 
 def _save_pruning_ratio_group_pdf(frame: pd.DataFrame, path: Path, *, title: str, xlabel: str) -> None:
