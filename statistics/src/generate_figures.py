@@ -1350,6 +1350,7 @@ def figure5_layerwise(outputs_root: Path, dataset: str, dataset_dir: Path) -> No
     if frame.empty or "actual_prune_ratio" not in frame.columns:
         _placeholder(path, f"No pruning summary rows found for {dataset}.")
         return
+    frame = _keep_canonical_static_ratio(frame)
 
     output_paths = {
         "blueprint": dataset_dir / "figure5_blueprint_stage_pruning_ratio.pdf",
@@ -1415,6 +1416,18 @@ def _pruning_ratio_series(frame: pd.DataFrame) -> pd.Series:
             continue
         ratios.loc[index] = _configured_static_ratio_from_row(row_series)
     return ratios
+
+
+def _keep_canonical_static_ratio(frame: pd.DataFrame, target_ratio: float = CANONICAL_STATIC_RATIO) -> pd.DataFrame:
+    if frame.empty or "prune_method" not in frame.columns:
+        return frame.copy()
+    method_series = frame["prune_method"].fillna("").astype(str).str.lower()
+    static_mask = method_series.map(_method_family).eq("static")
+    if not static_mask.any():
+        return frame.copy()
+    static_ratios = frame.apply(_configured_static_ratio_from_row, axis=1)
+    canonical_static_mask = static_mask & (pd.to_numeric(static_ratios, errors="coerce") - float(target_ratio)).abs().lt(1e-9)
+    return frame[~static_mask | canonical_static_mask].copy()
 
 
 def _filter_pruning_group(frame: pd.DataFrame, methods: set[str]) -> pd.DataFrame:
