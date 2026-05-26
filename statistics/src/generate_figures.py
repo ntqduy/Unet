@@ -1441,6 +1441,26 @@ def _filter_plot_role(frame: pd.DataFrame, plot_role: str) -> pd.DataFrame:
     return frame[frame["plot_role"].fillna("").astype(str).eq(plot_role)].copy()
 
 
+def _legend_below_compact(ax, *, fontsize: int = 7, max_rows: int = 2) -> None:
+    handles, labels = ax.get_legend_handles_labels()
+    if not handles:
+        return
+    ncol = min(len(labels), max(1, int(np.ceil(len(labels) / max(1, max_rows)))))
+    ax.legend(
+        handles,
+        labels,
+        loc="upper center",
+        bbox_to_anchor=(0.5, -0.22),
+        fontsize=fontsize,
+        frameon=True,
+        framealpha=0.9,
+        ncol=ncol,
+        columnspacing=0.95,
+        handlelength=1.7,
+        borderaxespad=0.2,
+    )
+
+
 def _legend_below_single_row(ax, *, fontsize: int = 7.5) -> None:
     handles, labels = ax.get_legend_handles_labels()
     if not handles:
