@@ -19,6 +19,11 @@ except ImportError as error:  # pragma: no cover - dependency guard
     raise SystemExit("Missing dependency: pandas/matplotlib. Install project requirements with `pip install -r requirements.txt`.") from error
 
 PGD_TEACHER_DIR = "unet_resnet152_teacher"
+TEACHER_LABELS = {
+    "unet_plus_plus_teacher": "Teacher (UNet++)",
+    "unet_resnet152_teacher": "Teacher (UNet-ResNet152)",
+    "unet_teacher": "Teacher (UNet)",
+}
 PGD_LOSS_TAG = "loss_seg_kd"
 PGD_LOSS_TAGS = (PGD_LOSS_TAG,)
 PGD_COMPARISON_LOSS_TAGS = (PGD_LOSS_TAG, "loss_seg_only")
@@ -44,6 +49,15 @@ FIGURE15_FALLBACK_METHOD_DIRS = [
     ("Full Otsu", Path(PGD_LOSS_TAG) / "output_s11_full_otsu_auto_no" / "3_student"),
     ("Full GMM", Path(PGD_LOSS_TAG) / "output_s12_full_gmm_auto_no" / "3_student"),
 ]
+
+
+def configure_teacher_dir(teacher_dir: str) -> None:
+    global PGD_TEACHER_DIR
+    PGD_TEACHER_DIR = str(teacher_dir).strip() or "unet_resnet152_teacher"
+
+
+def _teacher_display_label() -> str:
+    return TEACHER_LABELS.get(PGD_TEACHER_DIR, f"Teacher ({PGD_TEACHER_DIR.removesuffix('_teacher')})")
 
 
 def _safe_float(value, default: float = np.nan) -> float:
@@ -503,7 +517,7 @@ def _normalize_method_label(value):
     text = _decode_mojibake(str(value)).strip()
     key = _ascii_key(text)
     if LEGACY_TEACHER_LABEL_KEY in key:
-        return "Teacher (UNet-ResNet152)" if "unet-resnet152" in key else "Teacher"
+        return _teacher_display_label() if "unet" in key else "Teacher"
     return text
 
 
@@ -2669,6 +2683,7 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Generate paper-ready PDF figures from outputs/statistics tables.")
     parser.add_argument("--outputs-root", type=str, default="outputs")
     parser.add_argument("--save-root", type=str, default="statistics/outputs")
+    parser.add_argument("--pgd-teacher-dir", type=str, default=PGD_TEACHER_DIR)
     parser.add_argument("--failure-topk", type=int, default=5)
     return parser.parse_args()
 
@@ -2676,6 +2691,7 @@ def parse_args() -> argparse.Namespace:
 def main() -> int:
     args = parse_args()
     logging.basicConfig(level=logging.INFO, format="[%(levelname)s] %(message)s")
+    configure_teacher_dir(args.pgd_teacher_dir)
     outputs_root = Path(args.outputs_root)
     save_root = Path(args.save_root)
     save_root.mkdir(parents=True, exist_ok=True)

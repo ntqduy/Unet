@@ -14,6 +14,11 @@ except ImportError as error:  # pragma: no cover - dependency guard
 
 
 PGD_TEACHER_DIR = "unet_resnet152_teacher"
+TEACHER_LABELS = {
+    "unet_plus_plus_teacher": "Teacher (UNet++)",
+    "unet_resnet152_teacher": "Teacher (UNet-ResNet152)",
+    "unet_teacher": "Teacher (UNet)",
+}
 PGD_LOSS_TAG = "loss_seg_kd"
 PGD_LOSS_TAGS = {PGD_LOSS_TAG}
 PGD_COMPARISON_LOSS_TAGS = {PGD_LOSS_TAG, "loss_seg_only"}
@@ -51,7 +56,7 @@ TABLE6_COLUMNS = [
 ]
 TABLE2_COLUMNS = TABLE6_COLUMNS
 TABLE2_METHOD_DIRS = [
-    ("Teacher (UNet-ResNet152)", Path("1_teacher")),
+    ("Teacher", Path("1_teacher")),
     ("Static pruning r = 0.5", Path(PGD_LOSS_TAG) / "output_s1_static_0.5_no" / "2_pruning"),
     ("Kneedle", Path(PGD_LOSS_TAG) / "output_s2_kneedle_auto_no" / "2_pruning"),
     ("Otsu", Path(PGD_LOSS_TAG) / "output_s3_otsu_auto_no" / "2_pruning"),
@@ -66,7 +71,7 @@ TABLE2_METHOD_DIRS = [
     ("Full GMM Block", Path(PGD_LOSS_TAG) / "output_s12_full_gmm_auto_no" / "2_pruning"),
 ]
 TABLE6_METHOD_DIRS = [
-    ("Teacher (UNet-ResNet152)", Path("1_teacher")),
+    ("Teacher", Path("1_teacher")),
     ("Static pruning r = 0.5", Path(PGD_LOSS_TAG) / "output_s1_static_0.5_no" / "3_student"),
     ("Kneedle", Path(PGD_LOSS_TAG) / "output_s2_kneedle_auto_no" / "3_student"),
     ("Otsu", Path(PGD_LOSS_TAG) / "output_s3_otsu_auto_no" / "3_student"),
@@ -153,6 +158,16 @@ TABLE11_NUMERIC_COLUMNS = [
     *[f"Mean {metric}" for metric in TABLE11_METRICS],
     *[f"Std {metric}" for metric in TABLE11_METRICS],
 ]
+
+
+def configure_teacher_dir(teacher_dir: str) -> None:
+    global PGD_TEACHER_DIR
+    PGD_TEACHER_DIR = str(teacher_dir).strip() or "unet_resnet152_teacher"
+
+
+def _teacher_display_label() -> str:
+    return TEACHER_LABELS.get(PGD_TEACHER_DIR, f"Teacher ({PGD_TEACHER_DIR.removesuffix('_teacher')})")
+
 
 def _path_parts(path: Path, outputs_root: Path) -> tuple[str, ...]:
     try:
@@ -376,7 +391,7 @@ def _discover_method_dirs(
     method_dirs = sorted(discovered, key=lambda item: item[0])
     rows = [(label, relative_dir) for _, label, relative_dir in method_dirs]
     if include_teacher:
-        return [("Teacher (UNet-ResNet152)", Path("1_teacher")), *rows]
+        return [(_teacher_display_label(), Path("1_teacher")), *rows]
     return rows
 
 
@@ -875,7 +890,7 @@ def _build_pruning_table2_rows(dataset_metrics: pd.DataFrame, dataset_timing: pd
     rows: List[Dict[str, Any]] = []
     teacher = _best_by_dice(teacher_rows)
     if teacher:
-        rows.append(_table2_entry(teacher, "Reference", "Teacher (UNet-ResNet152)", dataset_timing, raw_method="teacher", source_phase="teacher"))
+        rows.append(_table2_entry(teacher, "Reference", _teacher_display_label(), dataset_timing, raw_method="teacher", source_phase="teacher"))
 
     static_rows = [row for row in pruning_rows if _row_prune_method(row) == "static"]
     static_rows = sorted(static_rows, key=lambda row: (_row_static_ratio(row), -_safe_float(row.get("dice"))))
@@ -1256,12 +1271,14 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Generate paper-ready tables from existing outputs.")
     parser.add_argument("--outputs-root", type=str, default="outputs")
     parser.add_argument("--save-root", type=str, default="statistics/outputs")
+    parser.add_argument("--pgd-teacher-dir", type=str, default=PGD_TEACHER_DIR)
     return parser.parse_args()
 
 
 def main() -> int:
     args = parse_args()
     logging.basicConfig(level=logging.INFO, format="[%(levelname)s] %(message)s")
+    configure_teacher_dir(args.pgd_teacher_dir)
     outputs_root = Path(args.outputs_root)
     save_root = Path(args.save_root)
     save_root.mkdir(parents=True, exist_ok=True)
