@@ -12,10 +12,37 @@ cd "$PROJECT_ROOT"
 
 EXP_NAME="${EXP_NAME:-pgd_${DATASET_KEY}}"
 
-# Keep outputs outside scripts/ and preserve the existing output layout.
+# TEACHER_MODEL runs one teacher; TEACHER_MODELS can run several teachers.
+# Choices come from networks/net_factory.py:
+#   unet, resunet, vnet, unetr, unet_resnet152, att_unet, r2unet, unet_plus_plus
+TEACHER_MODEL_DEFAULT="${TEACHER_MODEL:-unet_plus_plus}"
+TEACHER_MODELS_STRING="${TEACHER_MODELS:-$TEACHER_MODEL_DEFAULT}"
+read -r -a TEACHER_MODEL_LIST <<< "$TEACHER_MODELS_STRING"
+if [ "${#TEACHER_MODEL_LIST[@]}" -eq 0 ]; then
+  TEACHER_MODEL_LIST=("unet_resnet152")
+fi
+
+# Keep train outputs outside scripts/ and preserve the original PGD layout:
+# outputs/pgd_unet/<dataset>/<teacher>_teacher/...
 PROJECT_DIR="${PROJECT_DIR:-$PROJECT_ROOT}"
-OUTPUT_ROOT="${OUTPUT_ROOT:-outputs}"
-TEACHER_OUTPUT_ROOT="${TEACHER_OUTPUT_ROOT:-$OUTPUT_ROOT}"
+USER_OUTPUT_ROOT="${OUTPUT_ROOT:-}"
+USER_TEACHER_OUTPUT_ROOT="${TEACHER_OUTPUT_ROOT:-}"
+
+configure_teacher_run() {
+  local teacher_model="$1"
+  export TEACHER_MODEL="$teacher_model"
+  if [ -n "$USER_OUTPUT_ROOT" ]; then
+    export OUTPUT_ROOT="$USER_OUTPUT_ROOT"
+  else
+    export OUTPUT_ROOT="outputs"
+  fi
+
+  if [ -n "$USER_TEACHER_OUTPUT_ROOT" ]; then
+    export TEACHER_OUTPUT_ROOT="$USER_TEACHER_OUTPUT_ROOT"
+  else
+    export TEACHER_OUTPUT_ROOT="$OUTPUT_ROOT"
+  fi
+}
 
 # Keep step-3 pruning/recovery disabled by default for all S1-S12 batch runs.
 # Override STEP3_PRUNING=1 and set STEP3_PRUNING_EPOCHS>0 only when needed.
@@ -73,6 +100,7 @@ export_if_set() {
 
 for variable_name in \
   DATASET_KEY ROOT_PATH EXP_NAME PROJECT_DIR OUTPUT_ROOT TEACHER_OUTPUT_ROOT \
+  TEACHER_MODELS \
   SKIP_IF_LAST_EXISTS FORCE_RETRAIN_TEACHER FORCE_REPRUNE FORCE_RETRAIN_STUDENT \
   STEP3_PRUNING STEP3_PRUNING_EPOCHS TEACHER_MODEL MAX_EPOCHS_TEACHER MAX_EPOCHS_STUDENT \
   BATCH_SIZE NUM_WORKERS PATCH_SIZE_H PATCH_SIZE_W \
@@ -116,48 +144,56 @@ run_pgd_strategy_once() {
   fi
 }
 
-for loss_variant in "${LOSS_VARIANT_LIST[@]}"; do
-  case "$loss_variant" in
-    seg_only)
-      export USE_KD_OUTPUT=0
-      export LAMBDA_DISTILL=0
-      export USE_SPARSITY=0
-      export USE_FEATURE_DISTILL=0
-      export USE_AUX_LOSS=0
-      export LOSS_METHOD=""
-      ;;
-    seg_kd)
-      export USE_KD_OUTPUT=1
-      export LAMBDA_DISTILL="$DEFAULT_LAMBDA_DISTILL"
-      export USE_SPARSITY=0
-      export USE_FEATURE_DISTILL=0
-      export USE_AUX_LOSS=0
-      export DISTILL_LOSS_METHOD="$DEFAULT_DISTILL_LOSS_METHOD"
-      export LOSS_METHOD=""
-      ;;
-    *)
-      echo "Unsupported LOSS_VARIANTS entry: $loss_variant. Use seg_only and/or seg_kd."
-      exit 1
-      ;;
-  esac
+for teacher_model in "${TEACHER_MODEL_LIST[@]}"; do
+  configure_teacher_run "$teacher_model"
+  PGD_RUN_INDEX=0
+  PGD_ACTIVE_PIDS=()
 
-  echo "============================================================"
-  echo "Dataset: $DATASET_KEY"
-  echo "Loss variant: $loss_variant"
-  echo "Strategies: S1-S12"
-  echo "============================================================"
-
-  for strategy in S1 S2 S3 S4 S5 S6 S7 S8 S9 S10 S11 S12; do
-    case "$strategy" in
-      S1|S5|S9)
-        for ratio in "${STATIC_RATE_LIST[@]}"; do
-          run_pgd_strategy_once "$strategy" "$ratio"
-        done
+  for loss_variant in "${LOSS_VARIANT_LIST[@]}"; do
+    case "$loss_variant" in
+      seg_only)
+        export USE_KD_OUTPUT=0
+        export LAMBDA_DISTILL=0
+        export USE_SPARSITY=0
+        export USE_FEATURE_DISTILL=0
+        export USE_AUX_LOSS=0
+        export LOSS_METHOD=""
+        ;;
+      seg_kd)
+        export USE_KD_OUTPUT=1
+        export LAMBDA_DISTILL="$DEFAULT_LAMBDA_DISTILL"
+        export USE_SPARSITY=0
+        export USE_FEATURE_DISTILL=0
+        export USE_AUX_LOSS=0
+        export DISTILL_LOSS_METHOD="$DEFAULT_DISTILL_LOSS_METHOD"
+        export LOSS_METHOD=""
         ;;
       *)
-        run_pgd_strategy_once "$strategy"
-      ;;
+        echo "Unsupported LOSS_VARIANTS entry: $loss_variant. Use seg_only and/or seg_kd."
+        exit 1
+        ;;
     esac
+
+    echo "============================================================"
+    echo "Dataset: $DATASET_KEY"
+    echo "Teacher model: $TEACHER_MODEL"
+    echo "Output root: $OUTPUT_ROOT"
+    echo "Loss variant: $loss_variant"
+    echo "Strategies: S1-S12"
+    echo "============================================================"
+
+    for strategy in S1 S2 S3 S4 S5 S6 S7 S8 S9 S10 S11 S12; do
+      case "$strategy" in
+        S1|S5|S9)
+          for ratio in "${STATIC_RATE_LIST[@]}"; do
+            run_pgd_strategy_once "$strategy" "$ratio"
+          done
+          ;;
+        *)
+          run_pgd_strategy_once "$strategy"
+          ;;
+      esac
+    done
+    wait_for_all_pgd_jobs
   done
-  wait_for_all_pgd_jobs
 done
